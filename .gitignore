@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+debug.log
+ollama_raw.txt
+extracted.json
+test_output.pdf
+.env

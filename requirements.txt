@@ -1,0 +1,8 @@
+flask
+flask-cors
+python-pptx
+requests
+reportlab
+olefile
+pypdf
+gunicorn

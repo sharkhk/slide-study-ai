@@ -1,0 +1,1720 @@
+import io
+import re
+import uuid
+import json
+import os
+import time
+import secrets
+import threading
+import traceback as _tb
+import logging
+import requests as http
+from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+
+# ── File logger ────────────────────────────────────────────────────────────────
+_LOG_FILE = os.path.join(os.path.dirname(__file__), "debug.log")
+logging.basicConfig(
+    filename=_LOG_FILE, level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+_log = logging.getLogger("app")
+from flask import Flask, request, jsonify, send_file, send_from_directory, Response, stream_with_context
+from flask_cors import CORS
+from pptx import Presentation
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import (
+    BaseDocTemplate, Frame, PageTemplate,
+    Paragraph, Spacer, Table, TableStyle,
+    HRFlowable, KeepTogether
+)
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+
+DIST         = os.path.join(os.path.dirname(__file__), "dist")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
+
+DETAIL = {
+    "brief":    {"slide_chars": 400,  "max_slides": 30,  "keywords": "8-10",  "bullets": "2-4",  "n_flash": 6,  "n_mcq": 5,  "num_predict": 2048},
+    "standard": {"slide_chars": 700,  "max_slides": 60,  "keywords": "18-25", "bullets": "3-8",  "n_flash": 14, "n_mcq": 10, "num_predict": 4096},
+    "detailed": {"slide_chars": 1200, "max_slides": 120, "keywords": "25-35", "bullets": "5-12", "n_flash": 20, "n_mcq": 15, "num_predict": 6000},
+}
+
+app = Flask(__name__, static_folder=DIST, static_url_path="")
+app.config['SECRET_KEY'] = secrets.token_hex(32)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload limit
+CORS(app, origins="*")
+
+# ── Visitor tracking ──────────────────────────────────────────────────────────
+ADMIN_TOKEN  = os.environ.get("ADMIN_TOKEN", "admin123")
+_visitors    = []
+_vis_lock    = threading.Lock()
+_blocked_ips = set()   # IPs that are blocked from using the app
+
+_PRIVATE_RANGES = (
+    "127.", "::1", "10.", "192.168.", "172.16.", "172.17.", "172.18.",
+    "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+    "172.25.", "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+    "172.31.", "0.0.0.0",
+)
+
+def _is_private(ip):
+    return any(ip.startswith(p) for p in _PRIVATE_RANGES)
+
+def _enrich_geo(entry, ip):
+    """Background thread: full geolocation via ip-api.com."""
+    if _is_private(ip):
+        with _vis_lock:
+            entry["country"] = "Local / LAN"
+            entry["region"]  = ""
+            entry["city"]    = "localhost"
+            entry["isp"]     = "private network"
+            entry["lat"]     = ""
+            entry["lon"]     = ""
+        return
+    try:
+        r = http.get(
+            f"http://ip-api.com/json/{ip}"
+            f"?fields=status,country,countryCode,regionName,city,isp,org,lat,lon",
+            timeout=5
+        )
+        d = r.json()
+        if d.get("status") != "success":
+            return
+        with _vis_lock:
+            entry["country"] = d.get("country", "")
+            entry["region"]  = d.get("regionName", "")
+            entry["city"]    = d.get("city", "")
+            entry["isp"]     = d.get("org") or d.get("isp", "")
+            entry["lat"]     = d.get("lat", "")
+            entry["lon"]     = d.get("lon", "")
+    except Exception:
+        pass
+
+@app.before_request
+def track_visitor():
+    skip = ("/assets/", "/favicon", "/admin")
+    if any(request.path.startswith(s) for s in skip):
+        # still enforce block on non-admin paths
+        pass
+    ip = (request.headers.get("CF-Connecting-IP") or
+          request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or
+          request.remote_addr or "unknown")
+
+    # Block check — return 403 immediately for blocked IPs (except admin itself)
+    if ip in _blocked_ips and not request.path.startswith("/admin"):
+        from flask import abort
+        abort(403)
+
+    if any(request.path.startswith(s) for s in ("/assets/", "/favicon")):
+        return
+
+    entry = {
+        "time":    time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+        "ip":      ip,
+        "country": request.headers.get("CF-IPCountry", ""),
+        "region":  "",
+        "city":    "",
+        "isp":     "",
+        "lat":     "",
+        "lon":     "",
+        "path":    request.path,
+        "method":  request.method,
+        "ua":      (request.headers.get("User-Agent") or "")[:160],
+    }
+    with _vis_lock:
+        _visitors.insert(0, entry)
+        if len(_visitors) > 1000:
+            _visitors.pop()
+    # Always enrich — CF headers don't give city/ISP/coords
+    threading.Thread(target=_enrich_geo, args=(entry, ip), daemon=True).start()
+
+
+@app.route("/admin/block", methods=["POST"])
+def admin_block():
+    if request.args.get("token") != ADMIN_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 401
+    ip = request.json.get("ip", "").strip()
+    if not ip:
+        return jsonify({"error": "No IP"}), 400
+    with _vis_lock:
+        _blocked_ips.add(ip)
+    return jsonify({"ok": True, "blocked": ip})
+
+
+@app.route("/admin/unblock", methods=["POST"])
+def admin_unblock():
+    if request.args.get("token") != ADMIN_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 401
+    ip = request.json.get("ip", "").strip()
+    with _vis_lock:
+        _blocked_ips.discard(ip)
+    return jsonify({"ok": True, "unblocked": ip})
+
+
+@app.route("/admin/clear", methods=["POST"])
+def admin_clear_log():
+    if request.args.get("token") != ADMIN_TOKEN:
+        return jsonify({"error": "Unauthorized"}), 401
+    with _vis_lock:
+        _visitors.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/admin")
+def admin_page():
+    if request.args.get("token") != ADMIN_TOKEN:
+        return ("<h2 style='font-family:sans-serif;margin:2rem'>🔒 Unauthorized — "
+                "add <code>?token=YOUR_TOKEN</code> to the URL</h2>"), 401
+    token = ADMIN_TOKEN
+    with _vis_lock:
+        vis_copy     = list(_visitors)
+        blocked_copy = set(_blocked_ips)
+
+    def flag(cc):
+        # Convert 2-letter country code to emoji flag
+        if not cc or len(cc) != 2:
+            return ""
+        return "".join(chr(0x1F1E6 + ord(c) - ord('A')) for c in cc.upper())
+
+    rows = ""
+    for v in vis_copy:
+        blocked = v["ip"] in blocked_copy
+        cc = ""
+        # Try to extract country code from country name via CF header stored separately
+        loc_parts = [p for p in [v.get("city",""), v.get("region",""), v.get("country","")] if p]
+        location  = ", ".join(loc_parts) if loc_parts else "—"
+        map_link  = ""
+        if v.get("lat") and v.get("lon"):
+            map_link = f'<a href="https://maps.google.com/?q={v["lat"]},{v["lon"]}" target="_blank" style="color:#4f8ef7;font-size:11px">📍 map</a>'
+        block_btn = (
+            f'<button onclick="unblock(\'{v["ip"]}\')" '
+            f'style="background:#16a34a;color:#fff;border:none;padding:3px 10px;border-radius:6px;cursor:pointer;font-size:12px">✓ Unblock</button>'
+            if blocked else
+            f'<button onclick="blockIp(\'{v["ip"]}\')" '
+            f'style="background:#dc2626;color:#fff;border:none;padding:3px 10px;border-radius:6px;cursor:pointer;font-size:12px">⛔ Block</button>'
+        )
+        row_style = "background:#1a0a0a" if blocked else ""
+        rows += f"""
+          <tr style="{row_style}">
+            <td style="color:#8aa0c8;white-space:nowrap">{v['time']}</td>
+            <td><b style="{'color:#f87171' if blocked else ''}">{v['ip']}</b>
+                {'<span style="background:#7f1d1d;color:#fca5a5;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">BLOCKED</span>' if blocked else ''}
+            </td>
+            <td>{v.get('country','—')}</td>
+            <td>{location} {map_link}</td>
+            <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8aa0c8">{v.get('isp','—')}</td>
+            <td style="color:#6b7fa8">{v['path']}</td>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#4a5f80">{v['ua']}</td>
+            <td>{block_btn}</td>
+          </tr>"""
+
+    blocked_section = ""
+    if blocked_copy:
+        blocked_rows = "".join(
+            f'<tr><td style="color:#f87171;padding:6px 12px">{ip}</td>'
+            f'<td><button onclick="unblock(\'{ip}\')" style="background:#16a34a;color:#fff;border:none;padding:2px 10px;border-radius:6px;cursor:pointer;font-size:12px">Unblock</button></td></tr>'
+            for ip in sorted(blocked_copy)
+        )
+        blocked_section = f"""
+        <div style="margin:1.5rem 2rem;background:#1a0a0a;border:1px solid #7f1d1d;border-radius:10px;padding:1rem">
+          <h3 style="margin:0 0 0.75rem;color:#f87171;font-size:0.95rem">⛔ Blocked IPs ({len(blocked_copy)})</h3>
+          <table style="border-collapse:collapse;font-size:13px"><tbody>{blocked_rows}</tbody></table>
+        </div>"""
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<title>Admin — Slide Study AI</title>
+<meta http-equiv="refresh" content="20">
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:'Segoe UI',system-ui,sans-serif;background:#050d1a;color:#e8f0ff;min-height:100vh}}
+  .topbar{{display:flex;align-items:center;justify-content:space-between;padding:1rem 2rem;
+           background:#0a1628;border-bottom:1px solid #1a3a6e;position:sticky;top:0;z-index:10}}
+  .topbar h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:.6rem}}
+  .badge{{background:#4f8ef7;color:#fff;padding:2px 10px;border-radius:20px;font-size:12px}}
+  .badge.red{{background:#dc2626}}
+  .actions{{display:flex;gap:.5rem}}
+  .btn{{padding:6px 14px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:opacity .2s}}
+  .btn:hover{{opacity:.8}}
+  .btn-red{{background:#dc2626;color:#fff}}
+  .btn-green{{background:#16a34a;color:#fff}}
+  .btn-gray{{background:#1e3a5f;color:#8aa0c8}}
+  .wrap{{overflow-x:auto}}
+  table{{width:100%;border-collapse:collapse;font-size:13px}}
+  th{{background:#0f2040;padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;
+      border-bottom:1px solid #1a3a6e;position:sticky;top:57px;white-space:nowrap}}
+  td{{padding:9px 12px;border-bottom:1px solid #0d1e35;vertical-align:middle}}
+  tr:hover td{{background:#0a1e38}}
+  .empty{{padding:3rem;text-align:center;color:#4a5f80;font-size:0.9rem}}
+  #toast{{position:fixed;bottom:1.5rem;right:1.5rem;background:#16a34a;color:#fff;
+          padding:.6rem 1.2rem;border-radius:8px;font-size:13px;display:none;z-index:100}}
+</style></head>
+<body>
+<div class="topbar">
+  <h1>📊 Slide Study AI — Admin
+    <span class="badge">{len(vis_copy)} visits</span>
+    {f'<span class="badge red">⛔ {len(blocked_copy)} blocked</span>' if blocked_copy else ''}
+  </h1>
+  <div class="actions">
+    <span style="font-size:12px;color:#4a5f80;align-self:center">Auto-refresh: 20s</span>
+    <button class="btn btn-gray" onclick="location.reload()">↻ Refresh</button>
+    <button class="btn btn-red" onclick="clearLog()">🗑 Clear Log</button>
+  </div>
+</div>
+{blocked_section}
+<div class="wrap">
+<table>
+  <thead><tr>
+    <th>Time (UTC)</th><th>IP Address</th><th>Country</th>
+    <th>Location</th><th>ISP / Org</th><th>Path</th><th>User Agent</th><th>Action</th>
+  </tr></thead>
+  <tbody>
+  {rows if rows else '<tr><td colspan="8" class="empty">No visitors recorded yet.</td></tr>'}
+  </tbody>
+</table>
+</div>
+<div id="toast"></div>
+<script>
+const TOKEN = "{token}";
+function toast(msg, color="#16a34a"){{
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.background = color; t.style.display = "block";
+  setTimeout(()=>t.style.display="none", 2500);
+}}
+async function blockIp(ip){{
+  if(!confirm("Block " + ip + "?\\nThis will 403 all their requests immediately.")) return;
+  const r = await fetch("/admin/block?token=" + TOKEN, {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{ip}})
+  }});
+  if(r.ok){{ toast("⛔ Blocked: " + ip, "#dc2626"); setTimeout(()=>location.reload(),1200); }}
+}}
+async function unblock(ip){{
+  const r = await fetch("/admin/unblock?token=" + TOKEN, {{
+    method:"POST", headers:{{"Content-Type":"application/json"}},
+    body: JSON.stringify({{ip}})
+  }});
+  if(r.ok){{ toast("✓ Unblocked: " + ip); setTimeout(()=>location.reload(),1200); }}
+}}
+async function clearLog(){{
+  if(!confirm("Clear all visitor log entries?")) return;
+  const r = await fetch("/admin/clear?token=" + TOKEN, {{method:"POST"}});
+  if(r.ok){{ toast("🗑 Log cleared"); setTimeout(()=>location.reload(),1200); }}
+}}
+</script>
+</body></html>"""
+
+_SAFE_NAME = re.compile(r'[^\w\-. ]')
+_JOB_ID_RE = re.compile(r'^[0-9a-f]{32}$')
+
+def _safe_name(s, maxlen=80):
+    return _SAFE_NAME.sub('_', str(s))[:maxlen]
+
+def _valid_job(job_id):
+    return bool(_JOB_ID_RE.match(str(job_id)))
+
+def _he(s):
+    return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;')
+
+# ── In-memory job store (auto-cleaned after 10 min) ───────────────────────────
+_jobs      = OrderedDict()
+_jobs_lock = threading.Lock()
+
+# Ollama can only run one inference at a time locally. Serialise all calls so
+# the ThreadPoolExecutor doesn't flood it, which causes truncated JSON output.
+_ollama_sem      = threading.Semaphore(1)
+_ollama_raw_lock = threading.Lock()  # protect concurrent debug-file writes
+
+def store_job(job_id, pdf_bytes, md_text, guide, slides, filename):
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "pdf": pdf_bytes, "md": md_text,
+            "guide": guide,   "slides": slides,
+            "filename": filename, "ts": time.time()
+        }
+        stale = [k for k, v in list(_jobs.items()) if time.time() - v["ts"] > 600]
+        for k in stale:
+            del _jobs[k]
+
+# ── Palette ───────────────────────────────────────────────────────────────────
+NAVY        = colors.HexColor('#0a1628')
+NAVY_MID    = colors.HexColor('#1a3a6e')
+NAVY_LIGHT  = colors.HexColor('#2e5ca8')
+ACCENT      = colors.HexColor('#4f8ef7')
+KW_BG       = colors.HexColor('#eef3ff')
+ROW_ALT     = colors.HexColor('#f4f7ff')
+BORDER      = colors.HexColor('#c5d8ff')
+TEXT        = colors.HexColor('#0d1b2e')
+TEXT_LIGHT  = colors.HexColor('#4a5f80')
+WHITE       = colors.white
+CARD_Q      = colors.HexColor('#1a3a6e')
+CARD_A      = colors.HexColor('#f8faff')
+GREEN       = colors.HexColor('#16a34a')
+SECTION_BG  = colors.HexColor('#f0f5ff')
+
+
+# ── Ollama helpers ─────────────────────────────────────────────────────────────
+
+def ollama_running():
+    if GROQ_API_KEY:
+        return True
+    try:
+        return http.get(f"{OLLAMA_URL}/api/tags", timeout=3).status_code == 200
+    except Exception:
+        return False
+
+def ollama_models():
+    if GROQ_API_KEY:
+        return [GROQ_MODEL]
+    try:
+        return [m["name"] for m in http.get(f"{OLLAMA_URL}/api/tags", timeout=3).json().get("models", [])]
+    except Exception:
+        return []
+
+def _extract_json(text):
+    text = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.IGNORECASE)
+    text = re.sub(r'\s*```$', '', text).strip()
+
+    # ── Pass 1: try the whole text as-is ────────────────────────────────────
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # ── Find the start of the first JSON object or array ───────────────────
+    obj_pos = text.find('{')
+    arr_pos = text.find('[')
+    if obj_pos == -1 and arr_pos == -1:
+        raise ValueError("No JSON found in model output")
+    if arr_pos != -1 and (obj_pos == -1 or arr_pos < obj_pos):
+        start, open_c, close_c = arr_pos, '[', ']'
+    else:
+        start, open_c, close_c = obj_pos, '{', '}'
+
+    # ── Pass 2: string-aware bracket scan ──────────────────────────────────
+    # Tracks whether we're inside a JSON string so { } inside strings are ignored
+    depth, in_str, escaped, end = 0, False, False, -1
+    stack = []          # track every opening bracket for repair below
+    for i, ch in enumerate(text[start:], start):
+        if escaped:
+            escaped = False
+            continue
+        if ch == '\\' and in_str:
+            escaped = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in ('{', '['):
+            depth += 1
+            stack.append(ch)
+        elif ch in ('}', ']'):
+            depth -= 1
+            if stack:
+                stack.pop()
+            if depth == 0:
+                end = i
+                break
+
+    if end != -1:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # ── Pass 3: JSON is truncated — repair by closing open brackets ─────────
+    # Re-scan to find the deepest valid position and close everything open
+    pairs = {'{': '}', '[': ']'}
+    depth2, in_str2, escaped2 = 0, False, False
+    open_stack = []
+    last_good_pos = start  # last position where depth was 0 between top-level items
+    for i, ch in enumerate(text[start:], start):
+        if escaped2:
+            escaped2 = False
+            continue
+        if ch == '\\' and in_str2:
+            escaped2 = True
+            continue
+        if ch == '"':
+            in_str2 = not in_str2
+            continue
+        if in_str2:
+            continue
+        if ch in ('{', '['):
+            depth2 += 1
+            open_stack.append(ch)
+        elif ch in ('}', ']'):
+            depth2 -= 1
+            if open_stack:
+                open_stack.pop()
+
+    # Trim trailing incomplete entry: remove everything after the last comma
+    # at depth==1 so the partial last entry is dropped
+    snippet = text[start:].rstrip()
+    # Remove trailing comma + anything after it (the cut-off entry)
+    snippet = re.sub(r',\s*[^,\]\}]*$', '', snippet)
+    # Close all still-open brackets
+    closing = ''.join(pairs[c] for c in reversed(open_stack))
+    # Make sure we haven't over-trimmed: if snippet is just the opening char, add empty body
+    repaired = snippet + closing
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError:
+        pass
+
+    # ── Pass 4: nuclear fallback — try every possible closing combination ──
+    for suffix in ['}', ']}', '}}', '"]}}', '"]}', '"}']:
+        try:
+            return json.loads(snippet + suffix)
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError(f"Cannot parse model output (length={len(text)}). "
+                     "Model may have returned incomplete JSON.")
+
+def _call_ollama(prompt, retries=3, num_predict=4096):
+    if GROQ_API_KEY:
+        return _call_groq(prompt, retries=retries)
+    payload = {
+        "model": OLLAMA_MODEL,
+        "format": "json",
+        "messages": [
+            {"role": "system", "content": "You output only valid JSON. No markdown, no explanation."},
+            {"role": "user",   "content": prompt},
+        ],
+        "stream": False,
+        "options": {"temperature": 0, "num_predict": num_predict},
+    }
+    last_err = None
+    for attempt in range(retries):
+        try:
+            with _ollama_sem:
+                r = http.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=300)
+                r.raise_for_status()
+                raw_content = r.json()["message"]["content"]
+
+            with _ollama_raw_lock:
+                with open(os.path.join(os.path.dirname(__file__), "ollama_raw.txt"), "w", encoding="utf-8") as _f:
+                    _f.write(raw_content)
+
+            return _extract_json(raw_content)
+        except Exception as e:
+            last_err = e
+            _log.warning("OLLAMA attempt %d/%d failed: %s", attempt + 1, retries, e)
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise last_err
+
+
+def _call_groq(prompt, retries=3):
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": "You output only valid JSON. No markdown, no explanation."},
+            {"role": "user",   "content": prompt},
+        ],
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
+    last_err = None
+    for attempt in range(retries):
+        try:
+            r = http.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                json=payload, headers=headers, timeout=120
+            )
+            r.raise_for_status()
+            raw_content = r.json()["choices"][0]["message"]["content"]
+            return _extract_json(raw_content)
+        except Exception as e:
+            last_err = e
+            _log.warning("GROQ attempt %d/%d failed: %s", attempt + 1, retries, e)
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise last_err
+
+
+# ── Three-pass AI processing ──────────────────────────────────────────────────
+
+def _as_dict(result, list_key=None):
+    """If the model returned a list instead of a dict, coerce it."""
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, list):
+        # If list contains dicts, pick the first one
+        first_dict = next((x for x in result if isinstance(x, dict)), None)
+        if first_dict:
+            return first_dict
+        # Otherwise wrap under the given key
+        if list_key:
+            return {list_key: result}
+    return {}
+
+
+def pass1_overview(slides, language, dcfg=None):
+    """Get title, objectives, section groupings, and keywords."""
+    dcfg = dcfg or DETAIL["standard"]
+    lang = "in Arabic" if language == "ar" else "in English"
+    outline = "".join(
+        f"Slide {s['slide_num']}: {s['title']}\n{s['content'][:dcfg['slide_chars']]}\n\n"
+        for s in slides[:dcfg["max_slides"]]
+    )
+    result = _call_ollama(f"""Create a study guide overview {lang} from this PowerPoint outline.
+
+{outline}
+
+Return JSON:
+{{
+  "title": "TOPIC IN CAPS",
+  "subtitle": "course/session description",
+  "objectives": ["objective 1", "objective 2", "objective 3"],
+  "sections": [
+    {{"title": "SECTION NAME", "slide_nums": [1, 2, 3]}}
+  ],
+  "keywords": [
+    {{"term": "Term", "definition": "Specific 1-sentence definition or role description"}}
+  ]
+}}
+
+Rules:
+- Group related slides into 3-7 logical sections
+- objectives: extract from learning objectives slide or infer from content
+- keywords: {dcfg['keywords']} terms — every key concept, acronym, role, process mentioned
+- Output JSON only""", num_predict=dcfg["num_predict"])
+    return _as_dict(result)
+
+
+def pass2_section(title, section_slides, language, dcfg=None):
+    """Get detailed bullets + optional comparison table for one section."""
+    dcfg = dcfg or DETAIL["standard"]
+    lang = "in Arabic" if language == "ar" else "in English"
+    content = "".join(
+        f"Slide {s['slide_num']}: {s['title']}\n{s['content']}\n\n"
+        for s in section_slides
+    )
+    result = _call_ollama(f"""Extract detailed exam study notes {lang} for the section "{title}".
+
+{content}
+
+Return JSON:
+{{
+  "bullets": [
+    "Full specific fact, definition, or step from the content",
+    "Another detailed point — include names, numbers, roles, processes"
+  ],
+  "table": {{
+    "headers": ["Column 1", "Column 2"],
+    "rows": [["value", "value"]]
+  }}
+}}
+
+Rules:
+- bullets: {dcfg['bullets']} specific, exam-worthy facts from the slides
+- table: include ONLY if content has roles/comparisons/structured lists; otherwise omit the table field entirely
+- Output JSON only""", num_predict=dcfg["num_predict"])
+    result = _as_dict(result, list_key="bullets")
+    # If model returned a flat list of strings under "bullets", normalise each element
+    bullets = result.get("bullets", [])
+    result["bullets"] = [str(b) for b in bullets if b]
+    return result
+
+
+def pass3_flashcards(guide, language, dcfg=None):
+    """Generate Q&A flash cards from the guide content."""
+    dcfg = dcfg or DETAIL["standard"]
+    lang = "in Arabic" if language == "ar" else "in English"
+    kw_text  = ", ".join(k["term"] for k in guide.get("keywords", [])[:20] if isinstance(k, dict))
+    sec_text = " | ".join(s["title"] for s in guide.get("sections", []) if isinstance(s, dict))
+    bullets_ctx = ""
+    for sec in guide.get("sections", []):
+        if isinstance(sec, dict) and sec.get("bullets"):
+            bullets_ctx += f"\n{sec.get('title','')}:\n" + "\n".join(f"- {b}" for b in sec["bullets"])
+    result = _call_ollama(f"""Create exam flash cards {lang} for a study guide about: {guide.get('title', '')}.
+
+Topics: {sec_text}
+Key terms: {kw_text}
+Study content:{bullets_ctx}
+
+Return JSON:
+{{
+  "flashcards": [
+    {{"q": "Question that tests a key concept?", "a": "Clear, concise answer"}},
+    {{"q": "Define [term]?", "a": "Definition"}},
+    {{"q": "What are the responsibilities of [role]?", "a": "Specific responsibilities"}}
+  ]
+}}
+
+Rules:
+- Create exactly {dcfg['n_flash']} flash cards
+- Base EVERY question directly on the study content provided above — no generic questions
+- Mix definition questions, "what is" questions, "name the" questions, and role/responsibility questions
+- Answers must be specific, referencing actual details from the content
+- Output JSON only""", num_predict=dcfg["num_predict"])
+    # Model may return the array directly instead of wrapping it
+    if isinstance(result, list):
+        return {"flashcards": [x for x in result if isinstance(x, dict)]}
+    return _as_dict(result, list_key="flashcards")
+
+
+def pass4_mcq(guide, language, dcfg=None):
+    """Generate multiple-choice quiz questions."""
+    dcfg   = dcfg or DETAIL["standard"]
+    lang   = "in Arabic" if language == "ar" else "in English"
+    n      = dcfg["n_mcq"]
+    kw_text  = ", ".join(k["term"] for k in guide.get("keywords", [])[:20] if isinstance(k, dict))
+    sec_text = " | ".join(s["title"] for s in guide.get("sections", []) if isinstance(s, dict))
+    bullets_ctx = ""
+    for sec in guide.get("sections", []):
+        if isinstance(sec, dict) and sec.get("bullets"):
+            bullets_ctx += f"\n{sec.get('title','')}:\n" + "\n".join(f"- {b}" for b in sec["bullets"])
+    result = _call_ollama(f"""Create {n} multiple-choice exam questions {lang} for: {guide.get('title','')}.
+
+Topics: {sec_text}
+Key terms: {kw_text}
+Study content:{bullets_ctx}
+
+Return JSON:
+{{
+  "mcqs": [
+    {{
+      "q": "Question text?",
+      "options": ["A. option one", "B. option two", "C. option three", "D. option four"],
+      "answer": "A",
+      "explanation": "Why A is correct"
+    }}
+  ]
+}}
+
+Rules:
+- Exactly {n} questions, 4 options each (A B C D)
+- answer: just the letter
+- Mix easy and hard questions
+- JSON only""", num_predict=dcfg["num_predict"])
+    if isinstance(result, list):
+        return {"mcqs": [x for x in result if isinstance(x, dict)]}
+    return _as_dict(result, list_key="mcqs")
+
+
+def build_markdown(guide):
+    """Convert guide dict to a Markdown string."""
+    lines = [f"# {guide.get('title', 'Study Guide')}", ""]
+    if guide.get("subtitle"):
+        lines += [f"*{guide['subtitle']}*", ""]
+    objs = [o for o in guide.get("objectives", []) if isinstance(o, str)]
+    if objs:
+        lines += ["## Learning Objectives", ""]
+        for o in objs: lines.append(f"- {o}")
+        lines.append("")
+    for sec in guide.get("sections", []):
+        if not isinstance(sec, dict): continue
+        lines += [f"## {sec.get('title', '')}", ""]
+        for b in sec.get("bullets", []): lines.append(f"- {b}")
+        tbl = sec.get("table")
+        if isinstance(tbl, dict) and tbl.get("headers") and tbl.get("rows"):
+            lines.append("")
+            lines.append("| " + " | ".join(tbl["headers"]) + " |")
+            lines.append("|" + "|".join(["---"] * len(tbl["headers"])) + "|")
+            for row in tbl["rows"]:
+                lines.append("| " + " | ".join(str(c) for c in row) + " |")
+        lines.append("")
+    kws = [k for k in guide.get("keywords", []) if isinstance(k, dict)]
+    if kws:
+        lines += ["## Keywords Cheatsheet", ""]
+        for k in kws: lines.append(f"**{k.get('term','')}** — {k.get('definition','')}")
+        lines.append("")
+    fcs = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
+    if fcs:
+        lines += ["## Flash Cards", ""]
+        for i, fc in enumerate(fcs, 1):
+            lines += [f"**Q{i}:** {fc.get('q','')}", f"**A:** {fc.get('a','')}", ""]
+    mcqs = [m for m in guide.get("mcqs", []) if isinstance(m, dict)]
+    if mcqs:
+        lines += ["## Multiple Choice Questions", ""]
+        for i, m in enumerate(mcqs, 1):
+            lines.append(f"**{i}. {m.get('q','')}**")
+            for opt in m.get("options", []): lines.append(f"   {opt}")
+            lines += [f"   ✓ **{m.get('answer','')}** — {m.get('explanation','')}", ""]
+    return "\n".join(lines)
+
+
+def ask_ollama(slides, language, progress_cb=None):
+    """Orchestrate three-pass processing with optional progress callback."""
+    content_slides = [s for s in slides if s["content"].strip() or s["title"].strip()]
+
+    if progress_cb: progress_cb("overview", f"Analysing structure ({len(content_slides)} slides)…")
+    overview = pass1_overview(content_slides, language)
+
+    # Normalize sections/keywords (mistral may return plain strings)
+    raw_sec = overview.get("sections", [])
+    overview["sections"] = [
+        s if isinstance(s, dict) else {"title": str(s), "slide_nums": []}
+        for s in (raw_sec if isinstance(raw_sec, list) else [])
+    ]
+    raw_kw = overview.get("keywords", [])
+    overview["keywords"] = [
+        k if isinstance(k, dict) else {"term": str(k), "definition": ""}
+        for k in (raw_kw if isinstance(raw_kw, list) else [])
+    ]
+    if not overview["sections"]:
+        overview["sections"] = [{"title": overview.get("title", "Overview"), "slide_nums": [s["slide_num"] for s in content_slides]}]
+
+    sections = overview["sections"]
+    for i, sec in enumerate(sections):
+        if progress_cb: progress_cb("section", f"Building section {i+1} of {len(sections)}: {sec.get('title','')}…")
+        nums = set(sec.get("slide_nums", []))
+        sec_slides = [s for s in content_slides if s["slide_num"] in nums]
+        if not sec_slides:
+            n_sec  = len(sections)
+            chunk  = max(1, len(content_slides) // n_sec)
+            start  = i * chunk
+            end    = start + chunk if i < n_sec - 1 else len(content_slides)
+            sec_slides = content_slides[start:end] or content_slides
+        detail = pass2_section(sec.get("title", ""), sec_slides, language)
+        sec["bullets"] = detail.get("bullets", [])
+        if isinstance(detail.get("table"), dict):
+            sec["table"] = detail["table"]
+
+    if progress_cb: progress_cb("flashcards", "Generating flash cards…")
+    try:
+        fc = pass3_flashcards(overview, language)
+        overview["flashcards"] = fc.get("flashcards", [])
+    except Exception:
+        overview["flashcards"] = []
+
+    return overview
+
+
+# ── File extraction — PPTX, PPT binary, PDF ───────────────────────────────────
+
+def _extract_pptx_raw(raw):
+    """Open as pptx; on relationship errors fall back to raw ZIP XML walk."""
+    try:
+        prs = Presentation(io.BytesIO(raw))
+    except Exception as e:
+        if "officeDocument" not in str(e) and "relationship" not in str(e):
+            raise ValueError(f"Cannot open PowerPoint file: {e}")
+        # Fallback: read slide XML directly from the ZIP
+        import zipfile, xml.etree.ElementTree as ET
+        slides = []
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            slide_files = sorted(
+                [n for n in z.namelist() if re.match(r'ppt/slides/slide\d+\.xml', n)],
+                key=lambda x: int(re.findall(r'\d+', x)[-1])
+            )
+            for idx, sf in enumerate(slide_files, 1):
+                parts = [
+                    t.text.strip()
+                    for t in ET.fromstring(z.read(sf)).iter(
+                        '{http://schemas.openxmlformats.org/drawingml/2006/main}t'
+                    )
+                    if t.text and t.text.strip()
+                ]
+                if parts:
+                    slides.append({"slide_num": idx, "title": parts[0][:80], "content": "\n".join(parts)})
+        if not slides:
+            raise ValueError("No readable content found in this file")
+        return slides
+
+    slides = []
+    for i, slide in enumerate(prs.slides, 1):
+        ts    = slide.shapes.title
+        title = ts.text.strip() if ts and ts.text.strip() else f"Slide {i}"
+        body  = [
+            shape.text.strip()
+            for shape in slide.shapes
+            if hasattr(shape, "text") and shape != ts and shape.text.strip()
+        ]
+        slides.append({"slide_num": i, "title": title, "content": "\n".join(body)})
+    return slides
+
+
+def _extract_ppt_binary(raw):
+    """Extract text from old binary OLE2 .ppt via record-level parsing."""
+    import struct
+    try:
+        import olefile
+    except ImportError:
+        raise ValueError("olefile not installed — run: pip install olefile")
+
+    ole = olefile.OleFileIO(io.BytesIO(raw))
+    if not ole.exists('PowerPoint Document'):
+        raise ValueError("Not a valid binary PowerPoint file")
+
+    stream = ole.openstream('PowerPoint Document').read()
+    texts  = []
+
+    def parse(buf, start, end):
+        i = start
+        while i + 8 <= end:
+            rec_ver  = struct.unpack_from('<H', buf, i)[0] & 0x0F
+            rec_type = struct.unpack_from('<H', buf, i + 2)[0]
+            rec_len  = struct.unpack_from('<I', buf, i + 4)[0]
+            data_end = i + 8 + rec_len
+            if data_end > end:
+                break
+            if rec_type == 0x0FA0:       # TextCharsAtom — UTF-16LE
+                t = buf[i+8:data_end].decode('utf-16-le', errors='ignore').strip()
+                if t: texts.append(t)
+            elif rec_type == 0x0FA8:     # TextBytesAtom — Latin-1
+                t = buf[i+8:data_end].decode('latin-1', errors='ignore').strip()
+                if t: texts.append(t)
+            elif rec_ver == 0xF:         # Container — recurse into children
+                parse(buf, i + 8, data_end)
+            i = data_end
+
+    parse(stream, 0, len(stream))
+
+    if not texts:
+        raise ValueError("No readable text found in the binary .ppt file")
+
+    # Group into pseudo-slides of ~5 text blocks
+    slides = []
+    for n, chunk in enumerate([texts[j:j+5] for j in range(0, len(texts), 5)], 1):
+        slides.append({"slide_num": n, "title": chunk[0][:80], "content": "\n".join(chunk)})
+    return slides
+
+
+def _extract_pdf(raw):
+    """Extract text from PDF, one entry per page."""
+    try:
+        import pypdf
+    except ImportError:
+        raise ValueError("pypdf not installed — run: pip install pypdf")
+
+    reader = pypdf.PdfReader(io.BytesIO(raw))
+    slides = []
+    for i, page in enumerate(reader.pages, 1):
+        text  = (page.extract_text() or "").strip()
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        if lines:
+            slides.append({"slide_num": i, "title": lines[0][:80], "content": "\n".join(lines)})
+
+    if not slides:
+        raise ValueError(
+            "No readable text found in the PDF — it may be a scanned/image-based file."
+        )
+    return slides
+
+
+def extract_slides(file_stream):
+    """Detect format from magic bytes and dispatch to the right extractor."""
+    raw = file_stream.read()
+
+    if raw[:4] == b'PK\x03\x04':                        # ZIP → .pptx
+        return _extract_pptx_raw(raw)
+    if raw[:8] == b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1': # OLE2 → binary .ppt
+        return _extract_ppt_binary(raw)
+    if raw[:4] == b'%PDF':                               # PDF
+        return _extract_pdf(raw)
+
+    raise ValueError(
+        "Unrecognised file format. Supported: .pptx, .ppt (all versions), .pdf"
+    )
+
+
+# ── PDF builder ────────────────────────────────────────────────────────────────
+
+def _st(name, parent, **kw):
+    s = ParagraphStyle(name, parent=parent)
+    for k, v in kw.items(): setattr(s, k, v)
+    return s
+
+def _page_num(canvas, doc):
+    canvas.saveState()
+    canvas.setFont('Helvetica', 7.5)
+    canvas.setFillColor(TEXT_LIGHT)
+    n = canvas.getPageNumber()
+    canvas.drawRightString(doc.width + doc.leftMargin, 0.55*cm, f"{n}")
+    canvas.drawString(doc.leftMargin, 0.55*cm, doc.title_str if hasattr(doc, 'title_str') else '')
+    canvas.restoreState()
+
+
+def build_pdf(guide, language, out_filename="study_guide"):
+    # Sanitise — ensure every list only contains dicts
+    if not isinstance(guide, dict):
+        guide = {}
+    guide["sections"]   = [s for s in guide.get("sections",   []) if isinstance(s, dict)]
+    guide["keywords"]   = [k for k in guide.get("keywords",   []) if isinstance(k, dict)]
+    guide["flashcards"] = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
+    guide["objectives"] = [o for o in guide.get("objectives", []) if isinstance(o, str)]
+
+    buf = io.BytesIO()
+    W   = 17.4*cm
+
+    class Doc(BaseDocTemplate):
+        pass
+
+    doc = Doc(buf, pagesize=A4,
+              leftMargin=1.8*cm, rightMargin=1.8*cm,
+              topMargin=1.8*cm, bottomMargin=1.5*cm)
+    doc.title_str = guide.get("title", "")
+
+    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height - 0.3*cm,
+                  id='main', leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+    doc.addPageTemplates([PageTemplate(id='main', frames=[frame], onPage=_page_num)])
+
+    base = getSampleStyleSheet()["Normal"]
+    ST = {
+        "h_title":    _st("HT",  base, fontSize=20, fontName="Helvetica-Bold",  textColor=WHITE,        alignment=TA_CENTER, leading=26),
+        "h_sub":      _st("HS",  base, fontSize=9,  fontName="Helvetica",        textColor=colors.HexColor("#a8c4e8"), alignment=TA_CENTER),
+        "obj_head":   _st("OH",  base, fontSize=11, fontName="Helvetica-Bold",   textColor=NAVY,         spaceBefore=4, spaceAfter=4),
+        "obj_item":   _st("OI",  base, fontSize=9.5,fontName="Helvetica",        textColor=TEXT,         leftIndent=14, spaceAfter=3, leading=13),
+        "toc_title":  _st("TOT", base, fontSize=11, fontName="Helvetica-Bold",   textColor=NAVY,         spaceAfter=6),
+        "toc_item":   _st("TOI", base, fontSize=9.5,fontName="Helvetica",        textColor=TEXT,         leftIndent=10, spaceAfter=2),
+        "sec_title":  _st("SCT", base, fontSize=11, fontName="Helvetica-Bold",   textColor=WHITE),
+        "bullet":     _st("BL",  base, fontSize=9.5,fontName="Helvetica",        textColor=TEXT,         leftIndent=12, spaceAfter=3, leading=13),
+        "tbl_hdr":    _st("TH",  base, fontSize=9,  fontName="Helvetica-Bold",   textColor=WHITE),
+        "tbl_cell":   _st("TC",  base, fontSize=9,  fontName="Helvetica",        textColor=TEXT,         leading=12),
+        "kw_term":    _st("KT",  base, fontSize=9,  fontName="Helvetica-Bold",   textColor=NAVY_MID),
+        "kw_def":     _st("KD",  base, fontSize=9,  fontName="Helvetica",        textColor=TEXT,         leading=12),
+        "kw_head":    _st("KH",  base, fontSize=11, fontName="Helvetica-Bold",   textColor=WHITE,        alignment=TA_CENTER),
+        "fc_q":       _st("FCQ", base, fontSize=9,  fontName="Helvetica-Bold",   textColor=WHITE,        leading=13),
+        "fc_a":       _st("FCA", base, fontSize=9,  fontName="Helvetica",        textColor=TEXT,         leading=13),
+        "fc_head":    _st("FCH", base, fontSize=11, fontName="Helvetica-Bold",   textColor=WHITE,        alignment=TA_CENTER),
+        "footer":     _st("FT",  base, fontSize=8,  fontName="Helvetica",        textColor=TEXT_LIGHT,   alignment=TA_CENTER),
+    }
+
+    elems = []
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    title    = guide.get("title", "Study Guide").upper()
+    subtitle = guide.get("subtitle", "Exam Study Guide")
+    hdr = Table([
+        [Paragraph(title, ST["h_title"])],
+        [Paragraph(f"{subtitle}  ·  {OLLAMA_MODEL}", ST["h_sub"])],
+    ], colWidths=[W])
+    hdr.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0), (-1,-1), NAVY),
+        ("ALIGN",         (0,0), (-1,-1), "CENTER"),
+        ("TOPPADDING",    (0,0), (0,0),   16),
+        ("BOTTOMPADDING", (0,1), (0,1),   14),
+        ("TOPPADDING",    (0,1), (0,1),   2),
+        ("LEFTPADDING",   (0,0), (-1,-1), 12),
+        ("RIGHTPADDING",  (0,0), (-1,-1), 12),
+    ]))
+    elems.append(hdr)
+    elems.append(Spacer(1, 0.3*cm))
+
+    # ── Learning Objectives ───────────────────────────────────────────────────
+    objectives = guide.get("objectives", [])
+    if objectives:
+        rows = [[Paragraph("◆  LEARNING OBJECTIVES", ST["obj_head"])]]
+        for o in objectives:
+            rows.append([Paragraph(f"◆  {o}", ST["obj_item"])])
+        t = Table(rows, colWidths=[W])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,0),  SECTION_BG),
+            ("BOX",           (0,0), (-1,-1), 0.8, BORDER),
+            ("LINEBELOW",     (0,0), (-1,0),  0.8, BORDER),
+            ("TOPPADDING",    (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ("LEFTPADDING",   (0,0), (-1,-1), 10),
+        ]))
+        elems.append(t)
+        elems.append(Spacer(1, 0.3*cm))
+
+    # ── Table of Contents ─────────────────────────────────────────────────────
+    sections = guide.get("sections", [])
+    if sections:
+        toc_rows = [[Paragraph("CONTENTS", ST["toc_title"])]]
+        all_items = [(s["title"], "") for s in sections]
+        all_items += [("KEYWORDS CHEATSHEET", ""), ("FLASH CARDS", "")]
+        for i, (name, _) in enumerate(all_items, 1):
+            dot_row = Table(
+                [[Paragraph(f"{i}.  {name}", ST["toc_item"]), Paragraph("", ST["toc_item"])]],
+                colWidths=[W*0.85, W*0.15]
+            )
+            dot_row.setStyle(TableStyle([
+                ("LINEBELOW",     (0,0), (-1,-1), 0.3, BORDER),
+                ("TOPPADDING",    (0,0), (-1,-1), 3),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                ("LEFTPADDING",   (0,0), (-1,-1), 6),
+            ]))
+            toc_rows.append([dot_row])
+        toc = Table(toc_rows, colWidths=[W])
+        toc.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,0),  SECTION_BG),
+            ("BOX",           (0,0), (-1,-1), 0.8, BORDER),
+            ("TOPPADDING",    (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+            ("LEFTPADDING",   (0,0), (-1,-1), 0),
+        ]))
+        elems.append(toc)
+        elems.append(Spacer(1, 0.35*cm))
+
+    # ── Sections ──────────────────────────────────────────────────────────────
+    for idx, sec in enumerate(sections, 1):
+        block = []
+
+        sec_hdr = Table(
+            [[Paragraph(f"■  {idx} · {sec.get('title','').upper()}", ST["sec_title"])]],
+            colWidths=[W]
+        )
+        sec_hdr.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), NAVY_MID),
+            ("TOPPADDING",    (0,0), (-1,-1), 7),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+            ("LEFTPADDING",   (0,0), (-1,-1), 10),
+        ]))
+        block.append(sec_hdr)
+
+        bullets = sec.get("bullets", [])
+        if bullets:
+            bdata = [[Paragraph(f"▸  {b}", ST["bullet"])] for b in bullets]
+            bt = Table(bdata, colWidths=[W])
+            bt.setStyle(TableStyle([
+                ("TOPPADDING",    (0,0), (-1,-1), 4),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                ("LEFTPADDING",   (0,0), (-1,-1), 10),
+                ("LINEBELOW",     (0,0), (-1,-2), 0.3, colors.HexColor("#dde8ff")),
+                ("BOX",           (0,0), (-1,-1), 0.5, BORDER),
+            ]))
+            block.append(bt)
+
+        tbl = sec.get("table")
+        if isinstance(tbl, dict) and tbl.get("headers") and tbl.get("rows"):
+            headers = tbl["headers"]
+            n_cols  = len(headers)
+            col_w   = W / n_cols
+            tbl_rows = [[Paragraph(h, ST["tbl_hdr"]) for h in headers]]
+            for ri, row in enumerate(tbl["rows"]):
+                padded = (list(row) + [""] * n_cols)[:n_cols]
+                tbl_rows.append([Paragraph(str(c), ST["tbl_cell"]) for c in padded])
+            inner = Table(tbl_rows, colWidths=[col_w]*n_cols)
+            ts = [
+                ("BACKGROUND",    (0,0), (-1,0),  NAVY_LIGHT),
+                ("TOPPADDING",    (0,0), (-1,-1), 5),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+                ("LEFTPADDING",   (0,0), (-1,-1), 7),
+                ("GRID",          (0,0), (-1,-1), 0.4, BORDER),
+            ]
+            for ri in range(1, len(tbl_rows)):
+                if ri % 2 == 0:
+                    ts.append(("BACKGROUND", (0,ri), (-1,ri), ROW_ALT))
+            inner.setStyle(TableStyle(ts))
+            block.append(Spacer(1, 0.15*cm))
+            block.append(inner)
+
+        block.append(Spacer(1, 0.3*cm))
+        elems.append(KeepTogether(block))
+
+    # ── Keywords Cheatsheet ───────────────────────────────────────────────────
+    keywords = guide.get("keywords", [])
+    if keywords:
+        kw_hdr = Table(
+            [[Paragraph("■  KEYWORDS CHEATSHEET", ST["kw_head"])]],
+            colWidths=[W]
+        )
+        kw_hdr.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), NAVY),
+            ("TOPPADDING",    (0,0), (-1,-1), 8),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+            ("LEFTPADDING",   (0,0), (-1,-1), 10),
+        ]))
+        elems.append(kw_hdr)
+
+        lc, rc = W*0.27, W*0.73
+        kw_rows = [[
+            Paragraph(k.get("term",""), ST["kw_term"]),
+            Paragraph(k.get("definition",""), ST["kw_def"])
+        ] for k in keywords]
+        kw_t = Table(kw_rows, colWidths=[lc, rc])
+        kts = [
+            ("VALIGN",        (0,0), (-1,-1), "TOP"),
+            ("TOPPADDING",    (0,0), (-1,-1), 5),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ("LEFTPADDING",   (0,0), (-1,-1), 8),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 8),
+            ("LINEBELOW",     (0,0), (-1,-2), 0.3, BORDER),
+            ("BOX",           (0,0), (-1,-1), 0.5, BORDER),
+        ]
+        for ri in range(len(kw_rows)):
+            if ri % 2 == 0:
+                kts.append(("BACKGROUND", (0,ri), (-1,ri), KW_BG))
+        kw_t.setStyle(TableStyle(kts))
+        elems.append(kw_t)
+        elems.append(Spacer(1, 0.35*cm))
+
+    # ── Flash Cards ───────────────────────────────────────────────────────────
+    flashcards = guide.get("flashcards", [])
+    if flashcards:
+        fc_hdr = Table(
+            [[Paragraph("■  FLASH CARDS", ST["fc_head"])]],
+            colWidths=[W]
+        )
+        fc_hdr.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0), (-1,-1), NAVY),
+            ("TOPPADDING",    (0,0), (-1,-1), 8),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+            ("LEFTPADDING",   (0,0), (-1,-1), 10),
+        ]))
+        elems.append(fc_hdr)
+        elems.append(Spacer(1, 0.2*cm))
+
+        cw = (W - 0.3*cm) / 2
+        pairs = [flashcards[i:i+2] for i in range(0, len(flashcards), 2)]
+        for pair in pairs:
+            row_cells = []
+            for fc in pair:
+                card = Table([
+                    [Paragraph(f"Q:  {fc.get('q','')}", ST["fc_q"])],
+                    [Paragraph(fc.get('a',''), ST["fc_a"])],
+                ], colWidths=[cw])
+                card.setStyle(TableStyle([
+                    ("BACKGROUND",    (0,0), (-1,0),  CARD_Q),
+                    ("BACKGROUND",    (0,1), (-1,1),  CARD_A),
+                    ("TOPPADDING",    (0,0), (-1,-1), 7),
+                    ("BOTTOMPADDING", (0,0), (-1,-1), 7),
+                    ("LEFTPADDING",   (0,0), (-1,-1), 9),
+                    ("RIGHTPADDING",  (0,0), (-1,-1), 9),
+                    ("BOX",           (0,0), (-1,-1), 0.8, BORDER),
+                    ("LINEBELOW",     (0,0), (-1,0),  0.5, BORDER),
+                ]))
+                row_cells.append(card)
+            if len(row_cells) == 1:
+                row_cells.append(Spacer(cw, 1))
+            grid_row = Table([row_cells], colWidths=[cw, cw], hAlign='LEFT')
+            grid_row.setStyle(TableStyle([("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0)]))
+            elems.append(grid_row)
+            elems.append(Spacer(1, 0.2*cm))
+
+    # ── Footer ────────────────────────────────────────────────────────────────
+    elems.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
+    elems.append(Spacer(1, 0.1*cm))
+    elems.append(Paragraph(
+        f"{guide.get('title','')}  ·  AI Exam Study Guide  ·  {OLLAMA_MODEL}  ·  Good luck!",
+        ST["footer"]
+    ))
+
+    doc.multiBuild(elems)
+    buf.seek(0)
+    return buf
+
+
+# ── SSE streaming endpoint ─────────────────────────────────────────────────────
+
+def _sse(data):
+    return f"data: {json.dumps(data)}\n\n"
+
+@app.route("/api/summarize-stream", methods=["POST"])
+def summarize_stream():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    f            = request.files["file"]
+    language     = "ar" if request.form.get("language") == "ar" else "en"
+    out_name     = _safe_name(request.form.get("filename", f.filename.rsplit(".", 1)[0]))
+    detail_level = request.form.get("detail", "standard")
+    dcfg         = DETAIL.get(detail_level, DETAIL["standard"])
+
+    if not f.filename.lower().endswith((".pptx", ".ppt", ".pdf")):
+        return jsonify({"error": "Please upload a .pptx, .ppt, or .pdf file"}), 400
+
+    if not ollama_running():
+        return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
+
+    file_bytes = f.read()
+
+    def generate():
+        try:
+            yield _sse({"step": "extract", "msg": "Extracting content…"})
+            slides = extract_slides(io.BytesIO(file_bytes))
+            if not any(s["content"] or s["title"] for s in slides):
+                yield _sse({"error": "No readable content in this file"}); return
+
+            total = len([s for s in slides if s["content"].strip()])
+            yield _sse({"step": "extract", "msg": f"Found {total} content slides — analysing…"})
+
+            # Pass 1
+            yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
+            overview = pass1_overview(
+                [s for s in slides if s["content"].strip() or s["title"].strip()],
+                language, dcfg
+            )
+
+            # Normalize: mistral sometimes returns sections/keywords as plain strings
+            raw_sections = overview.get("sections", [])
+            overview["sections"] = [
+                s if isinstance(s, dict) else {"title": str(s), "slide_nums": []}
+                for s in (raw_sections if isinstance(raw_sections, list) else [])
+            ]
+            raw_keywords = overview.get("keywords", [])
+            overview["keywords"] = [
+                k if isinstance(k, dict) else {"term": str(k), "definition": ""}
+                for k in (raw_keywords if isinstance(raw_keywords, list) else [])
+            ]
+
+            content_slides = [s for s in slides if s["content"].strip()]
+
+            # Fallback: if no sections produced, wrap all content into one
+            if not overview["sections"]:
+                overview["sections"] = [{
+                    "title": overview.get("title", "Content Overview"),
+                    "slide_nums": [s["slide_num"] for s in content_slides]
+                }]
+
+            sections = overview["sections"]
+
+            # Sections — purely sequential. _ollama_sem(1) serialises all Ollama
+            # calls anyway, so a thread pool adds overhead without any parallelism.
+            for i, sec in enumerate(sections):
+                yield _sse({"step": "section",
+                            "msg": f"Section {i+1}/{len(sections)}: {sec.get('title','')}…"})
+                nums       = set(sec.get("slide_nums", []))
+                sec_slides = [s for s in content_slides if s["slide_num"] in nums]
+                if not sec_slides:
+                    n_sec      = len(sections)
+                    chunk      = max(1, len(content_slides) // n_sec)
+                    start      = i * chunk
+                    end        = start + chunk if i < n_sec - 1 else len(content_slides)
+                    sec_slides = content_slides[start:end] or content_slides
+                try:
+                    det = pass2_section(sec.get("title", ""), sec_slides, language, dcfg)
+                    _log.debug("pass2 [%s] val=%r", sec.get("title","?"), str(det)[:200])
+                    sec["bullets"] = det.get("bullets", [])
+                    if isinstance(det.get("table"), dict):
+                        sec["table"] = det["table"]
+                except Exception:
+                    _log.error("pass2 [%s] error:\n%s", sec.get("title","?"), _tb.format_exc())
+                    sec["bullets"] = []
+                yield _sse({"step": "section",
+                            "msg": f"Sections: {i+1}/{len(sections)} done…"})
+
+            # Flash cards — after all sections so bullets are available in context
+            yield _sse({"step": "flashcards", "msg": "Generating flash cards…"})
+            try:
+                fc = pass3_flashcards(overview, language, dcfg)
+                _log.debug("pass3 val=%r", str(fc)[:200])
+                overview["flashcards"] = fc.get("flashcards", [])
+            except Exception:
+                _log.error("pass3 error:\n%s", _tb.format_exc())
+                overview["flashcards"] = []
+            yield _sse({"step": "flashcards", "msg": "Flash cards ready…"})
+
+            # MCQ — after sections for the same reason
+            yield _sse({"step": "mcq", "msg": "Generating quiz…"})
+            try:
+                mc = pass4_mcq(overview, language, dcfg)
+                _log.debug("pass4 val=%r", str(mc)[:200])
+                overview["mcqs"] = mc.get("mcqs", [])
+            except Exception:
+                _log.error("pass4 error:\n%s", _tb.format_exc())
+                overview["mcqs"] = []
+            yield _sse({"step": "mcq", "msg": "Quiz ready…"})
+
+            # Build PDF + Markdown
+            yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"})
+            pdf_buf   = build_pdf(overview, language, out_name)
+            pdf_bytes = pdf_buf.read()
+            md_text   = build_markdown(overview)
+
+            job_id = uuid.uuid4().hex
+            store_job(job_id, pdf_bytes, md_text, overview, slides, f"{out_name}_study_guide.pdf")
+
+            yield _sse({"step": "done", "job_id": job_id,
+                        "sections":   len(sections),
+                        "keywords":   len(overview.get("keywords",   [])),
+                        "flashcards": len(overview.get("flashcards", [])),
+                        "mcqs":       len(overview.get("mcqs",       []))})
+
+        except Exception as e:
+            _log.error("GENERATE_ERROR: %s\n%s", e, _tb.format_exc())
+            yield _sse({"error": str(e)})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+
+
+@app.route("/api/download/<job_id>")
+def download_job(job_id):
+    if not _valid_job(job_id):
+        return jsonify({"error": "Invalid job ID"}), 400
+    fmt      = request.args.get("format", "pdf")
+    filename = _safe_name(request.args.get("filename", "study_guide"))
+    with _jobs_lock:
+        job = _jobs.get(job_id)   # keep in store — TTL handles cleanup
+    if not job:
+        return jsonify({"error": "File not found or expired"}), 404
+    if fmt == "md":
+        content = (job.get("md") or "").encode("utf-8")
+        return send_file(io.BytesIO(content), mimetype="text/markdown",
+                         as_attachment=True, download_name=f"{filename}.md")
+    return send_file(io.BytesIO(job["pdf"]), mimetype="application/pdf",
+                     as_attachment=True, download_name=job.get("filename", f"{filename}.pdf"))
+
+
+@app.route("/api/guide/<job_id>")
+def get_guide(job_id):
+    if not _valid_job(job_id):
+        return jsonify({"error": "Invalid job ID"}), 400
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Session expired — re-upload the file"}), 404
+    guide = job.get("guide", {})
+    return jsonify({
+        "title":      guide.get("title", ""),
+        "flashcards": guide.get("flashcards", []),
+        "mcqs":       guide.get("mcqs", []),
+        "keywords":   guide.get("keywords",   []),
+        "objectives": guide.get("objectives", []),
+    })
+
+
+@app.route("/api/chat/<job_id>", methods=["POST"])
+def chat_with_slides(job_id):
+    if not _valid_job(job_id):
+        return jsonify({"error": "Invalid job ID"}), 400
+    data     = request.json or {}
+    question = data.get("question", "")[:500].strip()
+    language = "ar" if data.get("language") == "ar" else "en"
+    if not question:
+        return jsonify({"error": "No question provided"}), 400
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Session expired — re-upload the file"}), 404
+    slides  = job.get("slides", [])
+    context = "\n\n".join(
+        f"[{s['title']}]\n{s['content'][:400]}"
+        for s in slides[:30] if s.get("content")
+    )
+    lang = "in Arabic" if language == "ar" else "in English"
+    try:
+        result = _call_ollama(
+            f"""Answer this question {lang} using ONLY the study material below.
+
+Material:
+{context}
+
+Question: {question}
+
+Return JSON: {{"answer": "your detailed answer"}}
+
+Rules:
+- Answer from the material only; if not covered say so clearly
+- Be specific and concise
+- JSON only""", num_predict=1024)
+        return jsonify({"answer": result.get("answer", "No answer found in the slides.")})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/download-zip", methods=["POST"])
+def download_zip():
+    import zipfile as zf
+    job_ids = [jid for jid in (request.json or {}).get("job_ids", []) if _valid_job(jid)]
+    buf = io.BytesIO()
+    with zf.ZipFile(buf, "w", zf.ZIP_DEFLATED) as z:
+        with _jobs_lock:
+            for jid in job_ids:
+                job = _jobs.get(jid)
+                if job and job.get("pdf"):
+                    z.writestr(job["filename"], job["pdf"])
+    buf.seek(0)
+    return send_file(buf, mimetype="application/zip", as_attachment=True,
+                     download_name="study_guides.zip")
+
+
+@app.route("/api/view/md/<job_id>")
+def view_md(job_id):
+    if not _valid_job(job_id):
+        return "<h2 style='font-family:sans-serif;padding:2rem'>Invalid job ID</h2>", 400
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired (10 min TTL)</h2>", 404
+    title = _he(job["guide"].get("title", "Study Guide"))
+    md = job["md"]
+
+    def _md_to_html(text):
+        lines, out = text.split('\n'), []
+        i = 0
+        while i < len(lines):
+            l = lines[i]
+            if l.startswith('# '):
+                out.append(f'<h1>{l[2:]}</h1>')
+            elif l.startswith('## '):
+                out.append(f'<h2>{l[3:]}</h2>')
+            elif l.startswith('### '):
+                out.append(f'<h3>{l[4:]}</h3>')
+            elif l.startswith('- ') or l.startswith('* '):
+                out.append(f'<li>{_inline(l[2:])}</li>')
+            elif l.startswith('| ') and '|' in l[2:]:
+                rows, align = [], l
+                while i < len(lines) and lines[i].startswith('|'):
+                    if not re.match(r'^\|[-| :]+\|$', lines[i]):
+                        cells = [c.strip() for c in lines[i].strip('|').split('|')]
+                        tag = 'th' if rows == [] else 'td'
+                        out.append('<tr>' + ''.join(f'<{tag}>{_inline(c)}</{tag}>' for c in cells) + '</tr>')
+                    i += 1
+                i -= 1
+            elif l.strip() == '':
+                out.append('<br>')
+            else:
+                out.append(f'<p>{_inline(l)}</p>')
+            i += 1
+        return '\n'.join(out)
+
+    def _inline(t):
+        t = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', t)
+        t = re.sub(r'\*(.+?)\*',     r'<em>\1</em>',         t)
+        t = re.sub(r'`(.+?)`',       r'<code>\1</code>',     t)
+        return t
+
+    body = _md_to_html(md)
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>{title}</title>
+<style>
+  body{{font-family:'Segoe UI',system-ui,sans-serif;max-width:820px;margin:0 auto;padding:2rem;
+       background:#f8faff;color:#0a1628;line-height:1.7}}
+  h1{{font-size:1.7rem;color:#1a3a6e;border-bottom:2px solid #c5d8ff;padding-bottom:.5rem}}
+  h2{{font-size:1.2rem;color:#2e5ca8;margin-top:1.8rem;border-left:4px solid #4f8ef7;padding-left:.75rem}}
+  h3{{font-size:1rem;color:#1a3a6e}}
+  li{{margin-bottom:.35rem}}
+  table{{border-collapse:collapse;width:100%;margin:1rem 0}}
+  th{{background:#1a3a6e;color:#fff;padding:8px 12px;text-align:left}}
+  td{{padding:7px 12px;border-bottom:1px solid #dde8ff}}
+  tr:nth-child(even) td{{background:#f0f5ff}}
+  code{{background:#e8f0ff;padding:1px 5px;border-radius:4px;font-size:.9em}}
+  strong{{color:#1a3a6e}}
+  @media print{{body{{background:#fff}}}}
+</style></head><body>
+{body}
+<hr style="margin-top:2rem;border-color:#c5d8ff">
+<p style="font-size:.8rem;color:#8aa0c8;text-align:center">Generated by Slide Study AI · {OLLAMA_MODEL}</p>
+</body></html>"""
+
+
+def _page_shell(title, body_css, body_html, script=""):
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>{title}</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:'Segoe UI',system-ui,sans-serif;background:#050d1a;color:#e8f0ff;min-height:100vh}}
+  .top{{background:#0a1628;border-bottom:1px solid #1a3a6e;padding:1rem 2rem;
+        display:flex;align-items:center;justify-content:space-between}}
+  .top h1{{font-size:1rem;font-weight:700;color:#e8f0ff}}
+  .badge{{background:#4f8ef7;color:#fff;padding:2px 10px;border-radius:20px;font-size:12px}}
+  .wrap{{max-width:760px;margin:0 auto;padding:2rem 1.25rem}}
+  {body_css}
+</style></head><body>
+<div class="top"><h1>📖 {title}</h1></div>
+<div class="wrap">{body_html}</div>
+<script>{script}</script>
+</body></html>"""
+
+
+@app.route("/api/view/cards/<job_id>")
+def view_cards(job_id):
+    if not _valid_job(job_id):
+        return "<h2 style='font-family:sans-serif;padding:2rem'>Invalid job ID</h2>", 400
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
+    guide = job["guide"]
+    title = _he(guide.get("title", "Flash Cards"))
+    cards = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
+    if not cards:
+        return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No flash cards available.</p>")
+
+    cards_json = json.dumps(cards)
+    css = """
+  .fc-counter{text-align:center;color:#8aa0c8;font-size:.88rem;margin-bottom:1.2rem}
+  .card{perspective:900px;height:220px;cursor:pointer;margin-bottom:1.5rem}
+  .inner{position:relative;width:100%;height:100%;
+         transition:transform .45s cubic-bezier(.4,0,.2,1);transform-style:preserve-3d}
+  .card.flipped .inner{transform:rotateY(180deg)}
+  .front,.back{position:absolute;inset:0;border-radius:14px;padding:1.5rem;
+               backface-visibility:hidden;display:flex;flex-direction:column;justify-content:center}
+  .front{background:linear-gradient(135deg,#1a3a6e,#2e5ca8);border:1px solid rgba(79,142,247,.3)}
+  .back{background:rgba(255,255,255,.05);border:1px solid rgba(79,142,247,.2);
+        transform:rotateY(180deg)}
+  .front .q{font-size:1rem;font-weight:600;color:#e8f0ff;text-align:center}
+  .front .hint{font-size:.75rem;color:#8aa0c8;margin-top:.75rem;text-align:center}
+  .back .a{font-size:.95rem;color:#e8f0ff;line-height:1.6}
+  .nav{display:flex;gap:.75rem;justify-content:center;margin-top:.5rem}
+  .btn{padding:.55rem 1.4rem;border-radius:9px;border:1px solid rgba(79,142,247,.3);
+       background:rgba(79,142,247,.1);color:#4f8ef7;font-size:.88rem;font-weight:600;
+       cursor:pointer;font-family:inherit;transition:all .2s}
+  .btn:hover{background:rgba(79,142,247,.2)}
+  .btn.correct{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.4);color:#22c55e}
+  .btn.wrong{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.35);color:#ef4444}
+  .progress{height:4px;background:rgba(79,142,247,.15);border-radius:99px;margin-bottom:1.5rem;overflow:hidden}
+  .progress-bar{height:100%;background:linear-gradient(90deg,#4f8ef7,#a78bfa);
+                border-radius:99px;transition:width .4s}
+  .done{text-align:center;padding:2rem;color:#22c55e;font-size:1.1rem;font-weight:600}
+"""
+    html = """<div class="fc-counter" id="ctr"></div>
+<div class="progress"><div class="progress-bar" id="pb"></div></div>
+<div id="cardWrap"></div>
+<div class="nav">
+  <button class="btn wrong" onclick="mark(false)">✗ Don't know</button>
+  <button class="btn" onclick="flip()">Flip</button>
+  <button class="btn correct" onclick="mark(true)">✓ Know it</button>
+</div>"""
+    script = f"""
+const cards = {cards_json};
+let idx = 0, known = 0;
+function render() {{
+  if (idx >= cards.length) {{
+    document.getElementById('cardWrap').innerHTML = '<div class="done">🎉 Done! ' + known + '/' + cards.length + ' known</div>';
+    document.querySelector('.nav').style.display = 'none';
+    document.getElementById('ctr').textContent = 'Complete';
+    return;
+  }}
+  const c = cards[idx];
+  document.getElementById('ctr').textContent = (idx+1) + ' / ' + cards.length;
+  document.getElementById('pb').style.width = (idx/cards.length*100) + '%';
+  document.getElementById('cardWrap').innerHTML = `
+    <div class="card" id="card" onclick="flip()">
+      <div class="inner">
+        <div class="front"><div class="q">${{c.q}}</div><div class="hint">Click to reveal answer</div></div>
+        <div class="back"><div class="a">${{c.a}}</div></div>
+      </div>
+    </div>`;
+}}
+function flip() {{ document.getElementById('card').classList.toggle('flipped'); }}
+function mark(k) {{ if(k) known++; idx++; render(); }}
+render();
+"""
+    return _page_shell(f"Flash Cards — {title}", css, html, script)
+
+
+@app.route("/api/view/quiz/<job_id>")
+def view_quiz(job_id):
+    if not _valid_job(job_id):
+        return "<h2 style='font-family:sans-serif;padding:2rem'>Invalid job ID</h2>", 400
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if not job:
+        return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
+    guide = job["guide"]
+    title = _he(guide.get("title", "Quiz"))
+    mcqs = [m for m in guide.get("mcqs", []) if isinstance(m, dict)]
+    if not mcqs:
+        return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No quiz questions available.</p>")
+
+    mcqs_json = json.dumps(mcqs)
+    css = """
+  .q-num{color:#8aa0c8;font-size:.82rem;margin-bottom:.4rem}
+  .q-text{font-size:1rem;font-weight:600;color:#e8f0ff;margin-bottom:1rem;line-height:1.5}
+  .opt{display:flex;align-items:center;gap:.6rem;width:100%;text-align:left;
+       padding:.6rem .9rem;border-radius:9px;border:1px solid rgba(79,142,247,.2);
+       background:rgba(255,255,255,.04);color:#8aa0c8;font-size:.88rem;cursor:pointer;
+       font-family:inherit;margin-bottom:.45rem;transition:all .2s}
+  .opt:hover:not(:disabled){border-color:#4f8ef7;color:#e8f0ff}
+  .opt.correct{border-color:#22c55e;color:#22c55e;background:rgba(34,197,94,.1)}
+  .opt.wrong{border-color:#ef4444;color:#ef4444;background:rgba(239,68,68,.08)}
+  .explanation{margin-top:.75rem;padding:.75rem;border-radius:9px;
+               background:rgba(79,142,247,.08);border:1px solid rgba(79,142,247,.2);
+               font-size:.85rem;color:#8aa0c8;display:none}
+  .nav{margin-top:1.25rem;display:flex;justify-content:flex-end}
+  .next-btn{padding:.55rem 1.4rem;border-radius:9px;border:none;
+            background:linear-gradient(135deg,#4f8ef7,#2e5ca8);color:#fff;
+            font-size:.88rem;font-weight:600;cursor:pointer;font-family:inherit;display:none}
+  .score-box{text-align:center;padding:2.5rem;background:rgba(79,142,247,.08);
+             border:1px solid rgba(79,142,247,.2);border-radius:16px}
+  .score-big{font-size:3rem;font-weight:700;color:#4f8ef7}
+  .progress{height:4px;background:rgba(79,142,247,.15);border-radius:99px;margin-bottom:1.5rem;overflow:hidden}
+  .progress-bar{height:100%;background:linear-gradient(90deg,#4f8ef7,#a78bfa);
+                border-radius:99px;transition:width .4s}
+"""
+    html = """<div class="progress"><div class="progress-bar" id="pb"></div></div>
+<div id="qWrap"></div>"""
+    script = f"""
+const qs = {mcqs_json};
+let idx=0, score=0, answered=false;
+function render() {{
+  if(idx>=qs.length){{
+    document.getElementById('qWrap').innerHTML=`<div class="score-box">
+      <div class="score-big">${{score}}/${{qs.length}}</div>
+      <div style="color:#8aa0c8;margin-top:.5rem">Quiz complete!</div>
+    </div>`;
+    document.getElementById('pb').style.width='100%';
+    return;
+  }}
+  const q=qs[idx]; answered=false;
+  document.getElementById('pb').style.width=(idx/qs.length*100)+'%';
+  const opts=q.options.map((o,i)=>`<button class="opt" id="o${{i}}" onclick="pick('${{o[0]}}',this)">${{o}}</button>`).join('');
+  document.getElementById('qWrap').innerHTML=`
+    <div class="q-num">Question ${{idx+1}} of ${{qs.length}}</div>
+    <div class="q-text">${{q.q}}</div>
+    ${{opts}}
+    <div class="explanation" id="exp">${{q.explanation||''}}</div>
+    <div class="nav"><button class="next-btn" id="nxt" onclick="next()">Next →</button></div>`;
+}}
+function pick(letter,btn) {{
+  if(answered) return; answered=true;
+  const q=qs[idx];
+  document.querySelectorAll('.opt').forEach(b=>b.disabled=true);
+  if(letter===q.answer){{ btn.classList.add('correct'); score++; }}
+  else {{ btn.classList.add('wrong');
+    document.querySelectorAll('.opt').forEach(b=>{{if(b.textContent.startsWith(q.answer)) b.classList.add('correct');}});
+  }}
+  document.getElementById('exp').style.display='block';
+  document.getElementById('nxt').style.display='inline-block';
+}}
+function next(){{ idx++; render(); }}
+render();
+"""
+    return _page_shell(f"Quiz — {title}", css, html, script)
+
+
+@app.route("/api/status")
+def status():
+    running = ollama_running()
+    models  = ollama_models() if running else []
+    active  = next((m for m in models if OLLAMA_MODEL in m), models[0] if models else None)
+    return jsonify({"ollama": running, "model": active, "models": models})
+
+
+# Keep old endpoint for backwards compat
+@app.route("/api/summarize", methods=["POST"])
+def summarize():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    f = request.files["file"]
+    language = request.form.get("language", "en")
+    if not f.filename.lower().endswith((".pptx", ".ppt", ".pdf")):
+        return jsonify({"error": "Please upload a .pptx, .ppt, or .pdf file"}), 400
+    if not ollama_running():
+        return jsonify({"error": "Ollama is not running"}), 503
+    try:
+        slides = extract_slides(io.BytesIO(f.read()))
+        guide  = ask_ollama(slides, language)
+        pdf    = build_pdf(guide, language)
+        return send_file(pdf, mimetype="application/pdf", as_attachment=True,
+                         download_name=f"study_guide_{uuid.uuid4().hex[:6]}.pdf")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def serve(path):
+    if path and os.path.exists(os.path.join(DIST, path)):
+        return send_from_directory(DIST, path)
+    return send_from_directory(DIST, "index.html")
+
+
+if __name__ == "__main__":
+    print(f"  Model : {OLLAMA_MODEL}")
+    print(f"  Ollama: {'running' if ollama_running() else 'NOT running — run: ollama serve'}")
+    app.run(debug=False, host="127.0.0.1", port=5000, threaded=True)
