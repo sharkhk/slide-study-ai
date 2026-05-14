@@ -35,7 +35,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
 DIST         = os.path.join(os.path.dirname(__file__), "dist")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama3-8b-8192")
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
 
@@ -567,8 +567,8 @@ def _call_groq(prompt, retries=5):
             {"role": "user",   "content": prompt},
         ],
         "temperature": 0,
-        "response_format": {"type": "json_object"},
     }
+    time.sleep(5)  # space calls to stay under 6k tokens/min free limit
     last_err = None
     for attempt in range(retries):
         try:
