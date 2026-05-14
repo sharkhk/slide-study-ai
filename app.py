@@ -322,9 +322,13 @@ def _valid_job(job_id):
 def _he(s):
     return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;')
 
-# ── In-memory job store (auto-cleaned after 10 min) ───────────────────────────
+# ── Job store (memory + /tmp disk fallback) ───────────────────────────────────
+_JOB_TTL   = 7200  # 2 hours
+_JOBS_DIR  = os.path.join(os.sep, "tmp", "slide-study-jobs")
+os.makedirs(_JOBS_DIR, exist_ok=True)
+
 _jobs      = OrderedDict()
-_jobs_lock = threading.Lock()
+_jobs_lock = threading.RLock()  # reentrant — get_job may acquire while route holds it
 
 # Ollama can only run one inference at a time locally. Serialise all calls so
 # the ThreadPoolExecutor doesn't flood it, which causes truncated JSON output.
@@ -332,15 +336,52 @@ _ollama_sem      = threading.Semaphore(1)
 _ollama_raw_lock = threading.Lock()  # protect concurrent debug-file writes
 
 def store_job(job_id, pdf_bytes, md_text, guide, slides, filename):
+    ts = time.time()
     with _jobs_lock:
         _jobs[job_id] = {
             "pdf": pdf_bytes, "md": md_text,
             "guide": guide,   "slides": slides,
-            "filename": filename, "ts": time.time()
+            "filename": filename, "ts": ts
         }
-        stale = [k for k, v in list(_jobs.items()) if time.time() - v["ts"] > 600]
+        stale = [k for k, v in list(_jobs.items()) if time.time() - v["ts"] > _JOB_TTL]
         for k in stale:
             del _jobs[k]
+    try:
+        meta = {"md": md_text, "guide": guide, "slides": slides, "filename": filename, "ts": ts}
+        with open(os.path.join(_JOBS_DIR, f"{job_id}.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        with open(os.path.join(_JOBS_DIR, f"{job_id}.pdf"), "wb") as f:
+            f.write(pdf_bytes)
+    except Exception as e:
+        _log.warning("store_job disk write failed: %s", e)
+
+def _load_job_from_disk(job_id):
+    try:
+        json_path = os.path.join(_JOBS_DIR, f"{job_id}.json")
+        pdf_path  = os.path.join(_JOBS_DIR, f"{job_id}.pdf")
+        if not os.path.exists(json_path):
+            return None
+        with open(json_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        if time.time() - meta.get("ts", 0) > _JOB_TTL:
+            os.remove(json_path)
+            if os.path.exists(pdf_path): os.remove(pdf_path)
+            return None
+        pdf_bytes = open(pdf_path, "rb").read() if os.path.exists(pdf_path) else b""
+        job = {"pdf": pdf_bytes, **meta}
+        with _jobs_lock:
+            _jobs[job_id] = job
+        return job
+    except Exception as e:
+        _log.warning("load_job disk read failed: %s", e)
+        return None
+
+def get_job(job_id):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+    if job:
+        return job
+    return _load_job_from_disk(job_id)
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY        = colors.HexColor('#0a1628')
@@ -1352,7 +1393,7 @@ def download_job(job_id):
     fmt      = request.args.get("format", "pdf")
     filename = _safe_name(request.args.get("filename", "study_guide"))
     with _jobs_lock:
-        job = _jobs.get(job_id)   # keep in store — TTL handles cleanup
+        job = get_job(job_id)   # keep in store — TTL handles cleanup
     if not job:
         return jsonify({"error": "File not found or expired"}), 404
     if fmt == "md":
@@ -1368,7 +1409,7 @@ def get_guide(job_id):
     if not _valid_job(job_id):
         return jsonify({"error": "Invalid job ID"}), 400
     with _jobs_lock:
-        job = _jobs.get(job_id)
+        job = get_job(job_id)
     if not job:
         return jsonify({"error": "Session expired — re-upload the file"}), 404
     guide = job.get("guide", {})
@@ -1391,7 +1432,7 @@ def chat_with_slides(job_id):
     if not question:
         return jsonify({"error": "No question provided"}), 400
     with _jobs_lock:
-        job = _jobs.get(job_id)
+        job = get_job(job_id)
     if not job:
         return jsonify({"error": "Session expired — re-upload the file"}), 404
     slides  = job.get("slides", [])
@@ -1441,7 +1482,7 @@ def view_md(job_id):
     if not _valid_job(job_id):
         return "<h2 style='font-family:sans-serif;padding:2rem'>Invalid job ID</h2>", 400
     with _jobs_lock:
-        job = _jobs.get(job_id)
+        job = get_job(job_id)
     if not job:
         return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired (10 min TTL)</h2>", 404
     title = _he(job["guide"].get("title", "Study Guide"))
@@ -1530,7 +1571,7 @@ def view_cards(job_id):
     if not _valid_job(job_id):
         return "<h2 style='font-family:sans-serif;padding:2rem'>Invalid job ID</h2>", 400
     with _jobs_lock:
-        job = _jobs.get(job_id)
+        job = get_job(job_id)
     if not job:
         return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
     guide = job["guide"]
@@ -1607,7 +1648,7 @@ def view_quiz(job_id):
     if not _valid_job(job_id):
         return "<h2 style='font-family:sans-serif;padding:2rem'>Invalid job ID</h2>", 400
     with _jobs_lock:
-        job = _jobs.get(job_id)
+        job = get_job(job_id)
     if not job:
         return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
     guide = job["guide"]
