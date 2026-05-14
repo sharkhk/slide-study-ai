@@ -35,7 +35,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
 DIST         = os.path.join(os.path.dirname(__file__), "dist")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama3-8b-8192")
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
 
@@ -514,7 +514,7 @@ def _call_ollama(prompt, retries=3, num_predict=4096):
     raise last_err
 
 
-def _call_groq(prompt, retries=3):
+def _call_groq(prompt, retries=5):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
@@ -535,6 +535,11 @@ def _call_groq(prompt, retries=3):
                 "https://api.groq.com/openai/v1/chat/completions",
                 json=payload, headers=headers, timeout=120
             )
+            if r.status_code == 429:
+                wait = int(r.headers.get("retry-after", 60))
+                _log.warning("GROQ rate limited — waiting %ds", wait)
+                time.sleep(wait)
+                continue
             r.raise_for_status()
             raw_content = r.json()["choices"][0]["message"]["content"]
             return _extract_json(raw_content)
@@ -542,7 +547,7 @@ def _call_groq(prompt, retries=3):
             last_err = e
             _log.warning("GROQ attempt %d/%d failed: %s", attempt + 1, retries, e)
             if attempt < retries - 1:
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(2 * (attempt + 1))
     raise last_err
 
 
