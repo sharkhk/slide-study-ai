@@ -1733,67 +1733,142 @@ def status():
 
 # ── YouTube transcript endpoint ───────────────────────────────────────────────
 
-def _fetch_youtube_transcript(video_id):
-    """Fetch transcript from YouTube page source via captionTracks."""
-    url = f"https://www.youtube.com/watch?v={video_id}"
-    try:
-        r = http.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-    except Exception as e:
-        raise ValueError(f"Could not fetch YouTube page: {e}")
-
-    html = r.text
-    # Find captionTracks JSON blob
-    m = re.search(r'"captionTracks":\s*(\[.*?\])', html)
-    if not m:
-        raise ValueError("No captions found for this video (auto-captions may be disabled).")
-
-    try:
-        tracks = json.loads(m.group(1))
-    except Exception:
-        raise ValueError("Could not parse caption track data.")
-
-    if not tracks:
-        raise ValueError("No caption tracks available.")
-
-    # Prefer English, fall back to first
-    track_url = None
-    for t in tracks:
-        lang = t.get("languageCode", "")
-        if lang.startswith("en"):
-            track_url = t.get("baseUrl")
-            break
-    if not track_url:
-        track_url = tracks[0].get("baseUrl")
-
-    if not track_url:
-        raise ValueError("Caption track URL not found.")
-
-    try:
-        tr = http.get(track_url, timeout=15)
-        tr.raise_for_status()
-    except Exception as e:
-        raise ValueError(f"Could not fetch caption XML: {e}")
-
-    # Parse XML <text> tags
+def _parse_caption_xml(xml_text):
+    """Parse YouTube caption XML and return joined transcript string."""
     import xml.etree.ElementTree as ET
     try:
-        root = ET.fromstring(tr.text)
+        root = ET.fromstring(xml_text)
     except Exception:
-        raise ValueError("Could not parse caption XML.")
-
+        return None
     texts = []
     for elem in root.iter("text"):
         t = (elem.text or "").strip()
         if t:
-            # Unescape HTML entities
             t = t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
             texts.append(t)
+    return " ".join(texts) if texts else None
 
-    if not texts:
-        raise ValueError("Caption track contains no text.")
 
-    return " ".join(texts)
+def _fetch_captions(video_id):
+    """Try multiple methods to get transcript from YouTube without downloading audio."""
+    html = None
+
+    # Method 1 — captionTracks from page source
+    try:
+        r = http.get(f"https://www.youtube.com/watch?v={video_id}", timeout=15,
+                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        r.raise_for_status()
+        html = r.text
+    except Exception:
+        pass
+
+    if html:
+        m = re.search(r'"captionTracks":\s*(\[.*?\])', html)
+        if m:
+            try:
+                tracks = json.loads(m.group(1))
+                # Prefer English ASR, then English, then any
+                def track_priority(t):
+                    lc = t.get("languageCode", "")
+                    kind = t.get("kind", "")
+                    if lc.startswith("en") and kind == "asr": return 0
+                    if lc.startswith("en"): return 1
+                    return 2
+                tracks.sort(key=track_priority)
+                for track in tracks:
+                    track_url = track.get("baseUrl")
+                    if not track_url:
+                        continue
+                    try:
+                        tr = http.get(track_url, timeout=15)
+                        result = _parse_caption_xml(tr.text)
+                        if result:
+                            return result
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+    # Method 2 — timedtext API (works for many videos without captionTracks in HTML)
+    for kind in ("asr", ""):
+        for lang in ("en", "en-US", "en-GB"):
+            params = {"v": video_id, "lang": lang, "fmt": "srv3"}
+            if kind:
+                params["kind"] = kind
+            try:
+                tr = http.get("https://www.youtube.com/api/timedtext", params=params, timeout=10)
+                if tr.status_code == 200 and tr.text.strip():
+                    result = _parse_caption_xml(tr.text)
+                    if result:
+                        return result
+            except Exception:
+                continue
+
+    raise ValueError("no_captions")
+
+
+def _transcribe_with_whisper(video_id):
+    """Download audio to /tmp, transcribe with Groq Whisper, delete immediately."""
+    import glob
+    try:
+        import yt_dlp
+    except ImportError:
+        raise ValueError("yt-dlp not installed — cannot transcribe audio.")
+
+    prefix = os.path.join("/tmp", f"yt_{video_id}")
+    try:
+        ydl_opts = {
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+            "outtmpl": prefix + ".%(ext)s",
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "socket_timeout": 30,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+
+        files = glob.glob(prefix + ".*")
+        if not files:
+            raise ValueError("Audio download produced no file.")
+        audio_path = files[0]
+
+        size = os.path.getsize(audio_path)
+        if size > 24 * 1024 * 1024:
+            raise ValueError("Video audio exceeds 24 MB — try a video shorter than ~20 minutes.")
+
+        ext = os.path.splitext(audio_path)[1].lstrip(".")
+        mime = "audio/mp4" if ext in ("m4a", "mp4") else "audio/webm"
+
+        with open(audio_path, "rb") as af:
+            r = http.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": (f"audio.{ext}", af, mime)},
+                data={"model": "whisper-large-v3-turbo", "response_format": "text"},
+                timeout=300,
+            )
+        r.raise_for_status()
+        return r.text.strip()
+
+    finally:
+        for f in glob.glob(prefix + ".*"):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+
+def _fetch_youtube_transcript(video_id):
+    """Try captions first; fall back to Whisper audio transcription."""
+    try:
+        return _fetch_captions(video_id)
+    except ValueError as e:
+        if str(e) != "no_captions":
+            raise
+    if not GROQ_API_KEY:
+        raise ValueError("No captions found and GROQ_API_KEY not set for Whisper fallback.")
+    return _transcribe_with_whisper(video_id)
 
 
 def _text_to_slides(text, chunk_size=500):
@@ -1932,15 +2007,34 @@ def youtube_transcript():
     if not video_id:
         return jsonify({"error": "Could not extract video ID from URL"}), 400
 
-    try:
-        transcript_text = _fetch_youtube_transcript(video_id)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
     out_name = _safe_name(f"youtube_{video_id}")
-    gen = _stream_text_as_sse(transcript_text, language, out_name, "youtube")
+
+    def generate():
+        try:
+            yield _sse({"step": "transcript", "msg": "Looking for captions…"})
+            try:
+                transcript_text = _fetch_captions(video_id)
+                yield _sse({"step": "transcript", "msg": "Captions found — processing…"})
+            except ValueError as e:
+                if str(e) != "no_captions":
+                    yield _sse({"error": str(e)}); return
+                if not GROQ_API_KEY:
+                    yield _sse({"error": "No captions found and GROQ_API_KEY not set."}); return
+                yield _sse({"step": "transcript", "msg": "No captions — downloading audio for Whisper transcription…"})
+                try:
+                    transcript_text = _transcribe_with_whisper(video_id)
+                    yield _sse({"step": "transcript", "msg": "Audio transcribed — processing…"})
+                except ValueError as we:
+                    yield _sse({"error": str(we)}); return
+
+            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube")():
+                yield event
+        except Exception as ex:
+            _log.error("youtube SSE error: %s", ex)
+            yield _sse({"error": str(ex)})
+
     return Response(
-        stream_with_context(gen()),
+        stream_with_context(generate()),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )

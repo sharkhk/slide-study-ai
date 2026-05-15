@@ -6,3 +6,4 @@ reportlab
 olefile
 pypdf
 gunicorn
+yt-dlp
