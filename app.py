@@ -1818,7 +1818,8 @@ def _transcribe_with_whisper(video_id):
     prefix = os.path.join("/tmp", f"yt_{video_id}")
     try:
         ydl_opts = {
-            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+            # Prefer smallest audio: opus<96k > m4a < 96k > any audio
+            "format": "bestaudio[abr<=96][ext=webm]/bestaudio[abr<=96][ext=m4a]/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
             "outtmpl": prefix + ".%(ext)s",
             "quiet": True,
             "no_warnings": True,
@@ -1834,8 +1835,8 @@ def _transcribe_with_whisper(video_id):
         audio_path = files[0]
 
         size = os.path.getsize(audio_path)
-        if size > 24 * 1024 * 1024:
-            raise ValueError("Video audio exceeds 24 MB — try a video shorter than ~20 minutes.")
+        if size > 20 * 1024 * 1024:
+            raise ValueError("Video audio exceeds 20 MB — try a shorter video (under ~15 minutes).")
 
         ext = os.path.splitext(audio_path)[1].lstrip(".")
         mime = "audio/mp4" if ext in ("m4a", "mp4") else "audio/webm"
@@ -1848,6 +1849,8 @@ def _transcribe_with_whisper(video_id):
                 data={"model": "whisper-large-v3-turbo", "response_format": "text"},
                 timeout=300,
             )
+        if r.status_code == 413:
+            raise ValueError("Audio file too large for Whisper — try a shorter video (under ~15 minutes).")
         r.raise_for_status()
         return r.text.strip()
 
