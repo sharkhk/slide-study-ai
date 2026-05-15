@@ -1066,7 +1066,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
         "obj_bullet": "• " if is_ar else "◆  ",
         "contents":   T("المحتويات") if is_ar else "CONTENTS",
         "kw_head":    T("قاموس المصطلحات") if is_ar else "■  KEYWORDS CHEATSHEET",
-        "kw_append":  [(T("القاموس"), ""), (T("بطاقات المراجعة"), "")] if is_ar
+        "kw_append":  [(T("قاموس المصطلحات"), ""), (T("بطاقات المراجعة"), "")] if is_ar
                       else [("KEYWORDS CHEATSHEET", ""), ("FLASH CARDS", "")],
         "fc_head":    T("بطاقات المراجعة") if is_ar else "■  FLASH CARDS",
         "sec_bullet": "" if is_ar else "■  ",
@@ -1370,7 +1370,6 @@ def summarize_stream():
     file_bytes = f.read()
 
     def generate():
-        nonlocal lang_param
         try:
             yield _sse({"step": "extract", "msg": "Extracting content…"})
             slides = extract_slides(io.BytesIO(file_bytes))
