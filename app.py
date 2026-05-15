@@ -1731,6 +1731,304 @@ def status():
     return jsonify({"ollama": running, "model": active, "models": models})
 
 
+# ── YouTube transcript endpoint ───────────────────────────────────────────────
+
+def _fetch_youtube_transcript(video_id):
+    """Fetch transcript from YouTube page source via captionTracks."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        r = http.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+    except Exception as e:
+        raise ValueError(f"Could not fetch YouTube page: {e}")
+
+    html = r.text
+    # Find captionTracks JSON blob
+    m = re.search(r'"captionTracks":\s*(\[.*?\])', html)
+    if not m:
+        raise ValueError("No captions found for this video (auto-captions may be disabled).")
+
+    try:
+        tracks = json.loads(m.group(1))
+    except Exception:
+        raise ValueError("Could not parse caption track data.")
+
+    if not tracks:
+        raise ValueError("No caption tracks available.")
+
+    # Prefer English, fall back to first
+    track_url = None
+    for t in tracks:
+        lang = t.get("languageCode", "")
+        if lang.startswith("en"):
+            track_url = t.get("baseUrl")
+            break
+    if not track_url:
+        track_url = tracks[0].get("baseUrl")
+
+    if not track_url:
+        raise ValueError("Caption track URL not found.")
+
+    try:
+        tr = http.get(track_url, timeout=15)
+        tr.raise_for_status()
+    except Exception as e:
+        raise ValueError(f"Could not fetch caption XML: {e}")
+
+    # Parse XML <text> tags
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(tr.text)
+    except Exception:
+        raise ValueError("Could not parse caption XML.")
+
+    texts = []
+    for elem in root.iter("text"):
+        t = (elem.text or "").strip()
+        if t:
+            # Unescape HTML entities
+            t = t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
+            texts.append(t)
+
+    if not texts:
+        raise ValueError("Caption track contains no text.")
+
+    return " ".join(texts)
+
+
+def _text_to_slides(text, chunk_size=500):
+    """Split plain text into slide-like dicts."""
+    words = text.split()
+    chunks = []
+    current = []
+    current_len = 0
+    for w in words:
+        current.append(w)
+        current_len += len(w) + 1
+        if current_len >= chunk_size:
+            chunks.append(" ".join(current))
+            current = []
+            current_len = 0
+    if current:
+        chunks.append(" ".join(current))
+    return [
+        {"slide_num": i + 1, "title": f"Segment {i + 1}", "content": c}
+        for i, c in enumerate(chunks)
+    ]
+
+
+def _extract_video_id(url):
+    """Extract YouTube video ID from various URL formats."""
+    patterns = [
+        r'(?:v=|youtu\.be/|/embed/|/shorts/)([a-zA-Z0-9_-]{11})',
+    ]
+    for p in patterns:
+        m = re.search(p, url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _stream_text_as_sse(text, language, out_name, job_source):
+    """Shared SSE generator for YouTube/text endpoints."""
+    def generate():
+        try:
+            yield _sse({"step": "extract", "msg": "Preparing content…"})
+            slides = _text_to_slides(text)
+            if not slides:
+                yield _sse({"error": "No content extracted"}); return
+            yield _sse({"step": "extract", "msg": f"Split into {len(slides)} segments — analysing…"})
+
+            dcfg = DETAIL["standard"]
+
+            yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
+            overview = pass1_overview(slides, language, dcfg)
+
+            raw_sections = overview.get("sections", [])
+            overview["sections"] = [
+                s if isinstance(s, dict) else {"title": str(s), "slide_nums": []}
+                for s in (raw_sections if isinstance(raw_sections, list) else [])
+            ]
+            raw_keywords = overview.get("keywords", [])
+            overview["keywords"] = [
+                k if isinstance(k, dict) else {"term": str(k), "definition": ""}
+                for k in (raw_keywords if isinstance(raw_keywords, list) else [])
+            ]
+            if not overview["sections"]:
+                overview["sections"] = [{
+                    "title": overview.get("title", "Content Overview"),
+                    "slide_nums": [s["slide_num"] for s in slides]
+                }]
+
+            sections = overview["sections"]
+            for i, sec in enumerate(sections):
+                yield _sse({"step": "section",
+                            "msg": f"Section {i+1}/{len(sections)}: {sec.get('title','')}…"})
+                nums = set(sec.get("slide_nums", []))
+                sec_slides = [s for s in slides if s["slide_num"] in nums]
+                if not sec_slides:
+                    n_sec = len(sections)
+                    chunk = max(1, len(slides) // n_sec)
+                    start = i * chunk
+                    end = start + chunk if i < n_sec - 1 else len(slides)
+                    sec_slides = slides[start:end] or slides
+                try:
+                    det = pass2_section(sec.get("title", ""), sec_slides, language, dcfg)
+                    sec["bullets"] = det.get("bullets", [])
+                    if isinstance(det.get("table"), dict):
+                        sec["table"] = det["table"]
+                except Exception:
+                    sec["bullets"] = []
+                yield _sse({"step": "section",
+                            "msg": f"Sections: {i+1}/{len(sections)} done…"})
+
+            yield _sse({"step": "flashcards", "msg": "Generating flash cards…"})
+            try:
+                fc = pass3_flashcards(overview, language, dcfg)
+                overview["flashcards"] = fc.get("flashcards", [])
+            except Exception:
+                overview["flashcards"] = []
+            yield _sse({"step": "flashcards", "msg": "Flash cards ready…"})
+
+            yield _sse({"step": "mcq", "msg": "Generating quiz…"})
+            try:
+                mc = pass4_mcq(overview, language, dcfg)
+                overview["mcqs"] = mc.get("mcqs", [])
+            except Exception:
+                overview["mcqs"] = []
+            yield _sse({"step": "mcq", "msg": "Quiz ready…"})
+
+            yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"})
+            pdf_buf = build_pdf(overview, language, out_name)
+            pdf_bytes = pdf_buf.read()
+            md_text = build_markdown(overview)
+
+            job_id = uuid.uuid4().hex
+            store_job(job_id, pdf_bytes, md_text, overview, slides, f"{out_name}_study_guide.pdf")
+
+            yield _sse({"step": "done", "job_id": job_id,
+                        "sections":   len(sections),
+                        "keywords":   len(overview.get("keywords",   [])),
+                        "flashcards": len(overview.get("flashcards", [])),
+                        "mcqs":       len(overview.get("mcqs",       []))})
+
+        except Exception as e:
+            _log.error("STREAM_TEXT_ERROR: %s\n%s", e, _tb.format_exc())
+            yield _sse({"error": str(e)})
+    return generate
+
+
+@app.route("/api/youtube", methods=["POST"])
+def youtube_transcript():
+    data = request.json or {}
+    url = (data.get("url") or "").strip()
+    language = "ar" if data.get("language") == "ar" else "en"
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
+    if not ollama_running():
+        return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
+
+    video_id = _extract_video_id(url)
+    if not video_id:
+        return jsonify({"error": "Could not extract video ID from URL"}), 400
+
+    try:
+        transcript_text = _fetch_youtube_transcript(video_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    out_name = _safe_name(f"youtube_{video_id}")
+    gen = _stream_text_as_sse(transcript_text, language, out_name, "youtube")
+    return Response(
+        stream_with_context(gen()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+
+
+# ── URL / pasted text endpoint ─────────────────────────────────────────────────
+
+def _fetch_url_text(url):
+    """Fetch a webpage and extract readable text from p/h/li tags."""
+    try:
+        r = http.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+    except Exception as e:
+        raise ValueError(f"Could not fetch URL: {e}")
+    html = r.text
+    # Remove script/style blocks
+    html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
+    # Extract text from meaningful tags
+    parts = []
+    for m in re.finditer(r'<(h[1-6]|p|li)[^>]*>(.*?)</\1>', html, re.DOTALL | re.IGNORECASE):
+        inner = re.sub(r'<[^>]+>', ' ', m.group(2))
+        inner = inner.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&nbsp;', ' ').replace('&#39;', "'").replace('&quot;', '"')
+        inner = ' '.join(inner.split())
+        if len(inner) > 20:
+            parts.append(inner)
+    return ' '.join(parts) if parts else ' '.join(re.sub(r'<[^>]+>', ' ', html).split())
+
+
+@app.route("/api/summarize-text", methods=["POST"])
+def summarize_text():
+    data = request.json or {}
+    text = (data.get("text") or "").strip()
+    url  = (data.get("url")  or "").strip()
+    language = "ar" if data.get("language") == "ar" else "en"
+    filename = _safe_name(data.get("filename") or "pasted_text")
+
+    if not ollama_running():
+        return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
+
+    if not text and url:
+        try:
+            text = _fetch_url_text(url)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+    if not text:
+        return jsonify({"error": "No text or URL provided"}), 400
+
+    gen = _stream_text_as_sse(text, language, filename, "text")
+    return Response(
+        stream_with_context(gen()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+
+
+# ── Anki export endpoint ───────────────────────────────────────────────────────
+
+@app.route("/api/export/anki/<job_id>")
+def export_anki(job_id):
+    if not _valid_job(job_id):
+        return jsonify({"error": "Invalid job ID"}), 400
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "Job not found or expired"}), 404
+    guide = job.get("guide", {})
+    flashcards = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
+    if not flashcards:
+        return jsonify({"error": "No flashcards available for this job"}), 404
+
+    import csv
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["front", "back"])
+    for fc in flashcards:
+        writer.writerow([fc.get("q", ""), fc.get("a", "")])
+
+    csv_bytes = buf.getvalue().encode("utf-8")
+    base = job.get("filename", "study_guide").replace(".pdf", "")
+    download_name = f"{_safe_name(base)}_anki.csv"
+    return send_file(
+        io.BytesIO(csv_bytes),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name=download_name
+    )
+
+
 # Keep old endpoint for backwards compat
 @app.route("/api/summarize", methods=["POST"])
 def summarize():
