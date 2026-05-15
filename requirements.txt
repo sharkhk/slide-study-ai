@@ -7,3 +7,4 @@ olefile
 pypdf
 gunicorn
 yt-dlp
+pycryptodome
