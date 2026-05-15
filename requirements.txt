@@ -8,3 +8,5 @@ pypdf
 gunicorn
 yt-dlp
 pycryptodome
+arabic-reshaper
+python-bidi

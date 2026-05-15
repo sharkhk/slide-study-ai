@@ -32,6 +32,8 @@ from reportlab.platypus import (
     HRFlowable, KeepTogether
 )
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.pdfbase import pdfmetrics as _pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont as _TTFont
 
 DIST         = os.path.join(os.path.dirname(__file__), "dist")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
@@ -44,6 +46,44 @@ DETAIL = {
     "standard": {"slide_chars": 700,  "max_slides": 60,  "keywords": "18-25", "bullets": "3-8",  "n_flash": 14, "n_mcq": 10, "num_predict": 4096},
     "detailed": {"slide_chars": 1200, "max_slides": 120, "keywords": "25-35", "bullets": "5-12", "n_flash": 20, "n_mcq": 15, "num_predict": 6000},
 }
+
+# ── Arabic PDF support ─────────────────────────────────────────────────────────
+_ARABIC_FONT      = "NotoNaskhArabic"
+_ARABIC_FONT_PATH = "/tmp/NotoNaskhArabic.ttf"
+_arabic_font_ok   = False
+_arabic_font_lock = threading.Lock()
+
+def _ensure_arabic_font():
+    global _arabic_font_ok
+    with _arabic_font_lock:
+        if _arabic_font_ok:
+            return True
+        try:
+            if not os.path.exists(_ARABIC_FONT_PATH):
+                r = http.get(
+                    "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoNaskhArabic/NotoNaskhArabic-Regular.ttf",
+                    timeout=30, allow_redirects=True
+                )
+                r.raise_for_status()
+                with open(_ARABIC_FONT_PATH, "wb") as fh:
+                    fh.write(r.content)
+            _pdfmetrics.registerFont(_TTFont(_ARABIC_FONT, _ARABIC_FONT_PATH))
+            _arabic_font_ok = True
+            return True
+        except Exception as exc:
+            print(f"Arabic font error: {exc}", flush=True)
+            return False
+
+def _ar(text):
+    """Reshape + bidi-flip Arabic for correct visual display in LTR PDF renderer."""
+    if not text:
+        return text
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        return get_display(arabic_reshaper.reshape(str(text)))
+    except ImportError:
+        return str(text)
 
 app = Flask(__name__, static_folder=DIST, static_url_path="")
 app.config['SECRET_KEY'] = secrets.token_hex(32)
@@ -609,13 +649,30 @@ def _as_dict(result, list_key=None):
     return {}
 
 
+def _detect_language(content):
+    """Detect 'ar' or 'en' from slides list or plain text. Based on Arabic char ratio."""
+    if isinstance(content, list):
+        sample = " ".join(
+            f"{s.get('title', '')} {s.get('content', '')}" for s in content[:20]
+        )
+    else:
+        sample = str(content)[:6000]
+    arabic = sum(1 for c in sample if '؀' <= c <= 'ۿ')
+    alpha  = sum(1 for c in sample if c.isalpha())
+    return "ar" if alpha > 0 and arabic / alpha > 0.25 else "en"
+
+
 def pass1_overview(slides, language, dcfg=None):
     """Get title, objectives, section groupings, and keywords."""
     dcfg = dcfg or DETAIL["standard"]
     lang = "in Arabic" if language == "ar" else "in English"
+    # Include ALL slides for grouping; use title-only for slides beyond max_slides
+    # to keep the LLM input within token limits for large presentations.
     outline = "".join(
         f"Slide {s['slide_num']}: {s['title']}\n{s['content'][:dcfg['slide_chars']]}\n\n"
-        for s in slides[:dcfg["max_slides"]]
+        if i < dcfg["max_slides"] else
+        f"Slide {s['slide_num']}: {s['title']}\n"
+        for i, s in enumerate(slides)
     )
     result = _call_ollama(f"""Create a study guide overview {lang} from this PowerPoint outline.
 
@@ -988,13 +1045,36 @@ def _page_num(canvas, doc):
 
 
 def build_pdf(guide, language, out_filename="study_guide"):
-    # Sanitise — ensure every list only contains dicts
     if not isinstance(guide, dict):
         guide = {}
     guide["sections"]   = [s for s in guide.get("sections",   []) if isinstance(s, dict)]
     guide["keywords"]   = [k for k in guide.get("keywords",   []) if isinstance(k, dict)]
     guide["flashcards"] = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
     guide["objectives"] = [o for o in guide.get("objectives", []) if isinstance(o, str)]
+
+    is_ar = (language == "ar")
+    ar_ok = is_ar and _ensure_arabic_font()
+    AF    = _ARABIC_FONT if ar_ok else "Helvetica"
+    AFB   = _ARABIC_FONT if ar_ok else "Helvetica-Bold"
+    ALIGN = TA_RIGHT if is_ar else TA_LEFT
+
+    def T(text):
+        return _ar(str(text)) if ar_ok else str(text)
+
+    L = {
+        "objectives": T("الأهداف التعليمية") if is_ar else "◆  LEARNING OBJECTIVES",
+        "obj_bullet": "• " if is_ar else "◆  ",
+        "contents":   T("المحتويات") if is_ar else "CONTENTS",
+        "kw_head":    T("قاموس المصطلحات") if is_ar else "■  KEYWORDS CHEATSHEET",
+        "kw_append":  [(T("القاموس"), ""), (T("بطاقات المراجعة"), "")] if is_ar
+                      else [("KEYWORDS CHEATSHEET", ""), ("FLASH CARDS", "")],
+        "fc_head":    T("بطاقات المراجعة") if is_ar else "■  FLASH CARDS",
+        "sec_bullet": "" if is_ar else "■  ",
+        "bul_bullet": "• " if is_ar else "▸  ",
+        "q_pre":      T("سؤال: ") if is_ar else "Q:  ",
+        "guide":      T("دليل الدراسة بالذكاء الاصطناعي") if is_ar else "AI Exam Study Guide",
+        "luck":       T("حظ سعيد!") if is_ar else "Good luck!",
+    }
 
     buf = io.BytesIO()
     W   = 17.4*cm
@@ -1013,30 +1093,31 @@ def build_pdf(guide, language, out_filename="study_guide"):
 
     base = getSampleStyleSheet()["Normal"]
     ST = {
-        "h_title":    _st("HT",  base, fontSize=20, fontName="Helvetica-Bold",  textColor=WHITE,        alignment=TA_CENTER, leading=26),
-        "h_sub":      _st("HS",  base, fontSize=9,  fontName="Helvetica",        textColor=colors.HexColor("#a8c4e8"), alignment=TA_CENTER),
-        "obj_head":   _st("OH",  base, fontSize=11, fontName="Helvetica-Bold",   textColor=NAVY,         spaceBefore=4, spaceAfter=4),
-        "obj_item":   _st("OI",  base, fontSize=9.5,fontName="Helvetica",        textColor=TEXT,         leftIndent=14, spaceAfter=3, leading=13),
-        "toc_title":  _st("TOT", base, fontSize=11, fontName="Helvetica-Bold",   textColor=NAVY,         spaceAfter=6),
-        "toc_item":   _st("TOI", base, fontSize=9.5,fontName="Helvetica",        textColor=TEXT,         leftIndent=10, spaceAfter=2),
-        "sec_title":  _st("SCT", base, fontSize=11, fontName="Helvetica-Bold",   textColor=WHITE),
-        "bullet":     _st("BL",  base, fontSize=9.5,fontName="Helvetica",        textColor=TEXT,         leftIndent=12, spaceAfter=3, leading=13),
-        "tbl_hdr":    _st("TH",  base, fontSize=9,  fontName="Helvetica-Bold",   textColor=WHITE),
-        "tbl_cell":   _st("TC",  base, fontSize=9,  fontName="Helvetica",        textColor=TEXT,         leading=12),
-        "kw_term":    _st("KT",  base, fontSize=9,  fontName="Helvetica-Bold",   textColor=NAVY_MID),
-        "kw_def":     _st("KD",  base, fontSize=9,  fontName="Helvetica",        textColor=TEXT,         leading=12),
-        "kw_head":    _st("KH",  base, fontSize=11, fontName="Helvetica-Bold",   textColor=WHITE,        alignment=TA_CENTER),
-        "fc_q":       _st("FCQ", base, fontSize=9,  fontName="Helvetica-Bold",   textColor=WHITE,        leading=13),
-        "fc_a":       _st("FCA", base, fontSize=9,  fontName="Helvetica",        textColor=TEXT,         leading=13),
-        "fc_head":    _st("FCH", base, fontSize=11, fontName="Helvetica-Bold",   textColor=WHITE,        alignment=TA_CENTER),
-        "footer":     _st("FT",  base, fontSize=8,  fontName="Helvetica",        textColor=TEXT_LIGHT,   alignment=TA_CENTER),
+        "h_title":  _st("HT",  base, fontSize=20, fontName=AFB, textColor=WHITE,        alignment=TA_CENTER, leading=26),
+        "h_sub":    _st("HS",  base, fontSize=9,  fontName=AF,  textColor=colors.HexColor("#a8c4e8"), alignment=TA_CENTER),
+        "obj_head": _st("OH",  base, fontSize=11, fontName=AFB, textColor=NAVY,         spaceBefore=4, spaceAfter=4, alignment=ALIGN),
+        "obj_item": _st("OI",  base, fontSize=9.5,fontName=AF,  textColor=TEXT,         leftIndent=0 if is_ar else 14, rightIndent=14 if is_ar else 0, spaceAfter=3, leading=16, alignment=ALIGN),
+        "toc_title":_st("TOT", base, fontSize=11, fontName=AFB, textColor=NAVY,         spaceAfter=6, alignment=ALIGN),
+        "toc_item": _st("TOI", base, fontSize=9.5,fontName=AF,  textColor=TEXT,         leftIndent=0 if is_ar else 10, rightIndent=10 if is_ar else 0, spaceAfter=2, alignment=ALIGN),
+        "sec_title":_st("SCT", base, fontSize=11, fontName=AFB, textColor=WHITE,        alignment=ALIGN),
+        "bullet":   _st("BL",  base, fontSize=9.5,fontName=AF,  textColor=TEXT,         leftIndent=0 if is_ar else 12, rightIndent=12 if is_ar else 0, spaceAfter=3, leading=16, alignment=ALIGN),
+        "tbl_hdr":  _st("TH",  base, fontSize=9,  fontName=AFB, textColor=WHITE,        alignment=ALIGN),
+        "tbl_cell": _st("TC",  base, fontSize=9,  fontName=AF,  textColor=TEXT,         leading=14, alignment=ALIGN),
+        "kw_term":  _st("KT",  base, fontSize=9,  fontName=AFB, textColor=NAVY_MID,     alignment=ALIGN),
+        "kw_def":   _st("KD",  base, fontSize=9,  fontName=AF,  textColor=TEXT,         leading=14, alignment=ALIGN),
+        "kw_head":  _st("KH",  base, fontSize=11, fontName=AFB, textColor=WHITE,        alignment=TA_CENTER),
+        "fc_q":     _st("FCQ", base, fontSize=9,  fontName=AFB, textColor=WHITE,        leading=14, alignment=ALIGN),
+        "fc_a":     _st("FCA", base, fontSize=9,  fontName=AF,  textColor=TEXT,         leading=14, alignment=ALIGN),
+        "fc_head":  _st("FCH", base, fontSize=11, fontName=AFB, textColor=WHITE,        alignment=TA_CENTER),
+        "footer":   _st("FT",  base, fontSize=8,  fontName=AF,  textColor=TEXT_LIGHT,   alignment=TA_CENTER),
     }
 
     elems = []
 
     # ── Header ────────────────────────────────────────────────────────────────
-    title    = guide.get("title", "Study Guide").upper()
-    subtitle = guide.get("subtitle", "Exam Study Guide")
+    raw_title = guide.get("title", "Study Guide")
+    title    = T(raw_title.upper() if not is_ar else raw_title)
+    subtitle = T(guide.get("subtitle", "Exam Study Guide"))
     hdr = Table([
         [Paragraph(title, ST["h_title"])],
         [Paragraph(f"{subtitle}  ·  {OLLAMA_MODEL}", ST["h_sub"])],
@@ -1056,9 +1137,9 @@ def build_pdf(guide, language, out_filename="study_guide"):
     # ── Learning Objectives ───────────────────────────────────────────────────
     objectives = guide.get("objectives", [])
     if objectives:
-        rows = [[Paragraph("◆  LEARNING OBJECTIVES", ST["obj_head"])]]
+        rows = [[Paragraph(L["objectives"], ST["obj_head"])]]
         for o in objectives:
-            rows.append([Paragraph(f"◆  {o}", ST["obj_item"])])
+            rows.append([Paragraph(f"{L['obj_bullet']}{T(o)}", ST["obj_item"])])
         t = Table(rows, colWidths=[W])
         t.setStyle(TableStyle([
             ("BACKGROUND",    (0,0), (-1,0),  SECTION_BG),
@@ -1067,6 +1148,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
             ("TOPPADDING",    (0,0), (-1,-1), 5),
             ("BOTTOMPADDING", (0,0), (-1,-1), 5),
             ("LEFTPADDING",   (0,0), (-1,-1), 10),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 10),
         ]))
         elems.append(t)
         elems.append(Spacer(1, 0.3*cm))
@@ -1074,9 +1156,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
     # ── Table of Contents ─────────────────────────────────────────────────────
     sections = guide.get("sections", [])
     if sections:
-        toc_rows = [[Paragraph("CONTENTS", ST["toc_title"])]]
-        all_items = [(s["title"], "") for s in sections]
-        all_items += [("KEYWORDS CHEATSHEET", ""), ("FLASH CARDS", "")]
+        toc_rows = [[Paragraph(L["contents"], ST["toc_title"])]]
+        all_items = [(T(s["title"]), "") for s in sections] + L["kw_append"]
         for i, (name, _) in enumerate(all_items, 1):
             dot_row = Table(
                 [[Paragraph(f"{i}.  {name}", ST["toc_item"]), Paragraph("", ST["toc_item"])]],
@@ -1087,6 +1168,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
                 ("TOPPADDING",    (0,0), (-1,-1), 3),
                 ("BOTTOMPADDING", (0,0), (-1,-1), 3),
                 ("LEFTPADDING",   (0,0), (-1,-1), 6),
+                ("RIGHTPADDING",  (0,0), (-1,-1), 6),
             ]))
             toc_rows.append([dot_row])
         toc = Table(toc_rows, colWidths=[W])
@@ -1104,8 +1186,12 @@ def build_pdf(guide, language, out_filename="study_guide"):
     for idx, sec in enumerate(sections, 1):
         block = []
 
+        sec_title_text = T(sec.get("title", ""))
         sec_hdr = Table(
-            [[Paragraph(f"■  {idx} · {sec.get('title','').upper()}", ST["sec_title"])]],
+            [[Paragraph(
+                f"{L['sec_bullet']}{idx} · {sec_title_text if is_ar else sec_title_text.upper()}",
+                ST["sec_title"]
+            )]],
             colWidths=[W]
         )
         sec_hdr.setStyle(TableStyle([
@@ -1113,17 +1199,19 @@ def build_pdf(guide, language, out_filename="study_guide"):
             ("TOPPADDING",    (0,0), (-1,-1), 7),
             ("BOTTOMPADDING", (0,0), (-1,-1), 7),
             ("LEFTPADDING",   (0,0), (-1,-1), 10),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 10),
         ]))
         block.append(sec_hdr)
 
         bullets = sec.get("bullets", [])
         if bullets:
-            bdata = [[Paragraph(f"▸  {b}", ST["bullet"])] for b in bullets]
+            bdata = [[Paragraph(f"{L['bul_bullet']}{T(b)}", ST["bullet"])] for b in bullets]
             bt = Table(bdata, colWidths=[W])
             bt.setStyle(TableStyle([
-                ("TOPPADDING",    (0,0), (-1,-1), 4),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 3),
+                ("TOPPADDING",    (0,0), (-1,-1), 5),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 4),
                 ("LEFTPADDING",   (0,0), (-1,-1), 10),
+                ("RIGHTPADDING",  (0,0), (-1,-1), 10),
                 ("LINEBELOW",     (0,0), (-1,-2), 0.3, colors.HexColor("#dde8ff")),
                 ("BOX",           (0,0), (-1,-1), 0.5, BORDER),
             ]))
@@ -1134,10 +1222,10 @@ def build_pdf(guide, language, out_filename="study_guide"):
             headers = tbl["headers"]
             n_cols  = len(headers)
             col_w   = W / n_cols
-            tbl_rows = [[Paragraph(h, ST["tbl_hdr"]) for h in headers]]
+            tbl_rows = [[Paragraph(T(h), ST["tbl_hdr"]) for h in headers]]
             for ri, row in enumerate(tbl["rows"]):
                 padded = (list(row) + [""] * n_cols)[:n_cols]
-                tbl_rows.append([Paragraph(str(c), ST["tbl_cell"]) for c in padded])
+                tbl_rows.append([Paragraph(T(str(c)), ST["tbl_cell"]) for c in padded])
             inner = Table(tbl_rows, colWidths=[col_w]*n_cols)
             ts = [
                 ("BACKGROUND",    (0,0), (-1,0),  NAVY_LIGHT),
@@ -1160,7 +1248,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
     keywords = guide.get("keywords", [])
     if keywords:
         kw_hdr = Table(
-            [[Paragraph("■  KEYWORDS CHEATSHEET", ST["kw_head"])]],
+            [[Paragraph(L["kw_head"], ST["kw_head"])]],
             colWidths=[W]
         )
         kw_hdr.setStyle(TableStyle([
@@ -1171,11 +1259,19 @@ def build_pdf(guide, language, out_filename="study_guide"):
         ]))
         elems.append(kw_hdr)
 
-        lc, rc = W*0.27, W*0.73
-        kw_rows = [[
-            Paragraph(k.get("term",""), ST["kw_term"]),
-            Paragraph(k.get("definition",""), ST["kw_def"])
-        ] for k in keywords]
+        if is_ar:
+            # Arabic: definition left, term right (visual RTL order)
+            lc, rc = W*0.60, W*0.40
+            kw_rows = [[
+                Paragraph(T(k.get("definition", "")), ST["kw_def"]),
+                Paragraph(T(k.get("term", "")),       ST["kw_term"]),
+            ] for k in keywords]
+        else:
+            lc, rc = W*0.27, W*0.73
+            kw_rows = [[
+                Paragraph(k.get("term", ""),       ST["kw_term"]),
+                Paragraph(k.get("definition", ""), ST["kw_def"]),
+            ] for k in keywords]
         kw_t = Table(kw_rows, colWidths=[lc, rc])
         kts = [
             ("VALIGN",        (0,0), (-1,-1), "TOP"),
@@ -1197,7 +1293,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
     flashcards = guide.get("flashcards", [])
     if flashcards:
         fc_hdr = Table(
-            [[Paragraph("■  FLASH CARDS", ST["fc_head"])]],
+            [[Paragraph(L["fc_head"], ST["fc_head"])]],
             colWidths=[W]
         )
         fc_hdr.setStyle(TableStyle([
@@ -1215,8 +1311,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
             row_cells = []
             for fc in pair:
                 card = Table([
-                    [Paragraph(f"Q:  {fc.get('q','')}", ST["fc_q"])],
-                    [Paragraph(fc.get('a',''), ST["fc_a"])],
+                    [Paragraph(f"{L['q_pre']}{T(fc.get('q',''))}", ST["fc_q"])],
+                    [Paragraph(T(fc.get('a','')), ST["fc_a"])],
                 ], colWidths=[cw])
                 card.setStyle(TableStyle([
                     ("BACKGROUND",    (0,0), (-1,0),  CARD_Q),
@@ -1240,7 +1336,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
     elems.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
     elems.append(Spacer(1, 0.1*cm))
     elems.append(Paragraph(
-        f"{guide.get('title','')}  ·  AI Exam Study Guide  ·  {OLLAMA_MODEL}  ·  Good luck!",
+        f"{T(guide.get('title',''))}  ·  {L['guide']}  ·  {OLLAMA_MODEL}  ·  {L['luck']}",
         ST["footer"]
     ))
 
@@ -1260,7 +1356,7 @@ def summarize_stream():
         return jsonify({"error": "No file uploaded"}), 400
 
     f            = request.files["file"]
-    language     = "ar" if request.form.get("language") == "ar" else "en"
+    lang_param   = request.form.get("language", "auto")
     out_name     = _safe_name(request.form.get("filename", f.filename.rsplit(".", 1)[0]))
     detail_level = request.form.get("detail", "standard")
     dcfg         = DETAIL.get(detail_level, DETAIL["standard"])
@@ -1274,6 +1370,7 @@ def summarize_stream():
     file_bytes = f.read()
 
     def generate():
+        nonlocal lang_param
         try:
             yield _sse({"step": "extract", "msg": "Extracting content…"})
             slides = extract_slides(io.BytesIO(file_bytes))
@@ -1281,7 +1378,11 @@ def summarize_stream():
                 yield _sse({"error": "No readable content in this file"}); return
 
             total = len([s for s in slides if s["content"].strip()])
-            yield _sse({"step": "extract", "msg": f"Found {total} content slides — analysing…"})
+
+            # Auto-detect language from slide content
+            language = lang_param if lang_param in ("ar", "en") else _detect_language(slides)
+            lang_label = "Arabic" if language == "ar" else "English"
+            yield _sse({"step": "extract", "msg": f"Found {total} content slides ({lang_label}) — analysing…", "language": language})
 
             # Pass 1
             yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
@@ -2000,7 +2101,7 @@ def _stream_text_as_sse(text, language, out_name, job_source):
 def youtube_transcript():
     data = request.json or {}
     url = (data.get("url") or "").strip()
-    language = "ar" if data.get("language") == "ar" else "en"
+    lang_param = data.get("language", "auto")
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not ollama_running():
@@ -2030,6 +2131,9 @@ def youtube_transcript():
                 except ValueError as we:
                     yield _sse({"error": str(we)}); return
 
+            language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
+            lang_label = "Arabic" if language == "ar" else "English"
+            yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language})
             for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube")():
                 yield event
         except Exception as ex:
@@ -2071,8 +2175,8 @@ def summarize_text():
     data = request.json or {}
     text = (data.get("text") or "").strip()
     url  = (data.get("url")  or "").strip()
-    language = "ar" if data.get("language") == "ar" else "en"
-    filename = _safe_name(data.get("filename") or "pasted_text")
+    lang_param = data.get("language", "auto")
+    filename   = _safe_name(data.get("filename") or "pasted_text")
 
     if not ollama_running():
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
@@ -2086,6 +2190,7 @@ def summarize_text():
     if not text:
         return jsonify({"error": "No text or URL provided"}), 400
 
+    language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
     gen = _stream_text_as_sse(text, language, filename, "text")
     return Response(
         stream_with_context(gen()),
