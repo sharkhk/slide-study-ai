@@ -705,7 +705,7 @@ def _extract_json(text):
 
 def _call_ollama(prompt, retries=3, num_predict=4096):
     if GROQ_API_KEY:
-        return _call_groq(prompt, retries=retries)
+        return _call_groq(prompt, retries=retries, max_tokens=num_predict)
     payload = {
         "model": OLLAMA_MODEL,
         "format": "json",
@@ -737,7 +737,7 @@ def _call_ollama(prompt, retries=3, num_predict=4096):
     raise last_err
 
 
-def _call_groq(prompt, retries=5):
+def _call_groq(prompt, retries=5, max_tokens=2048):
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
@@ -749,8 +749,8 @@ def _call_groq(prompt, retries=5):
             {"role": "user",   "content": prompt},
         ],
         "temperature": 0,
+        "max_tokens": max_tokens,
     }
-    time.sleep(5)  # space calls to stay under 6k tokens/min free limit
     last_err = None
     for attempt in range(retries):
         try:
