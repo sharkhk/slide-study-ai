@@ -977,22 +977,23 @@ def _sections_parallel(sections, content_slides, language, dcfg):
 
 
 def _flashcards_mcq_parallel(overview, language, dcfg):
-    """Run pass3 (flashcards) and pass4 (MCQ) concurrently. Yields plain dicts."""
-    yield {"step": "flashcards", "msg": "Generating flash cards & quiz…"}
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fc_fut = pool.submit(pass3_flashcards, overview, language, dcfg)
-        mc_fut = pool.submit(pass4_mcq,        overview, language, dcfg)
-        try:
-            overview["flashcards"] = fc_fut.result().get("flashcards", [])
-        except Exception:
-            _log.error("pass3 error:\n%s", _tb.format_exc())
-            overview["flashcards"] = []
-        try:
-            overview["mcqs"] = mc_fut.result().get("mcqs", [])
-        except Exception:
-            _log.error("pass4 error:\n%s", _tb.format_exc())
-            overview["mcqs"] = []
-    yield {"step": "flashcards", "msg": "Flash cards & quiz ready…"}
+    """Run pass3 then pass4 sequentially (Groq free tier rate limits concurrent calls).
+    Yields plain dicts."""
+    yield {"step": "flashcards", "msg": "Generating flash cards…"}
+    try:
+        overview["flashcards"] = pass3_flashcards(overview, language, dcfg).get("flashcards", [])
+    except Exception:
+        _log.error("pass3 error:\n%s", _tb.format_exc())
+        overview["flashcards"] = []
+    yield {"step": "flashcards", "msg": "Flash cards ready…"}
+
+    yield {"step": "mcq", "msg": "Generating quiz…"}
+    try:
+        overview["mcqs"] = pass4_mcq(overview, language, dcfg).get("mcqs", [])
+    except Exception:
+        _log.error("pass4 error:\n%s", _tb.format_exc())
+        overview["mcqs"] = []
+    yield {"step": "mcq", "msg": "Quiz ready…"}
 
 
 def build_markdown(guide):
