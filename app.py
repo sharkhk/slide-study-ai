@@ -41,6 +41,21 @@ GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
 
+# ── Supabase / Auth ────────────────────────────────────────────────────────────
+SUPABASE_URL              = os.environ.get("SUPABASE_URL", "")
+SUPABASE_ANON_KEY         = os.environ.get("SUPABASE_ANON_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_JWT_SECRET       = os.environ.get("SUPABASE_JWT_SECRET", "")
+
+# ── Stripe ─────────────────────────────────────────────────────────────────────
+STRIPE_SECRET_KEY    = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_PRICE_ID      = os.environ.get("STRIPE_PRICE_ID", "")
+APP_URL              = os.environ.get("APP_URL", "https://slide-study-ai.onrender.com")
+
+_AUTH_ENABLED = bool(SUPABASE_URL and SUPABASE_JWT_SECRET)  # False in local dev without Supabase
+
 DETAIL = {
     "brief":    {"slide_chars": 400,  "max_slides": 30,  "keywords": "8-10",  "bullets": "2-4",  "n_flash": 6,  "n_mcq": 5,  "num_predict": 2048},
     "standard": {"slide_chars": 700,  "max_slides": 60,  "keywords": "18-25", "bullets": "3-8",  "n_flash": 14, "n_mcq": 10, "num_predict": 4096},
@@ -84,6 +99,133 @@ def _ar(text):
         return get_display(arabic_reshaper.reshape(str(text)))
     except ImportError:
         return str(text)
+
+# ── Supabase client (lazy, uses service-role key → bypasses RLS) ───────────────
+_sb_client = None
+_sb_lock   = threading.Lock()
+
+def _get_sb():
+    global _sb_client
+    if _sb_client:
+        return _sb_client
+    with _sb_lock:
+        if _sb_client:
+            return _sb_client
+        if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+            try:
+                from supabase import create_client
+                _sb_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+            except Exception as e:
+                print(f"Supabase init error: {e}", flush=True)
+    return _sb_client
+
+# ── Stripe setup ───────────────────────────────────────────────────────────────
+if STRIPE_SECRET_KEY:
+    try:
+        import stripe as _stripe
+        _stripe.api_key = STRIPE_SECRET_KEY
+    except ImportError:
+        _stripe = None
+else:
+    _stripe = None
+
+# ── JWT helpers ────────────────────────────────────────────────────────────────
+def _get_bearer(req):
+    auth = req.headers.get("Authorization", "")
+    return auth[7:] if auth.startswith("Bearer ") else None
+
+def _verify_jwt(token):
+    """Verify a Supabase-issued JWT. Returns user_id (str) or None."""
+    if not token or not SUPABASE_JWT_SECRET:
+        return None
+    try:
+        import jwt as _pyjwt
+        payload = _pyjwt.decode(
+            token, SUPABASE_JWT_SECRET,
+            algorithms=["HS256"], audience="authenticated"
+        )
+        return payload.get("sub")
+    except Exception:
+        return None
+
+# ── Token helpers ──────────────────────────────────────────────────────────────
+def _consume_token(user_id):
+    """
+    Atomically consume one token via Supabase RPC.
+    Returns (ok: bool, tokens_remaining: int, reason: str)
+    """
+    sb = _get_sb()
+    if not sb:
+        return True, 999, ""   # Supabase not configured → dev mode, always allow
+    try:
+        r = sb.rpc("consume_token", {"p_user_id": user_id}).execute()
+        d = r.data if isinstance(r.data, dict) else {}
+        ok = d.get("success", False)
+        return ok, d.get("tokens_remaining", 0), d.get("reason", "")
+    except Exception as exc:
+        print(f"consume_token error: {exc}", flush=True)
+        return False, 0, "db_error"
+
+def _get_user(user_id):
+    """Fetch full user row from Supabase."""
+    sb = _get_sb()
+    if not sb:
+        return None
+    try:
+        r = sb.table("users").select("*").eq("id", user_id).single().execute()
+        return r.data
+    except Exception:
+        return None
+
+def _get_or_create_referral_code(user_id):
+    """Return this user's referral code, generating one if not yet set."""
+    import hashlib
+    sb = _get_sb()
+    if not sb:
+        return None
+    try:
+        r = sb.table("users").select("referral_code").eq("id", user_id).single().execute()
+        code = (r.data or {}).get("referral_code")
+        if code:
+            return code
+        code = hashlib.sha256(user_id.encode()).hexdigest()[:8].upper()
+        sb.table("users").update({"referral_code": code}).eq("id", user_id).execute()
+        return code
+    except Exception:
+        return None
+
+def _award_referral(new_subscriber_id, sb):
+    """Award 10 tokens to the referrer when their referee first subscribes."""
+    try:
+        r = sb.table("users").select("referred_by, referral_paid").eq("id", new_subscriber_id).single().execute()
+        if not r.data:
+            return
+        referrer_id  = r.data.get("referred_by")
+        already_paid = r.data.get("referral_paid", False)
+        if not referrer_id or already_paid:
+            return
+        ref_row = sb.table("users").select("tokens_remaining").eq("id", referrer_id).single().execute()
+        if ref_row.data:
+            new_bal = (ref_row.data.get("tokens_remaining") or 0) + 10
+            sb.table("users").update({"tokens_remaining": new_bal}).eq("id", referrer_id).execute()
+        sb.table("users").update({"referral_paid": True}).eq("id", new_subscriber_id).execute()
+        _log.info(f"Referral reward: 10 tokens → {referrer_id} (subscriber={new_subscriber_id})")
+    except Exception as exc:
+        _log.error(f"_award_referral error: {exc}")
+
+def _auth_check(req):
+    """
+    Extract + verify JWT from request.
+    Returns (user_id, error_response_tuple | None).
+    When _AUTH_ENABLED is False (local dev), always returns ('dev', None).
+    """
+    if not _AUTH_ENABLED:
+        return "dev", None
+    tok = _get_bearer(req)
+    uid = _verify_jwt(tok)
+    if not uid:
+        return None, (jsonify({"error": "Sign in required", "code": "auth_required"}), 401)
+    return uid, None
 
 app = Flask(__name__, static_folder=DIST, static_url_path="")
 app.config['SECRET_KEY'] = secrets.token_hex(32)
@@ -269,7 +411,7 @@ def admin_page():
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
-<title>Admin — Slide Study AI</title>
+<title>Admin — Alimne</title>
 <meta http-equiv="refresh" content="20">
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
@@ -297,7 +439,7 @@ def admin_page():
 </style></head>
 <body>
 <div class="topbar">
-  <h1>📊 Slide Study AI — Admin
+  <h1>📊 Alimne — Admin
     <span class="badge">{len(vis_copy)} visits</span>
     {f'<span class="badge red">⛔ {len(blocked_copy)} blocked</span>' if blocked_copy else ''}
   </h1>
@@ -363,7 +505,7 @@ def _he(s):
     return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;')
 
 # ── Job store (memory + /tmp disk fallback) ───────────────────────────────────
-_JOB_TTL   = 7200  # 2 hours
+_JOB_TTL   = 5400  # 90 minutes
 _JOBS_DIR  = os.path.join(os.sep, "tmp", "slide-study-jobs")
 os.makedirs(_JOBS_DIR, exist_ok=True)
 
@@ -1011,19 +1153,125 @@ def _extract_pdf(raw):
     return slides
 
 
-def extract_slides(file_stream):
-    """Detect format from magic bytes and dispatch to the right extractor."""
-    raw = file_stream.read()
+def _extract_docx(raw):
+    """Extract text from .docx (Open XML Word) files, grouped by headings."""
+    try:
+        from docx import Document
+    except ImportError:
+        raise ValueError("python-docx not installed — run: pip install python-docx")
 
-    if raw[:4] == b'PK\x03\x04':                        # ZIP → .pptx
+    doc = Document(io.BytesIO(raw))
+    slides, current_title, current_lines, slide_num = [], "Document", [], 1
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        if para.style.name.startswith('Heading'):
+            if current_lines:
+                slides.append({"slide_num": slide_num, "title": current_title, "content": "\n".join(current_lines)})
+                slide_num += 1
+                current_lines = []
+            current_title = text[:80]
+        else:
+            current_lines.append(text)
+    if current_lines:
+        slides.append({"slide_num": slide_num, "title": current_title, "content": "\n".join(current_lines)})
+    if not slides:
+        raise ValueError("No readable text found in the Word document.")
+    return slides
+
+
+def _extract_doc_ole(raw):
+    """Extract text from old binary .doc via OLE2 stream decoding."""
+    import olefile
+    ole = olefile.OleFileIO(io.BytesIO(raw))
+    if not ole.exists('WordDocument'):
+        raise ValueError("Not a valid binary Word (.doc) file.")
+    stream = ole.openstream('WordDocument').read()
+    # Word stores main text as UTF-16-LE; extract printable runs
+    try:
+        text = stream.decode('utf-16-le', errors='ignore')
+    except Exception:
+        text = stream.decode('latin-1', errors='ignore')
+    # Keep only printable chars + Arabic/newlines, strip control chars
+    text = re.sub(r'[^\x20-\x7E؀-ۿÀ-ɏ\n\r\t]+', ' ', text)
+    text = re.sub(r'[ \t]{3,}', '  ', text).strip()
+    lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 3]
+    if not lines:
+        raise ValueError(
+            "Could not extract readable text from this .doc file. "
+            "Try saving it as .docx and uploading again."
+        )
+    # Group lines into pseudo-slides of 15 lines each
+    slides = []
+    for n, chunk in enumerate([lines[i:i+15] for i in range(0, len(lines), 15)], 1):
+        slides.append({"slide_num": n, "title": chunk[0][:80], "content": "\n".join(chunk)})
+    return slides
+
+
+def _extract_txt(raw):
+    """Extract text from a plain-text file (.txt)."""
+    for enc in ('utf-8', 'utf-16', 'latin-1', 'cp1256'):
+        try:
+            text = raw.decode(enc, errors='strict')
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    else:
+        text = raw.decode('utf-8', errors='replace')
+    text = text.strip()
+    if not text:
+        raise ValueError("The text file appears to be empty.")
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    # Group into pseudo-slides of 20 lines
+    slides = []
+    for n, chunk in enumerate([lines[i:i+20] for i in range(0, len(lines), 20)], 1):
+        slides.append({"slide_num": n, "title": chunk[0][:80], "content": "\n".join(chunk)})
+    return slides
+
+
+def extract_slides(file_stream, filename=""):
+    """Detect format from magic bytes (and filename for .txt) and dispatch."""
+    raw = file_stream.read()
+    fname = (filename or "").lower()
+
+    if raw[:4] == b'PK\x03\x04':                         # ZIP-based (pptx or docx)
+        import zipfile
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                names = z.namelist()
+            if any(n.startswith('word/') for n in names):
+                return _extract_docx(raw)
+        except Exception:
+            pass
         return _extract_pptx_raw(raw)
-    if raw[:8] == b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1': # OLE2 → binary .ppt
+
+    if raw[:8] == b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1':  # OLE2 (ppt or doc)
+        try:
+            import olefile
+            with olefile.OleFileIO(io.BytesIO(raw)) as ole:
+                if ole.exists('WordDocument'):
+                    return _extract_doc_ole(raw)
+        except Exception:
+            pass
         return _extract_ppt_binary(raw)
-    if raw[:4] == b'%PDF':                               # PDF
+
+    if raw[:4] == b'%PDF':                                # PDF
         return _extract_pdf(raw)
 
+    if fname.endswith('.txt') or fname.endswith('.md'):   # Plain text
+        return _extract_txt(raw)
+
+    # Last resort: try decoding as plain text
+    try:
+        decoded = raw.decode('utf-8', errors='strict')
+        if len(decoded.strip()) > 50:
+            return _extract_txt(raw)
+    except UnicodeDecodeError:
+        pass
+
     raise ValueError(
-        "Unrecognised file format. Supported: .pptx, .ppt (all versions), .pdf"
+        "Unrecognised file format. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"
     )
 
 
@@ -1345,6 +1593,215 @@ def build_pdf(guide, language, out_filename="study_guide"):
     return buf
 
 
+# ── Public config endpoint ────────────────────────────────────────────────────
+@app.route("/api/config")
+def api_config():
+    """Return public keys the frontend needs to initialise Supabase and Stripe."""
+    return jsonify({
+        "supabase_url":          SUPABASE_URL,
+        "supabase_anon_key":     SUPABASE_ANON_KEY,
+        "stripe_publishable_key": STRIPE_PUBLISHABLE_KEY,
+        "auth_enabled":          _AUTH_ENABLED,
+    })
+
+
+# ── Auth — current user ────────────────────────────────────────────────────────
+@app.route("/api/auth/me")
+def auth_me():
+    uid, err = _auth_check(request)
+    if err:
+        return err
+    if uid == "dev":
+        return jsonify({"email": "dev@local", "name": "Dev", "tokens_remaining": 999,
+                        "subscription_status": "active", "referral_code": "DEVLOCAL"})
+    user = _get_user(uid)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    ref_code = user.get("referral_code") or _get_or_create_referral_code(uid)
+    return jsonify({
+        "id":                      user["id"],
+        "email":                   user["email"],
+        "name":                    user.get("name") or "",
+        "avatar_url":              user.get("avatar_url") or "",
+        "tokens_remaining":        user.get("tokens_remaining", 0),
+        "subscription_status":     user.get("subscription_status", "free"),
+        "subscription_period_end": str(user.get("subscription_period_end") or ""),
+        "referral_code":           ref_code or "",
+    })
+
+
+# ── Referral — apply code ─────────────────────────────────────────────────────
+@app.route("/api/referral/apply", methods=["POST"])
+def referral_apply():
+    uid, err = _auth_check(request)
+    if err:
+        return err
+    if uid == "dev":
+        return jsonify({"success": False, "reason": "dev_mode"})
+    code = (request.get_json(silent=True) or {}).get("code", "").strip().upper()
+    if not code:
+        return jsonify({"success": False, "reason": "no_code"}), 400
+    sb = _get_sb()
+    if not sb:
+        return jsonify({"success": False, "reason": "unavailable"})
+    try:
+        # Find referrer by code (cannot self-refer)
+        ref = sb.table("users").select("id").eq("referral_code", code).neq("id", uid).execute()
+        if not ref.data:
+            return jsonify({"success": False, "reason": "invalid_code"})
+        referrer_id = ref.data[0]["id"]
+        # Apply only if not already referred
+        sb.table("users").update({"referred_by": referrer_id}).eq("id", uid).is_("referred_by", "null").execute()
+        # Remove stored code from client regardless (avoid re-tries)
+        return jsonify({"success": True})
+    except Exception as exc:
+        _log.error(f"referral_apply error: {exc}")
+        return jsonify({"success": False, "reason": "db_error"}), 500
+
+
+# ── Referral — stats ───────────────────────────────────────────────────────────
+@app.route("/api/referral/stats")
+def referral_stats():
+    uid, err = _auth_check(request)
+    if err:
+        return err
+    if uid == "dev":
+        return jsonify({"total": 0, "paid": 0, "tokens_earned": 0})
+    sb = _get_sb()
+    if not sb:
+        return jsonify({"total": 0, "paid": 0, "tokens_earned": 0})
+    try:
+        rows = sb.table("users").select("referral_paid").eq("referred_by", uid).execute()
+        total = len(rows.data) if rows.data else 0
+        paid  = sum(1 for r in (rows.data or []) if r.get("referral_paid"))
+        return jsonify({"total": total, "paid": paid, "tokens_earned": paid * 10})
+    except Exception:
+        return jsonify({"total": 0, "paid": 0, "tokens_earned": 0})
+
+
+# ── Stripe — create checkout session ──────────────────────────────────────────
+@app.route("/api/stripe/checkout", methods=["POST"])
+def stripe_checkout():
+    uid, err = _auth_check(request)
+    if err:
+        return err
+    if not _stripe or not STRIPE_PRICE_ID:
+        return jsonify({"error": "Payments not configured"}), 503
+
+    user = _get_user(uid)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    try:
+        # Reuse existing Stripe customer or create a new one
+        customer_id = user.get("stripe_customer_id")
+        if not customer_id:
+            cust = _stripe.Customer.create(
+                email=user["email"],
+                name=user.get("name", ""),
+                metadata={"supabase_id": uid},
+            )
+            customer_id = cust["id"]
+            _get_sb().table("users").update(
+                {"stripe_customer_id": customer_id}
+            ).eq("id", uid).execute()
+
+        session = _stripe.checkout.Session.create(
+            customer=customer_id,
+            payment_method_types=["card"],
+            line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+            mode="subscription",
+            success_url=f"{APP_URL}/?sub=success",
+            cancel_url=f"{APP_URL}/?sub=canceled",
+            metadata={"user_id": uid},
+        )
+        return jsonify({"url": session.url})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+# ── Stripe — customer billing portal ──────────────────────────────────────────
+@app.route("/api/stripe/portal", methods=["POST"])
+def stripe_portal():
+    uid, err = _auth_check(request)
+    if err:
+        return err
+    if not _stripe:
+        return jsonify({"error": "Payments not configured"}), 503
+
+    user = _get_user(uid)
+    if not user or not user.get("stripe_customer_id"):
+        return jsonify({"error": "No billing account found"}), 404
+
+    try:
+        portal = _stripe.billing_portal.Session.create(
+            customer=user["stripe_customer_id"],
+            return_url=APP_URL,
+        )
+        return jsonify({"url": portal.url})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+# ── Stripe — webhook ───────────────────────────────────────────────────────────
+@app.route("/api/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    if not _stripe:
+        return jsonify({"error": "Payments not configured"}), 503
+
+    payload   = request.get_data()
+    sig       = request.headers.get("Stripe-Signature", "")
+    try:
+        event = _stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
+    except ValueError:
+        return jsonify({"error": "Invalid payload"}), 400
+    except _stripe.error.SignatureVerificationError:
+        return jsonify({"error": "Invalid signature"}), 400
+
+    sb  = _get_sb()
+    typ = event["type"]
+
+    if typ == "checkout.session.completed":
+        sess    = event["data"]["object"]
+        user_id = (sess.get("metadata") or {}).get("user_id")
+        if user_id and sb:
+            sb.table("users").update({
+                "subscription_status": "active",
+                "tokens_remaining":    20,
+                "tokens_month":        time.strftime("%Y-%m"),
+            }).eq("id", user_id).execute()
+            _award_referral(user_id, sb)   # reward referrer if applicable
+
+    elif typ in ("customer.subscription.updated", "customer.subscription.deleted"):
+        sub         = event["data"]["object"]
+        cust_id     = sub.get("customer")
+        status      = sub.get("status", "")
+        period_end  = sub.get("current_period_end")
+        if sb and cust_id:
+            update = {"subscription_id": sub.get("id", "")}
+            if status == "active":
+                update["subscription_status"] = "active"
+                if period_end:
+                    from datetime import datetime, timezone
+                    update["subscription_period_end"] = datetime.fromtimestamp(
+                        period_end, tz=timezone.utc
+                    ).isoformat()
+            elif status in ("canceled", "unpaid", "past_due"):
+                update["subscription_status"] = status
+            sb.table("users").update(update).eq("stripe_customer_id", cust_id).execute()
+
+    elif typ == "invoice.payment_succeeded":
+        inv     = event["data"]["object"]
+        cust_id = inv.get("customer")
+        if inv.get("billing_reason") == "subscription_cycle" and sb and cust_id:
+            sb.table("users").update({
+                "tokens_remaining": 20,
+                "tokens_month":     time.strftime("%Y-%m"),
+            }).eq("stripe_customer_id", cust_id).execute()
+
+    return jsonify({"ok": True})
+
+
 # ── SSE streaming endpoint ─────────────────────────────────────────────────────
 
 def _sse(data):
@@ -1355,14 +1812,26 @@ def summarize_stream():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
+    # ── Auth + token gate ──────────────────────────────────────────────────────
+    uid, err = _auth_check(request)
+    if err:
+        return err
+    ok, tok_left, reason = _consume_token(uid)
+    if not ok:
+        return jsonify({
+            "error": "You have no tokens left. Upgrade to continue.",
+            "code": "no_tokens", "tokens_remaining": 0
+        }), 402
+
     f            = request.files["file"]
     lang_param   = request.form.get("language", "auto")
     out_name     = _safe_name(request.form.get("filename", f.filename.rsplit(".", 1)[0]))
     detail_level = request.form.get("detail", "standard")
     dcfg         = DETAIL.get(detail_level, DETAIL["standard"])
 
-    if not f.filename.lower().endswith((".pptx", ".ppt", ".pdf")):
-        return jsonify({"error": "Please upload a .pptx, .ppt, or .pdf file"}), 400
+    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
+    if not f.filename.lower().endswith(_ALLOWED_EXT):
+        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     if not ollama_running():
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
@@ -1372,7 +1841,7 @@ def summarize_stream():
     def generate():
         try:
             yield _sse({"step": "extract", "msg": "Extracting content…"})
-            slides = extract_slides(io.BytesIO(file_bytes))
+            slides = extract_slides(io.BytesIO(file_bytes), filename=f.filename)
             if not any(s["content"] or s["title"] for s in slides):
                 yield _sse({"error": "No readable content in this file"}); return
 
@@ -1643,7 +2112,7 @@ def view_md(job_id):
 </style></head><body>
 {body}
 <hr style="margin-top:2rem;border-color:#c5d8ff">
-<p style="font-size:.8rem;color:#8aa0c8;text-align:center">Generated by Slide Study AI · {OLLAMA_MODEL}</p>
+<p style="font-size:.8rem;color:#8aa0c8;text-align:center">Generated by Alimne (علّمني) · {OLLAMA_MODEL}</p>
 </body></html>"""
 
 
@@ -2098,6 +2567,16 @@ def _stream_text_as_sse(text, language, out_name, job_source):
 
 @app.route("/api/youtube", methods=["POST"])
 def youtube_transcript():
+    uid, err = _auth_check(request)
+    if err:
+        return err
+    ok, tok_left, reason = _consume_token(uid)
+    if not ok:
+        return jsonify({
+            "error": "You have no tokens left. Upgrade to continue.",
+            "code": "no_tokens", "tokens_remaining": 0
+        }), 402
+
     data = request.json or {}
     url = (data.get("url") or "").strip()
     lang_param = data.get("language", "auto")
@@ -2171,6 +2650,16 @@ def _fetch_url_text(url):
 
 @app.route("/api/summarize-text", methods=["POST"])
 def summarize_text():
+    uid, err = _auth_check(request)
+    if err:
+        return err
+    ok, tok_left, reason = _consume_token(uid)
+    if not ok:
+        return jsonify({
+            "error": "You have no tokens left. Upgrade to continue.",
+            "code": "no_tokens", "tokens_remaining": 0
+        }), 402
+
     data = request.json or {}
     text = (data.get("text") or "").strip()
     url  = (data.get("url")  or "").strip()
@@ -2237,12 +2726,14 @@ def summarize():
         return jsonify({"error": "No file uploaded"}), 400
     f = request.files["file"]
     language = request.form.get("language", "en")
-    if not f.filename.lower().endswith((".pptx", ".ppt", ".pdf")):
-        return jsonify({"error": "Please upload a .pptx, .ppt, or .pdf file"}), 400
+    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
+    if not f.filename.lower().endswith(_ALLOWED_EXT):
+        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
     if not ollama_running():
         return jsonify({"error": "Ollama is not running"}), 503
     try:
-        slides = extract_slides(io.BytesIO(f.read()))
+        raw = f.read()
+        slides = extract_slides(io.BytesIO(raw), filename=f.filename)
         guide  = ask_ollama(slides, language)
         pdf    = build_pdf(guide, language)
         return send_file(pdf, mimetype="application/pdf", as_attachment=True,
