@@ -9,7 +9,7 @@ import threading
 import traceback as _tb
 import logging
 import requests as http
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 
 # ── File logger ────────────────────────────────────────────────────────────────
@@ -952,6 +952,66 @@ Rules:
     return _as_dict(result, list_key="mcqs")
 
 
+def _sections_parallel(sections, content_slides, language, dcfg):
+    """Run all pass2 sections concurrently. Yields plain dicts (not SSE-encoded)."""
+    n = len(sections)
+
+    jobs = []
+    for i, sec in enumerate(sections):
+        nums = set(sec.get("slide_nums", []))
+        sl = [s for s in content_slides if s["slide_num"] in nums]
+        if not sl:
+            chunk = max(1, len(content_slides) // n)
+            start = i * chunk
+            end   = start + chunk if i < n - 1 else len(content_slides)
+            sl    = content_slides[start:end] or content_slides
+        jobs.append((i, sec, sl))
+        yield {"step": "section", "msg": f"Section {i+1}/{n}: {sec.get('title', '')}…"}
+
+    def _run(job):
+        idx, sec, sl = job
+        try:
+            det = pass2_section(sec.get("title", ""), sl, language, dcfg)
+            return idx, det, None
+        except Exception:
+            return idx, None, _tb.format_exc()
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
+        futures = {pool.submit(_run, job): job[0] for job in jobs}
+        for fut in as_completed(futures):
+            idx, det, err = fut.result()
+            sec = sections[idx]
+            if err:
+                _log.error("pass2 [%s] error:\n%s", sec.get("title", "?"), err)
+                sec["bullets"] = []
+            else:
+                sec["bullets"] = det.get("bullets", [])
+                if isinstance(det.get("table"), dict):
+                    sec["table"] = det["table"]
+            done += 1
+            yield {"step": "section", "msg": f"Sections: {done}/{n} done…"}
+
+
+def _flashcards_mcq_parallel(overview, language, dcfg):
+    """Run pass3 (flashcards) and pass4 (MCQ) concurrently. Yields plain dicts."""
+    yield {"step": "flashcards", "msg": "Generating flash cards & quiz…"}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fc_fut = pool.submit(pass3_flashcards, overview, language, dcfg)
+        mc_fut = pool.submit(pass4_mcq,        overview, language, dcfg)
+        try:
+            overview["flashcards"] = fc_fut.result().get("flashcards", [])
+        except Exception:
+            _log.error("pass3 error:\n%s", _tb.format_exc())
+            overview["flashcards"] = []
+        try:
+            overview["mcqs"] = mc_fut.result().get("mcqs", [])
+        except Exception:
+            _log.error("pass4 error:\n%s", _tb.format_exc())
+            overview["mcqs"] = []
+    yield {"step": "flashcards", "msg": "Flash cards & quiz ready…"}
+
+
 def build_markdown(guide):
     """Convert guide dict to a Markdown string."""
     lines = [f"# {guide.get('title', 'Study Guide')}", ""]
@@ -1016,20 +1076,34 @@ def ask_ollama(slides, language, progress_cb=None):
         overview["sections"] = [{"title": overview.get("title", "Overview"), "slide_nums": [s["slide_num"] for s in content_slides]}]
 
     sections = overview["sections"]
+    n = len(sections)
+
+    def _run_sec(job):
+        i, sec, sl = job
+        try:
+            det = pass2_section(sec.get("title", ""), sl, language)
+            sec["bullets"] = det.get("bullets", [])
+            if isinstance(det.get("table"), dict):
+                sec["table"] = det["table"]
+        except Exception:
+            sec["bullets"] = []
+        if progress_cb:
+            progress_cb("section", f"Section {i+1}/{n} done…")
+
+    jobs = []
     for i, sec in enumerate(sections):
-        if progress_cb: progress_cb("section", f"Building section {i+1} of {len(sections)}: {sec.get('title','')}…")
+        if progress_cb: progress_cb("section", f"Building section {i+1} of {n}: {sec.get('title','')}…")
         nums = set(sec.get("slide_nums", []))
-        sec_slides = [s for s in content_slides if s["slide_num"] in nums]
-        if not sec_slides:
-            n_sec  = len(sections)
-            chunk  = max(1, len(content_slides) // n_sec)
-            start  = i * chunk
-            end    = start + chunk if i < n_sec - 1 else len(content_slides)
-            sec_slides = content_slides[start:end] or content_slides
-        detail = pass2_section(sec.get("title", ""), sec_slides, language)
-        sec["bullets"] = detail.get("bullets", [])
-        if isinstance(detail.get("table"), dict):
-            sec["table"] = detail["table"]
+        sl = [s for s in content_slides if s["slide_num"] in nums]
+        if not sl:
+            chunk = max(1, len(content_slides) // n)
+            start = i * chunk
+            end   = start + chunk if i < n - 1 else len(content_slides)
+            sl    = content_slides[start:end] or content_slides
+        jobs.append((i, sec, sl))
+
+    with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
+        list(pool.map(_run_sec, jobs))
 
     if progress_cb: progress_cb("flashcards", "Generating flash cards…")
     try:
@@ -1882,52 +1956,11 @@ def summarize_stream():
 
             sections = overview["sections"]
 
-            # Sections — purely sequential. _ollama_sem(1) serialises all Ollama
-            # calls anyway, so a thread pool adds overhead without any parallelism.
-            for i, sec in enumerate(sections):
-                yield _sse({"step": "section",
-                            "msg": f"Section {i+1}/{len(sections)}: {sec.get('title','')}…"})
-                nums       = set(sec.get("slide_nums", []))
-                sec_slides = [s for s in content_slides if s["slide_num"] in nums]
-                if not sec_slides:
-                    n_sec      = len(sections)
-                    chunk      = max(1, len(content_slides) // n_sec)
-                    start      = i * chunk
-                    end        = start + chunk if i < n_sec - 1 else len(content_slides)
-                    sec_slides = content_slides[start:end] or content_slides
-                try:
-                    det = pass2_section(sec.get("title", ""), sec_slides, language, dcfg)
-                    _log.debug("pass2 [%s] val=%r", sec.get("title","?"), str(det)[:200])
-                    sec["bullets"] = det.get("bullets", [])
-                    if isinstance(det.get("table"), dict):
-                        sec["table"] = det["table"]
-                except Exception:
-                    _log.error("pass2 [%s] error:\n%s", sec.get("title","?"), _tb.format_exc())
-                    sec["bullets"] = []
-                yield _sse({"step": "section",
-                            "msg": f"Sections: {i+1}/{len(sections)} done…"})
+            for evt in _sections_parallel(sections, content_slides, language, dcfg):
+                yield _sse(evt)
 
-            # Flash cards — after all sections so bullets are available in context
-            yield _sse({"step": "flashcards", "msg": "Generating flash cards…"})
-            try:
-                fc = pass3_flashcards(overview, language, dcfg)
-                _log.debug("pass3 val=%r", str(fc)[:200])
-                overview["flashcards"] = fc.get("flashcards", [])
-            except Exception:
-                _log.error("pass3 error:\n%s", _tb.format_exc())
-                overview["flashcards"] = []
-            yield _sse({"step": "flashcards", "msg": "Flash cards ready…"})
-
-            # MCQ — after sections for the same reason
-            yield _sse({"step": "mcq", "msg": "Generating quiz…"})
-            try:
-                mc = pass4_mcq(overview, language, dcfg)
-                _log.debug("pass4 val=%r", str(mc)[:200])
-                overview["mcqs"] = mc.get("mcqs", [])
-            except Exception:
-                _log.error("pass4 error:\n%s", _tb.format_exc())
-                overview["mcqs"] = []
-            yield _sse({"step": "mcq", "msg": "Quiz ready…"})
+            for evt in _flashcards_mcq_parallel(overview, language, dcfg):
+                yield _sse(evt)
 
             # Build PDF + Markdown
             yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"})
@@ -2508,42 +2541,11 @@ def _stream_text_as_sse(text, language, out_name, job_source):
                 }]
 
             sections = overview["sections"]
-            for i, sec in enumerate(sections):
-                yield _sse({"step": "section",
-                            "msg": f"Section {i+1}/{len(sections)}: {sec.get('title','')}…"})
-                nums = set(sec.get("slide_nums", []))
-                sec_slides = [s for s in slides if s["slide_num"] in nums]
-                if not sec_slides:
-                    n_sec = len(sections)
-                    chunk = max(1, len(slides) // n_sec)
-                    start = i * chunk
-                    end = start + chunk if i < n_sec - 1 else len(slides)
-                    sec_slides = slides[start:end] or slides
-                try:
-                    det = pass2_section(sec.get("title", ""), sec_slides, language, dcfg)
-                    sec["bullets"] = det.get("bullets", [])
-                    if isinstance(det.get("table"), dict):
-                        sec["table"] = det["table"]
-                except Exception:
-                    sec["bullets"] = []
-                yield _sse({"step": "section",
-                            "msg": f"Sections: {i+1}/{len(sections)} done…"})
+            for evt in _sections_parallel(sections, slides, language, dcfg):
+                yield _sse(evt)
 
-            yield _sse({"step": "flashcards", "msg": "Generating flash cards…"})
-            try:
-                fc = pass3_flashcards(overview, language, dcfg)
-                overview["flashcards"] = fc.get("flashcards", [])
-            except Exception:
-                overview["flashcards"] = []
-            yield _sse({"step": "flashcards", "msg": "Flash cards ready…"})
-
-            yield _sse({"step": "mcq", "msg": "Generating quiz…"})
-            try:
-                mc = pass4_mcq(overview, language, dcfg)
-                overview["mcqs"] = mc.get("mcqs", [])
-            except Exception:
-                overview["mcqs"] = []
-            yield _sse({"step": "mcq", "msg": "Quiz ready…"})
+            for evt in _flashcards_mcq_parallel(overview, language, dcfg):
+                yield _sse(evt)
 
             yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"})
             pdf_buf = build_pdf(overview, language, out_name)
