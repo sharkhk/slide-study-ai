@@ -5,3 +5,18 @@ ollama_raw.txt
 extracted.json
 test_output.pdf
 .env
+
+# Node
+frontend/node_modules/
+
+# Dev / scratch files
+backend/extract_mock.py
+backend/generate_mock_pdf.py
+backend/read_ref.py
+backend/test_get_bug.py
+backend/test_real.py
+backend/app_dev.py
+
+# Windows launcher shortcuts
+Start Slide Study AI.bat
+Stop Slide Study AI.bat

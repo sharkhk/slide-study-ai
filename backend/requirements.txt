@@ -1,0 +1,16 @@
+flask
+flask-cors
+python-pptx
+python-docx
+requests
+reportlab
+olefile
+pypdf
+gunicorn
+yt-dlp
+pycryptodome
+arabic-reshaper
+python-bidi
+supabase
+stripe
+PyJWT
