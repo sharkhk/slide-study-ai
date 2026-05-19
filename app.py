@@ -759,7 +759,7 @@ def _call_groq(prompt, retries=5, max_tokens=2048):
                 json=payload, headers=headers, timeout=120
             )
             if r.status_code == 429:
-                wait = int(r.headers.get("retry-after", 60))
+                wait = int(r.headers.get("retry-after", 10))
                 _log.warning("GROQ rate limited — waiting %ds", wait)
                 time.sleep(wait)
                 continue
@@ -953,11 +953,11 @@ Rules:
 
 
 def _sections_parallel(sections, content_slides, language, dcfg):
-    """Run all pass2 sections concurrently. Yields plain dicts (not SSE-encoded)."""
+    """Process sections sequentially (Groq rate limits prevent safe concurrency).
+    Yields plain dicts. Flashcards+MCQ are parallelized separately."""
     n = len(sections)
-
-    jobs = []
     for i, sec in enumerate(sections):
+        yield {"step": "section", "msg": f"Section {i+1}/{n}: {sec.get('title', '')}…"}
         nums = set(sec.get("slide_nums", []))
         sl = [s for s in content_slides if s["slide_num"] in nums]
         if not sl:
@@ -965,32 +965,15 @@ def _sections_parallel(sections, content_slides, language, dcfg):
             start = i * chunk
             end   = start + chunk if i < n - 1 else len(content_slides)
             sl    = content_slides[start:end] or content_slides
-        jobs.append((i, sec, sl))
-        yield {"step": "section", "msg": f"Section {i+1}/{n}: {sec.get('title', '')}…"}
-
-    def _run(job):
-        idx, sec, sl = job
         try:
             det = pass2_section(sec.get("title", ""), sl, language, dcfg)
-            return idx, det, None
+            sec["bullets"] = det.get("bullets", [])
+            if isinstance(det.get("table"), dict):
+                sec["table"] = det["table"]
         except Exception:
-            return idx, None, _tb.format_exc()
-
-    done = 0
-    with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
-        futures = {pool.submit(_run, job): job[0] for job in jobs}
-        for fut in as_completed(futures):
-            idx, det, err = fut.result()
-            sec = sections[idx]
-            if err:
-                _log.error("pass2 [%s] error:\n%s", sec.get("title", "?"), err)
-                sec["bullets"] = []
-            else:
-                sec["bullets"] = det.get("bullets", [])
-                if isinstance(det.get("table"), dict):
-                    sec["table"] = det["table"]
-            done += 1
-            yield {"step": "section", "msg": f"Sections: {done}/{n} done…"}
+            _log.error("pass2 [%s] error:\n%s", sec.get("title", "?"), _tb.format_exc())
+            sec["bullets"] = []
+        yield {"step": "section", "msg": f"Sections: {i+1}/{n} done…"}
 
 
 def _flashcards_mcq_parallel(overview, language, dcfg):
@@ -1077,20 +1060,6 @@ def ask_ollama(slides, language, progress_cb=None):
 
     sections = overview["sections"]
     n = len(sections)
-
-    def _run_sec(job):
-        i, sec, sl = job
-        try:
-            det = pass2_section(sec.get("title", ""), sl, language)
-            sec["bullets"] = det.get("bullets", [])
-            if isinstance(det.get("table"), dict):
-                sec["table"] = det["table"]
-        except Exception:
-            sec["bullets"] = []
-        if progress_cb:
-            progress_cb("section", f"Section {i+1}/{n} done…")
-
-    jobs = []
     for i, sec in enumerate(sections):
         if progress_cb: progress_cb("section", f"Building section {i+1} of {n}: {sec.get('title','')}…")
         nums = set(sec.get("slide_nums", []))
@@ -1100,10 +1069,10 @@ def ask_ollama(slides, language, progress_cb=None):
             start = i * chunk
             end   = start + chunk if i < n - 1 else len(content_slides)
             sl    = content_slides[start:end] or content_slides
-        jobs.append((i, sec, sl))
-
-    with ThreadPoolExecutor(max_workers=min(n, 6)) as pool:
-        list(pool.map(_run_sec, jobs))
+        detail = pass2_section(sec.get("title", ""), sl, language)
+        sec["bullets"] = detail.get("bullets", [])
+        if isinstance(detail.get("table"), dict):
+            sec["table"] = detail["table"]
 
     if progress_cb: progress_cb("flashcards", "Generating flash cards…")
     try:
