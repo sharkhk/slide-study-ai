@@ -1735,20 +1735,10 @@ export default function App() {
       )}
 
       {/* Site footer */}
-      <footer style={{
-        textAlign:'center', padding:'1.1rem 1rem 1.6rem',
-        fontSize:'0.73rem', color:'var(--text-muted)',
-        borderTop:'1px solid var(--glass-border)',
-        marginTop:'0.5rem',
-        direction: lang === 'ar' ? 'rtl' : 'ltr',
-      }}>
+      <footer className="site-footer" style={{ direction: lang === 'ar' ? 'rtl' : 'ltr' }}>
         <div style={{marginBottom:'0.6rem'}}>
           © 2026 Alimne &nbsp;·&nbsp;
-          <button onClick={() => setShowTerms(true)} style={{
-            background:'none', border:'none', cursor:'pointer',
-            color:'var(--accent)', fontSize:'0.73rem', fontFamily:'inherit',
-            textDecoration:'underline', padding:0,
-          }}>
+          <button onClick={() => setShowTerms(true)} className="footer-terms-btn">
             {lang === 'ar' ? 'الشروط والأحكام' : 'Terms & Conditions'}
           </button>
           &nbsp;·&nbsp;
@@ -1760,21 +1750,7 @@ export default function App() {
           href="https://souc.ai"
           target="_blank"
           rel="noopener noreferrer"
-          style={{
-            display:'inline-flex', alignItems:'center', gap:'0.35rem',
-            padding:'0.3rem 0.75rem',
-            border:'1px solid var(--glass-border)',
-            borderRadius:99,
-            background:'var(--glass-light)',
-            color:'var(--text-muted)',
-            fontSize:'0.68rem',
-            fontWeight:500,
-            textDecoration:'none',
-            letterSpacing:'0.02em',
-            transition:'border-color 0.2s, color 0.2s',
-          }}
-          onMouseEnter={e => { e.currentTarget.style.borderColor='var(--accent)'; e.currentTarget.style.color='var(--accent)' }}
-          onMouseLeave={e => { e.currentTarget.style.borderColor='var(--glass-border)'; e.currentTarget.style.color='var(--text-muted)' }}
+          className="souc-pill"
         >
           <span style={{fontSize:'0.6rem', opacity:0.7}}>⚡</span>
           {lang === 'ar' ? 'مدعوم من souc.ai' : 'Powered by souc.ai'}
