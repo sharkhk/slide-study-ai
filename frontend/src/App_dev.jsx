@@ -715,7 +715,7 @@ This service relies on:
 These terms may be updated at any time without prior notice. Continued use of the service after changes constitutes your acceptance of the revised terms.
 
 10. CONTACT
-Questions or concerns: lloll660@gmail.com`
+Questions or concerns: hello@souc.ai`
 
 const TERMS_AR = `الشروط والأحكام
 Alimne (علّمني) — منتج souc.ai
@@ -771,7 +771,7 @@ Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصط
 قد تُحدَّث هذه الشروط في أي وقت دون إشعار مسبق. استمرارك في استخدام الخدمة بعد أي تغيير يعني قبولك للشروط المعدَّلة.
 
 ١٠. التواصل
-للأسئلة والاستفسارات: lloll660@gmail.com`
+للأسئلة والاستفسارات: hello@souc.ai`
 
 function TermsModal({ lang, onClose }) {
   const isAr = lang === 'ar'
