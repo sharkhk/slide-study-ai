@@ -662,11 +662,11 @@ function SSEProgressCard({ item, lang }) {
 
 // ── Terms & Conditions Modal ───────────────────────────────────────────────────
 const TERMS_EN = `TERMS AND CONDITIONS
-Alimne (علّمني) — alemne.onrender.com
+Alimne (علّمني) — a souc.ai product
 Effective: May 2026
 
 1. ABOUT THIS SERVICE
-Alimne is an AI-powered tool that converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided for educational and personal use on a freemium subscription model.
+Alimne is an AI-powered study tool registered under the souc.ai platform. It converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided for educational and personal use on a freemium subscription model.
 
 2. SUBSCRIPTION & BILLING
 • Free plan: 1 processing token per month. No credit card required.
@@ -696,10 +696,11 @@ You agree not to use this service to:
 6. INTELLECTUAL PROPERTY
 • Your uploaded files and their content remain entirely your property.
 • AI-generated study guides are provided for your personal educational use.
-• The Alimne application, its interface, and underlying code are the property of the developer.
+• The Alimne application, its interface, and underlying code are the property of souc.ai and its developers.
 
 7. THIRD-PARTY SERVICES
 This service relies on:
+• souc.ai — platform registry and infrastructure provider (souc.ai).
 • Groq API — for AI text generation and audio transcription (subject to Groq's own terms at groq.com).
 • Stripe — for payment processing (subject to Stripe's terms at stripe.com).
 • Supabase — for authentication (subject to Supabase's terms at supabase.com).
@@ -717,11 +718,11 @@ These terms may be updated at any time without prior notice. Continued use of th
 Questions or concerns: lloll660@gmail.com`
 
 const TERMS_AR = `الشروط والأحكام
-Alimne (علّمني) — alemne.onrender.com
+Alimne (علّمني) — منتج souc.ai
 ساري المفعول: مايو 2026
 
 ١. عن هذه الخدمة
-Alimne (علّمني) أداة مدعومة بالذكاء الاصطناعي تحوّل ملفات PowerPoint وPDF ومقاطع YouTube والنصوص إلى أدلة دراسة منظمة للاختبارات. تُقدَّم الخدمة للاستخدام التعليمي والشخصي وفق نموذج اشتراك مجاني مدفوع.
+Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصطناعي مسجّلة تحت منصة souc.ai. تحوّل ملفات PowerPoint وPDF ومقاطع YouTube والنصوص إلى أدلة دراسة منظمة للاختبارات. تُقدَّم الخدمة للاستخدام التعليمي والشخصي وفق نموذج اشتراك مجاني مدفوع.
 
 ٢. الاشتراك والفوترة
 • الخطة المجانية: رمز معالجة واحد شهرياً. لا تحتاج إلى بطاقة ائتمانية.
@@ -751,10 +752,11 @@ Alimne (علّمني) أداة مدعومة بالذكاء الاصطناعي ت
 ٦. الملكية الفكرية
 • ملفاتك ومحتواها تظل ملكك الكامل.
 • أدلة الدراسة المولَّدة مقدَّمة لاستخدامك التعليمي الشخصي.
-• تطبيق Alimne (علّمني) وواجهته وشفرته البرمجية ملك للمطوّر.
+• تطبيق Alimne (علّمني) وواجهته وشفرته البرمجية ملك لـ souc.ai ومطوّريها.
 
 ٧. الخدمات الخارجية
 تعتمد هذه الخدمة على:
+• souc.ai — منصة التسجيل والبنية التحتية (souc.ai).
 • Groq API — لتوليد النصوص والنسخ الصوتي بالذكاء الاصطناعي (خاضع لشروط Groq على groq.com).
 • Stripe — لمعالجة المدفوعات (خاضع لشروط Stripe على stripe.com).
 • Supabase — للمصادقة (خاضع لشروط Supabase على supabase.com).
@@ -1360,7 +1362,13 @@ export default function App() {
             <div className="nav-inner">
               <div className="nav-brand">
                 <div className="brand-icon"><BookOpen size={16} color="#fff" /></div>
-                <span className="brand-name">{t.brand}</span>
+                <div style={{display:'flex',flexDirection:'column',gap:'1px',lineHeight:1}}>
+                  <span className="brand-name">{t.brand}</span>
+                  <span style={{fontSize:'0.62rem',color:'var(--text-muted)',letterSpacing:'0.02em',fontWeight:400}}>
+                    by <a href="https://souc.ai" target="_blank" rel="noopener noreferrer"
+                      style={{color:'var(--accent)',textDecoration:'none',fontWeight:500}}>souc.ai</a>
+                  </span>
+                </div>
               </div>
               <div className="nav-controls">
                 {ollama === null ? (
@@ -1728,24 +1736,49 @@ export default function App() {
 
       {/* Site footer */}
       <footer style={{
-        textAlign:'center', padding:'1.1rem 1rem 1.4rem',
+        textAlign:'center', padding:'1.1rem 1rem 1.6rem',
         fontSize:'0.73rem', color:'var(--text-muted)',
         borderTop:'1px solid var(--glass-border)',
         marginTop:'0.5rem',
         direction: lang === 'ar' ? 'rtl' : 'ltr',
       }}>
-        © 2026 Alimne &nbsp;·&nbsp;
-        <button onClick={() => setShowTerms(true)} style={{
-          background:'none', border:'none', cursor:'pointer',
-          color:'var(--accent)', fontSize:'0.73rem', fontFamily:'inherit',
-          textDecoration:'underline', padding:0,
-        }}>
-          {lang === 'ar' ? 'الشروط والأحكام' : 'Terms & Conditions'}
-        </button>
-        &nbsp;·&nbsp;
-        {lang === 'ar'
-          ? 'رمز مجاني شهرياً · لا يُحفظ أي شيء'
-          : '1 free token/month · No data stored'}
+        <div style={{marginBottom:'0.6rem'}}>
+          © 2026 Alimne &nbsp;·&nbsp;
+          <button onClick={() => setShowTerms(true)} style={{
+            background:'none', border:'none', cursor:'pointer',
+            color:'var(--accent)', fontSize:'0.73rem', fontFamily:'inherit',
+            textDecoration:'underline', padding:0,
+          }}>
+            {lang === 'ar' ? 'الشروط والأحكام' : 'Terms & Conditions'}
+          </button>
+          &nbsp;·&nbsp;
+          {lang === 'ar'
+            ? 'رمز مجاني شهرياً · لا يُحفظ أي شيء'
+            : '1 free token/month · No data stored'}
+        </div>
+        <a
+          href="https://souc.ai"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display:'inline-flex', alignItems:'center', gap:'0.35rem',
+            padding:'0.3rem 0.75rem',
+            border:'1px solid var(--glass-border)',
+            borderRadius:99,
+            background:'var(--glass-light)',
+            color:'var(--text-muted)',
+            fontSize:'0.68rem',
+            fontWeight:500,
+            textDecoration:'none',
+            letterSpacing:'0.02em',
+            transition:'border-color 0.2s, color 0.2s',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor='var(--accent)'; e.currentTarget.style.color='var(--accent)' }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor='var(--glass-border)'; e.currentTarget.style.color='var(--text-muted)' }}
+        >
+          <span style={{fontSize:'0.6rem', opacity:0.7}}>⚡</span>
+          {lang === 'ar' ? 'مدعوم من souc.ai' : 'Powered by souc.ai'}
+        </a>
       </footer>
 
       <style>{`
