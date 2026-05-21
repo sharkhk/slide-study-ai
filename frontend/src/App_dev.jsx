@@ -902,117 +902,6 @@ function UpgradeModal({ onClose, onUpgrade, onManage, isSubscribed, lang }) {
   )
 }
 
-// ── Particle Canvas ────────────────────────────────────────────────────────────
-function hexToRgba(hex, alpha) {
-  const h = hex.replace('#', '')
-  const r = parseInt(h.slice(0, 2), 16)
-  const g = parseInt(h.slice(2, 4), 16)
-  const b = parseInt(h.slice(4, 6), 16)
-  return `rgba(${r},${g},${b},${alpha})`
-}
-
-function ParticleCanvas() {
-  const canvasRef = useRef(null)
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-
-    const COLORS = ['#4f8ef7', '#a78bfa', '#06b6d4', '#818cf8']
-    const COUNT  = 55
-    const LINK_DIST = 130
-    const SPEED_MAX = 0.55
-
-    let W, H, particles, raf
-
-    const rand = (min, max) => Math.random() * (max - min) + min
-
-    function resize() {
-      W = canvas.width  = window.innerWidth
-      H = canvas.height = window.innerHeight
-    }
-
-    function init() {
-      resize()
-      particles = Array.from({ length: COUNT }, () => ({
-        x:    rand(0, W),
-        y:    rand(0, H),
-        vx:   rand(-SPEED_MAX, SPEED_MAX),
-        vy:   rand(-SPEED_MAX, SPEED_MAX),
-        r:    rand(1.5, 3.2),
-        color: COLORS[Math.floor(Math.random() * COLORS.length)],
-        pulse: rand(0, Math.PI * 2),
-      }))
-    }
-
-    function draw() {
-      ctx.clearRect(0, 0, W, H)
-
-      // connections
-      for (let i = 0; i < particles.length; i++) {
-        for (let j = i + 1; j < particles.length; j++) {
-          const a = particles[i], b = particles[j]
-          const dx = a.x - b.x, dy = a.y - b.y
-          const dist = Math.sqrt(dx * dx + dy * dy)
-          if (dist < LINK_DIST) {
-            const alpha = (1 - dist / LINK_DIST) * 0.25
-            ctx.beginPath()
-            ctx.strokeStyle = `rgba(167,139,250,${alpha})`
-            ctx.lineWidth = 0.8
-            ctx.moveTo(a.x, a.y)
-            ctx.lineTo(b.x, b.y)
-            ctx.stroke()
-          }
-        }
-      }
-
-      // particles + glow halo
-      particles.forEach(p => {
-        p.pulse += 0.03
-        const haloR = p.r + 3 + Math.sin(p.pulse) * 1.5
-        const grd = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, haloR * 3)
-        grd.addColorStop(0, hexToRgba(p.color, 0.35))
-        grd.addColorStop(1, 'transparent')
-        ctx.beginPath()
-        ctx.arc(p.x, p.y, haloR * 3, 0, Math.PI * 2)
-        ctx.fillStyle = grd
-        ctx.fill()
-
-        ctx.beginPath()
-        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2)
-        ctx.fillStyle = p.color
-        ctx.shadowColor = p.color
-        ctx.shadowBlur  = 8
-        ctx.fill()
-        ctx.shadowBlur  = 0
-
-        // move + bounce
-        p.x += p.vx
-        p.y += p.vy
-        if (p.x < 0 || p.x > W) p.vx *= -1
-        if (p.y < 0 || p.y > H) p.vy *= -1
-      })
-
-      raf = requestAnimationFrame(draw)
-    }
-
-    const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    if (!prefersReduced) {
-      init()
-      draw()
-    }
-
-    const onResize = () => { resize(); if (!prefersReduced) init() }
-    window.addEventListener('resize', onResize)
-    return () => {
-      cancelAnimationFrame(raf)
-      window.removeEventListener('resize', onResize)
-    }
-  }, [])
-
-  return <canvas ref={canvasRef} className="particle-canvas" />
-}
 
 // ── Main App ───────────────────────────────────────────────────────────────────
 export default function App() {
@@ -1348,7 +1237,6 @@ export default function App() {
 
   return (
     <div data-theme={theme} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
-      <ParticleCanvas />
       <div className="bg-orb orb-1" />
       <div className="bg-orb orb-2" />
       <div className="bg-orb orb-3" />
