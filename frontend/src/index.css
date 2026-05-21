@@ -17,7 +17,7 @@
   --white: #ffffff;
   --radius: 16px;
   --radius-sm: 10px;
-  --transition: 0.22s ease;
+  --transition: 0.15s ease;
   --modal-overlay: rgba(5,13,26,0.82);
   --card-shadow: 0 8px 32px rgba(0,0,0,0.35);
   --card-shadow-hover: 0 16px 48px rgba(0,0,0,0.5);
@@ -278,7 +278,7 @@ body {
   font-size: 0.8rem;
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
   font-family: inherit;
   white-space: nowrap;
   flex-shrink: 0;
@@ -369,7 +369,7 @@ body {
   padding: 2.2rem 1.5rem;
   text-align: center;
   cursor: pointer;
-  transition: all var(--transition);
+  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
   background: var(--glass-light);
   position: relative;
 }
@@ -402,7 +402,7 @@ body {
   justify-content: center;
   margin: 0 auto 0.85rem;
   color: var(--accent);
-  transition: all var(--transition);
+  transition: background var(--transition), box-shadow var(--transition);
 }
 [data-theme="light"] .drop-icon {
   background: rgba(37,99,235,0.08);
@@ -486,7 +486,7 @@ textarea.text-input { resize: vertical; min-height: 110px; }
   justify-content: center;
   gap: 0.45rem;
   font-family: inherit;
-  transition: all var(--transition);
+  transition: transform var(--transition), box-shadow var(--transition);
   box-shadow: 0 4px 16px var(--accent-glow);
   white-space: nowrap;
 }
@@ -518,7 +518,7 @@ textarea.text-input { resize: vertical; min-height: 110px; }
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
-  transition: all var(--transition);
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
   white-space: nowrap;
 }
 .detail-tab:hover { color: var(--text-primary); border-color: var(--accent); }
@@ -622,7 +622,7 @@ textarea.text-input { resize: vertical; min-height: 110px; }
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
-  transition: all var(--transition);
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
   white-space: nowrap;
 }
 .action-btn:hover { border-color: var(--accent); color: var(--text-primary); }
@@ -780,7 +780,7 @@ textarea.text-input { resize: vertical; min-height: 110px; }
   font-weight: 600;
   cursor: pointer;
   font-family: inherit;
-  transition: all var(--transition);
+  transition: opacity var(--transition), background var(--transition), border-color var(--transition), color var(--transition);
 }
 .quiz-action-btn.correct {
   background: rgba(34,197,94,0.12);
@@ -814,7 +814,7 @@ textarea.text-input { resize: vertical; min-height: 110px; }
   cursor: pointer;
   font-family: inherit;
   margin-bottom: 0.4rem;
-  transition: all var(--transition);
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
 }
 .quiz-option:hover:not(:disabled) { border-color: var(--accent); color: var(--text-primary); }
 .quiz-option.selected { border-color: var(--accent); color: var(--accent); background: rgba(79,142,247,0.1); }
@@ -943,7 +943,7 @@ textarea.text-input { resize: vertical; min-height: 110px; }
   font-weight: 700;
   cursor: pointer;
   font-family: inherit;
-  transition: all var(--transition);
+  transition: transform var(--transition), box-shadow var(--transition);
   box-shadow: 0 3px 12px rgba(34,197,94,0.3);
 }
 .download-btn:hover { transform: translateY(-1px); box-shadow: 0 5px 18px rgba(34,197,94,0.4); }
