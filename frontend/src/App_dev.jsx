@@ -1602,6 +1602,29 @@ export default function App() {
             )}
           </div>
         </main>
+
+        {/* Site footer — must be inside app-wrap to stay above the fixed bg-mesh overlay */}
+        <footer className="site-footer" style={{ direction: lang === 'ar' ? 'rtl' : 'ltr' }}>
+          <div style={{marginBottom:'0.6rem'}}>
+            © 2026 Alimne &nbsp;·&nbsp;
+            <button onClick={() => setShowTerms(true)} className="footer-terms-btn">
+              {lang === 'ar' ? 'الشروط والأحكام' : 'Terms & Conditions'}
+            </button>
+            &nbsp;·&nbsp;
+            {lang === 'ar'
+              ? 'رمز مجاني شهرياً · لا يُحفظ أي شيء'
+              : '1 free token/month · No data stored'}
+          </div>
+          <a
+            href="https://souc.ai"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="souc-pill"
+          >
+            <span style={{fontSize:'0.6rem', opacity:0.7}}>⚡</span>
+            {lang === 'ar' ? 'مدعوم من souc.ai' : 'Powered by souc.ai'}
+          </a>
+        </footer>
       </div>
 
       {/* ── Modals ── */}
@@ -1621,29 +1644,6 @@ export default function App() {
           lang={lang}
         />
       )}
-
-      {/* Site footer */}
-      <footer className="site-footer" style={{ direction: lang === 'ar' ? 'rtl' : 'ltr' }}>
-        <div style={{marginBottom:'0.6rem'}}>
-          © 2026 Alimne &nbsp;·&nbsp;
-          <button onClick={() => setShowTerms(true)} className="footer-terms-btn">
-            {lang === 'ar' ? 'الشروط والأحكام' : 'Terms & Conditions'}
-          </button>
-          &nbsp;·&nbsp;
-          {lang === 'ar'
-            ? 'رمز مجاني شهرياً · لا يُحفظ أي شيء'
-            : '1 free token/month · No data stored'}
-        </div>
-        <a
-          href="https://souc.ai"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="souc-pill"
-        >
-          <span style={{fontSize:'0.6rem', opacity:0.7}}>⚡</span>
-          {lang === 'ar' ? 'مدعوم من souc.ai' : 'Powered by souc.ai'}
-        </a>
-      </footer>
 
       <style>{`
         @keyframes indeterminate {
