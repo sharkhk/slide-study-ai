@@ -126,6 +126,41 @@ const STATUS_COLOR = {
 let _id = 0
 const uid = () => ++_id
 
+// ── Toast notifications ────────────────────────────────────────────────────
+function ToastContainer() {
+  const [toasts, setToasts] = useState([])
+  useEffect(() => {
+    window._addToast = (msg, type = 'success') => {
+      const id = uid()
+      setToasts(p => [...p, { id, msg, type }])
+      setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 2500)
+    }
+    return () => { delete window._addToast }
+  }, [])
+  if (!toasts.length) return null
+  return (
+    <div style={{position:'fixed',bottom:'1.5rem',left:'50%',transform:'translateX(-50%)',zIndex:9999,display:'flex',flexDirection:'column',gap:'0.4rem',alignItems:'center',pointerEvents:'none'}}>
+      {toasts.map(t => (
+        <div key={t.id} style={{
+          background: t.type==='error' ? '#ef4444' : t.type==='info' ? '#4f8ef7' : '#22c55e',
+          color:'#fff',padding:'0.45rem 1.1rem',borderRadius:8,fontSize:'0.82rem',fontWeight:600,
+          boxShadow:'0 4px 20px rgba(0,0,0,0.3)',whiteSpace:'nowrap',animation:'toastIn 0.18s ease'
+        }}>{t.msg}</div>
+      ))}
+    </div>
+  )
+}
+const toast = (msg, type) => window._addToast?.(msg, type)
+
+// ── Escape key hook ────────────────────────────────────────────────────────
+function useEscapeKey(fn) {
+  useEffect(() => {
+    const h = e => { if (e.key === 'Escape') fn() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [fn])
+}
+
 // ── SSE stream helper ─────────────────────────────────────────────────────────
 // onError receives (message, httpStatus, rawData)
 function streamSSE(url, options, onEvent, onError) {
@@ -170,6 +205,8 @@ function FlashCardModal({ jobId, onClose }) {
   const [roundDone, setRoundDone]   = useState(false)
   const [error, setError]           = useState(null)
   const [speaking, setSpeaking]     = useState(false)
+
+  useEscapeKey(onClose)
 
   const saveKnown = (k) => {
     localStorage.setItem(`sr_${jobId}`, JSON.stringify(k))
@@ -240,7 +277,7 @@ function FlashCardModal({ jobId, onClose }) {
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
         <div style={{padding:'2rem',textAlign:'center',color:'var(--text-secondary)'}}>
-          {error ? <><AlertCircle size={20} style={{marginBottom:8,color:'#ef4444'}}/><div style={{color:'#ef4444'}}>{error}</div></> : <Loader2 size={20} className="spin" />}
+          {error ? <><AlertCircle size={20} style={{marginBottom:8,color:'#ef4444'}}/><div style={{color:'#ef4444'}}>{error}</div></> : <><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>Loading flash cards…</div></>}
         </div>
       </div>
     </div>
@@ -302,6 +339,10 @@ function FlashCardModal({ jobId, onClose }) {
                   </div>
                   <div className="fc-back">
                     <div style={{fontSize:'0.92rem',lineHeight:1.6}}>{currentCard.a}</div>
+                    <button onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(currentCard.a); toast('Copied!') }}
+                      style={{position:'absolute',top:8,right:8,background:'none',border:'none',cursor:'pointer',color:'var(--text-muted)',padding:4,borderRadius:5,opacity:0.7}}>
+                      <Copy size={12} />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -342,6 +383,8 @@ function QuizModal({ jobId, filename, onClose }) {
   const [done, setDone]       = useState(false)
   const [error, setError]     = useState(null)
 
+  useEscapeKey(onClose)
+
   useEffect(() => {
     fetch(`/api/guide/${jobId}`)
       .then(r => r.json())
@@ -380,8 +423,8 @@ function QuizModal({ jobId, filename, onClose }) {
           <span style={{fontWeight:600,color:'var(--text-primary)'}}>Quiz</span>
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
-        <div style={{padding:'2rem',textAlign:'center'}}>
-          {error ? <div style={{color:'#ef4444'}}>{error}</div> : <Loader2 size={20} className="spin" />}
+        <div style={{padding:'2rem',textAlign:'center',color:'var(--text-secondary)'}}>
+          {error ? <div style={{color:'#ef4444'}}>{error}</div> : <><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>Loading quiz…</div></>}
         </div>
       </div>
     </div>
@@ -566,11 +609,12 @@ function MindmapModal({ jobId, onClose }) {
 
 // ── Chat Modal ─────────────────────────────────────────────────────────────────
 function ChatModal({ jobId, onClose, lang }) {
-  const [msgs, setMsgs] = useState([{ role: 'ai', text: 'Ask me anything about this study guide!' }])
+  const [msgs, setMsgs] = useState([{ role: 'ai', text: 'Ask me anything — definitions, hints, explanations, key points.' }])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const endRef = useRef()
 
+  useEscapeKey(onClose)
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
 
   const send = async () => {
@@ -605,7 +649,15 @@ function ChatModal({ jobId, onClose, lang }) {
         <div className="chat-msgs">
           {msgs.map((m, i) => (
             <div key={i} className={`chat-msg ${m.role}`}>
-              <div className="chat-bubble">{m.text}</div>
+              <div className="chat-bubble" style={{position:'relative'}}>
+                {m.text}
+                {m.role === 'ai' && i > 0 && (
+                  <button onClick={() => { navigator.clipboard.writeText(m.text); toast('Copied!') }}
+                    style={{position:'absolute',top:4,right:4,background:'none',border:'none',cursor:'pointer',color:'var(--text-muted)',padding:3,borderRadius:4,opacity:0.6,lineHeight:1}}>
+                    <Copy size={11} />
+                  </button>
+                )}
+              </div>
             </div>
           ))}
           {loading && (
@@ -1215,6 +1267,7 @@ export default function App() {
     a.href = `/api/download/${item.jobId}`
     a.download = item.name.replace(/\.(pptx?|pdf)$/i, '') + '_study_guide.pdf'
     a.click()
+    toast('PDF downloading…', 'info')
   }
 
   const downloadAnki = (item) => {
@@ -1222,6 +1275,7 @@ export default function App() {
     const a = document.createElement('a')
     a.href = `/api/export/anki/${item.jobId}`
     a.click()
+    toast('Anki CSV downloading…', 'info')
   }
 
   const openPrint = (item) => {
@@ -1237,6 +1291,7 @@ export default function App() {
 
   return (
     <div data-theme={theme} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+      <ToastContainer />
       <div className="bg-orb orb-1" />
       <div className="bg-orb orb-2" />
       <div className="bg-orb orb-3" />
@@ -1391,11 +1446,14 @@ export default function App() {
               {inputTab === 'text' && (
                 <div>
                   <textarea className="text-input"
-                    style={{width:'100%',marginBottom:'0.55rem'}}
+                    style={{width:'100%',marginBottom:'0.25rem'}}
                     placeholder={t.textPlaceholder}
                     value={pasteText}
                     onChange={e => setPasteText(e.target.value)}
                   />
+                  <div style={{fontSize:'0.71rem',color:'var(--text-muted)',textAlign:'right',marginBottom:'0.35rem'}}>
+                    {pasteText.trim() ? `${pasteText.trim().split(/\s+/).length} words` : ''}
+                  </div>
                   <div className="input-row">
                     <input className="text-input"
                       placeholder={t.urlPlaceholder}
@@ -1649,6 +1707,10 @@ export default function App() {
         @keyframes indeterminate {
           0%   { transform: translateX(-100%); width: 60%; }
           100% { transform: translateX(200%);  width: 60%; }
+        }
+        @keyframes toastIn {
+          from { opacity:0; transform: translateY(8px); }
+          to   { opacity:1; transform: translateY(0); }
         }
         .chat-input {
           flex: 1;
