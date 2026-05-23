@@ -176,10 +176,8 @@ body {
 
 /* ── Glass card ──────────────────────────────────────────────────────────── */
 .glass {
-  background: var(--glass-bg);
+  background: rgba(10,22,40,0.85);
   border: 1px solid var(--glass-border);
-  backdrop-filter: blur(24px) saturate(1.4);
-  -webkit-backdrop-filter: blur(24px) saturate(1.4);
   border-radius: var(--radius);
   box-shadow: var(--card-shadow);
   transition: box-shadow var(--transition);
@@ -187,9 +185,7 @@ body {
 .glass:hover { box-shadow: var(--card-shadow-hover); }
 
 [data-theme="light"] .glass {
-  backdrop-filter: blur(12px) saturate(1.1);
-  -webkit-backdrop-filter: blur(12px) saturate(1.1);
-  background: rgba(255,255,255,0.94);
+  background: rgba(255,255,255,0.97);
   border-color: rgba(37,99,235,0.12);
 }
 
@@ -213,9 +209,7 @@ body {
 .nav {
   padding: 0.9rem 0;
   border-bottom: 1px solid var(--glass-border);
-  background: var(--glass-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: rgba(5,13,26,0.95);
   position: sticky;
   top: 0;
   z-index: 99;
@@ -666,8 +660,6 @@ textarea.text-input { resize: vertical; min-height: 110px; }
   position: fixed;
   inset: 0;
   background: var(--modal-overlay);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
   z-index: 200;
   display: flex;
   align-items: center;
@@ -675,10 +667,8 @@ textarea.text-input { resize: vertical; min-height: 110px; }
   padding: 1rem;
 }
 .modal-box {
-  background: var(--glass-bg);
+  background: rgba(10,22,40,0.95);
   border: 1px solid var(--glass-border);
-  backdrop-filter: blur(28px);
-  -webkit-backdrop-filter: blur(28px);
   border-radius: var(--radius);
   width: 100%;
   max-width: 560px;
@@ -690,8 +680,7 @@ textarea.text-input { resize: vertical; min-height: 110px; }
   animation: modalIn 0.2s ease;
 }
 [data-theme="light"] .modal-box {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+  background: rgba(255,255,255,0.99);
   border-color: rgba(37,99,235,0.14);
 }
 @keyframes modalIn {
