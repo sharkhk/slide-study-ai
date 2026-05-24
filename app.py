@@ -2007,11 +2007,29 @@ def chat_with_slides(job_id):
         job = get_job(job_id)
     if not job:
         return jsonify({"error": "Session expired — re-upload the file"}), 404
-    slides  = job.get("slides", [])
-    context = "\n\n".join(
-        f"[{s['title']}]\n{s['content'][:400]}"
-        for s in slides[:30] if s.get("content")
-    )
+
+    # Build rich context from guide (sections + keywords) rather than raw slide chunks
+    guide   = job.get("guide") or {}
+    context_parts = []
+    if guide.get("title"):
+        context_parts.append(f"Title: {guide['title']}")
+    if guide.get("objectives"):
+        context_parts.append("Objectives:\n" + "\n".join(f"- {o}" for o in guide["objectives"]))
+    for sec in (guide.get("sections") or []):
+        bullets = sec.get("bullets") or []
+        if bullets:
+            context_parts.append(f"\n[{sec.get('title','')}]\n" + "\n".join(
+                f"- {b}" if isinstance(b, str) else f"- {b.get('text') or b.get('fact','')}"
+                for b in bullets
+            ))
+    if guide.get("keywords"):
+        kw_lines = [
+            f"{k['term']}: {k.get('definition','')}" if isinstance(k, dict) else str(k)
+            for k in guide["keywords"][:30]
+        ]
+        context_parts.append("Key terms:\n" + "\n".join(kw_lines))
+    context = "\n\n".join(context_parts) or "No material available."
+
     lang = "in Arabic" if language == "ar" else "in English"
     try:
         result = _call_ollama(
@@ -2025,10 +2043,11 @@ Question: {question}
 Return JSON: {{"answer": "your detailed answer"}}
 
 Rules:
-- Answer from the material only; if not covered say so clearly
-- Be specific and concise
+- Answer directly and specifically from the material
+- If genuinely not covered, say so briefly
+- Be helpful and detailed; include facts, definitions, examples from the material
 - JSON only""", num_predict=1024)
-        return jsonify({"answer": result.get("answer", "No answer found in the slides.")})
+        return jsonify({"answer": result.get("answer", "No answer found in the material.")})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
