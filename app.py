@@ -2479,8 +2479,9 @@ def _extract_video_id(url):
     return None
 
 
-def _stream_text_as_sse(text, language, out_name, job_source):
+def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None):
     """Shared SSE generator for YouTube/text endpoints."""
+    _dcfg = dcfg or DETAIL["standard"]
     def generate():
         try:
             yield _sse({"step": "extract", "msg": "Preparing content…"})
@@ -2489,7 +2490,7 @@ def _stream_text_as_sse(text, language, out_name, job_source):
                 yield _sse({"error": "No content extracted"}); return
             yield _sse({"step": "extract", "msg": f"Split into {len(slides)} segments — analysing…"})
 
-            dcfg = DETAIL["standard"]
+            dcfg = _dcfg
 
             yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
             overview = pass1_overview(slides, language, dcfg)
@@ -2552,6 +2553,8 @@ def youtube_transcript():
     data = request.json or {}
     url = (data.get("url") or "").strip()
     lang_param = data.get("language", "auto")
+    detail_level = data.get("detail", "standard")
+    yt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not ollama_running():
@@ -2584,7 +2587,7 @@ def youtube_transcript():
             language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
             lang_label = "Arabic" if language == "ar" else "English"
             yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language})
-            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube")():
+            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg)():
                 yield event
         except Exception as ex:
             _log.error("youtube SSE error: %s", ex)
@@ -2635,8 +2638,10 @@ def summarize_text():
     data = request.json or {}
     text = (data.get("text") or "").strip()
     url  = (data.get("url")  or "").strip()
-    lang_param = data.get("language", "auto")
-    filename   = _safe_name(data.get("filename") or "pasted_text")
+    lang_param   = data.get("language", "auto")
+    filename     = _safe_name(data.get("filename") or "pasted_text")
+    detail_level = data.get("detail", "standard")
+    txt_dcfg     = DETAIL.get(detail_level, DETAIL["standard"])
 
     if not ollama_running():
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
@@ -2651,7 +2656,7 @@ def summarize_text():
         return jsonify({"error": "No text or URL provided"}), 400
 
     language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
-    gen = _stream_text_as_sse(text, language, filename, "text")
+    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg)
     return Response(
         stream_with_context(gen()),
         mimetype="text/event-stream",

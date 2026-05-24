@@ -208,6 +208,25 @@ function FlashCardModal({ jobId, onClose }) {
 
   useEscapeKey(onClose)
 
+  // Keyboard shortcuts: Space=flip, K/←=Know, M/→=Missed
+  useEffect(() => {
+    if (!cards || roundDone) return
+    const h = (e) => {
+      if (e.key === ' ') { e.preventDefault(); setFlipped(f => !f); return }
+      if (!currentCard) return
+      if (e.key === 'k' || e.key === 'K' || e.key === 'ArrowLeft') { if (flipped) mark(true) }
+      if (e.key === 'm' || e.key === 'M' || e.key === 'ArrowRight') { if (flipped) mark(false) }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cards, roundDone, currentCard, flipped])
+
+  const shuffle = () => {
+    setCards(c => [...c].sort(() => Math.random() - 0.5))
+    setIdx(0); setFlipped(false); setRoundDone(false)
+  }
+
   const saveKnown = (k) => {
     localStorage.setItem(`sr_${jobId}`, JSON.stringify(k))
     setKnown(k)
@@ -294,6 +313,9 @@ function FlashCardModal({ jobId, onClose }) {
             {reviewMode && <span style={{fontSize:'0.75rem',color:'#fbbf24',fontWeight:500}}> — Review Missed</span>}
           </span>
           <div style={{display:'flex',gap:'0.4rem',alignItems:'center'}}>
+            <button className="ctrl-btn" style={{fontSize:'0.75rem'}} onClick={shuffle} title="Shuffle cards">
+              <RotateCcw size={12} /> Shuffle
+            </button>
             <button className="ctrl-btn" style={{fontSize:'0.75rem'}} onClick={resetAll}>Reset</button>
             <button className="modal-close" onClick={onClose}><X size={16} /></button>
           </div>
@@ -357,11 +379,14 @@ function FlashCardModal({ jobId, onClose }) {
                   <ThumbsUp size={14} /> Know it
                 </button>
               </div>
-              <div style={{display:'flex',justifyContent:'center'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'0.5rem'}}>
                 <button className="ctrl-btn" style={{fontSize:'0.78rem'}}
                   onClick={() => speak(flipped ? currentCard.a : currentCard.q)}>
                   {speaking ? <><Loader2 size={12} className="spin" /> Speaking…</> : '🔊 Read aloud'}
                 </button>
+                <span style={{fontSize:'0.68rem',color:'var(--text-muted)',fontStyle:'italic'}}>
+                  Space=flip · K=know · M=missed
+                </span>
               </div>
             </>
           ) : (
@@ -382,6 +407,7 @@ function QuizModal({ jobId, filename, onClose }) {
   const [selected, setSelected] = useState(null)
   const [done, setDone]       = useState(false)
   const [error, setError]     = useState(null)
+  const [wrongs, setWrongs]   = useState([])
 
   useEscapeKey(onClose)
 
@@ -399,14 +425,17 @@ function QuizModal({ jobId, filename, onClose }) {
     if (answered) return
     setAnswered(true)
     setSelected(letter)
-    if (letter === mcqs[idx].answer) setScore(s => s + 1)
+    if (letter === mcqs[idx].answer) {
+      setScore(s => s + 1)
+    } else {
+      setWrongs(w => [...w, { q: mcqs[idx].q, answer: mcqs[idx].answer, selected: letter, options: mcqs[idx].options }])
+    }
   }
 
   const next = () => {
     if (idx + 1 >= mcqs.length) {
-      const finalScore = score
       const hist = JSON.parse(localStorage.getItem('quizHistory') || '[]')
-      hist.unshift({ jobId, filename: filename || 'Quiz', score: finalScore, total: mcqs.length, date: new Date().toLocaleDateString() })
+      hist.unshift({ jobId, filename: filename || 'Quiz', score, total: mcqs.length, date: new Date().toLocaleDateString() })
       localStorage.setItem('quizHistory', JSON.stringify(hist.slice(0, 50)))
       setDone(true)
     } else {
@@ -414,6 +443,11 @@ function QuizModal({ jobId, filename, onClose }) {
       setAnswered(false)
       setSelected(null)
     }
+  }
+
+  const restart = () => {
+    setIdx(0); setScore(0); setAnswered(false)
+    setSelected(null); setDone(false); setWrongs([])
   }
 
   if (!mcqs) return (
@@ -443,13 +477,50 @@ function QuizModal({ jobId, filename, onClose }) {
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
         <div style={{padding:'1rem 1.25rem',flex:1,overflowY:'auto'}}>
-          {done ? (
-            <div style={{textAlign:'center',padding:'1.5rem 0'}}>
-              <div style={{fontSize:'3rem',fontWeight:700,color:'var(--accent)',marginBottom:8}}>{score}/{mcqs.length}</div>
-              <div style={{color:'var(--text-secondary)',marginBottom:20}}>Quiz complete!</div>
-              <button className="ctrl-btn" onClick={onClose}>Close</button>
+          {done ? (() => {
+            const pct = Math.round(score / mcqs.length * 100)
+            const grade = pct >= 90 ? 'A' : pct >= 80 ? 'B' : pct >= 70 ? 'C' : pct >= 60 ? 'D' : 'F'
+            const gradeColor = pct >= 80 ? '#22c55e' : pct >= 60 ? '#fbbf24' : '#ef4444'
+            return (
+            <div style={{padding:'0.5rem 0'}}>
+              <div style={{textAlign:'center',marginBottom:'1.25rem'}}>
+                <div style={{display:'flex',alignItems:'baseline',justifyContent:'center',gap:'0.75rem',marginBottom:'0.4rem'}}>
+                  <div style={{fontSize:'2.8rem',fontWeight:800,color:'var(--accent)',lineHeight:1}}>{score}/{mcqs.length}</div>
+                  <div style={{fontSize:'2rem',fontWeight:800,color:gradeColor,lineHeight:1}}>{grade}</div>
+                </div>
+                <div style={{fontSize:'1.1rem',fontWeight:600,color:gradeColor,marginBottom:'0.3rem'}}>{pct}%</div>
+                <div style={{fontSize:'0.82rem',color:'var(--text-muted)'}}>
+                  {score === mcqs.length ? '🎉 Perfect score!' : wrongs.length === 0 ? 'Quiz complete!' : `${wrongs.length} question${wrongs.length > 1 ? 's' : ''} to review`}
+                </div>
+              </div>
+              {wrongs.length > 0 && (
+                <div style={{marginBottom:'1rem'}}>
+                  <div style={{fontSize:'0.75rem',fontWeight:700,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:'0.5rem'}}>
+                    Review Missed
+                  </div>
+                  {wrongs.map((w, i) => (
+                    <div key={i} style={{
+                      padding:'0.6rem 0.75rem',borderRadius:8,marginBottom:'0.4rem',
+                      background:'rgba(239,68,68,0.06)',border:'1px solid rgba(239,68,68,0.15)',
+                      fontSize:'0.8rem'
+                    }}>
+                      <div style={{color:'var(--text-primary)',fontWeight:500,marginBottom:'0.25rem'}}>{w.q}</div>
+                      <div style={{color:'#22c55e',fontWeight:600}}>
+                        ✓ {w.options?.find(o => o.startsWith(w.answer)) || w.answer}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{display:'flex',gap:'0.5rem',justifyContent:'center'}}>
+                <button className="submit-btn" style={{flex:'none',padding:'0.5rem 1.1rem',fontSize:'0.85rem'}} onClick={restart}>
+                  <RotateCcw size={13} /> Restart
+                </button>
+                <button className="ctrl-btn" onClick={onClose}>Done</button>
+              </div>
             </div>
-          ) : q ? (
+            )
+          })() : q ? (
             <>
               <div className="progress-track" style={{marginBottom:'1rem'}}>
                 <div className="progress-bar" style={{width:`${pct}%`}} />
@@ -969,6 +1040,9 @@ export default function App() {
   const [pasteUrl, setPasteUrl]   = useState('')
 
   // Modals
+  const [detail, setDetail] = useState('standard')
+
+  // Modals
   const [flashModal, setFlashModal] = useState(null)
   const [quizModal, setQuizModal]   = useState(null)
   const [chatModal, setChatModal]   = useState(null)
@@ -1166,6 +1240,7 @@ export default function App() {
         const fd = new FormData()
         fd.append('file', item.file)
         fd.append('language', lang)
+        fd.append('detail', detail)
         streamSSE(
           '/api/summarize-stream',
           { method: 'POST', body: fd, headers: getAuthHeaders() },
@@ -1204,7 +1279,7 @@ export default function App() {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ url, language: lang })
+        body: JSON.stringify({ url, language: lang, detail })
       },
       (ev) => {
         if (ev.language && lang === 'auto') setLang(ev.language)
@@ -1240,7 +1315,7 @@ export default function App() {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ text, url, language: lang, filename: name })
+        body: JSON.stringify({ text, url, language: lang, filename: name, detail })
       },
       (ev) => {
         if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); return }
@@ -1469,9 +1544,30 @@ export default function App() {
                 </div>
               )}
 
+              {/* Detail level — always visible */}
+              <div style={{display:'flex',alignItems:'center',gap:'0.45rem',marginTop:'0.85rem',flexWrap:'wrap'}}>
+                <span style={{fontSize:'0.73rem',color:'var(--text-muted)',fontWeight:500,flexShrink:0}}>Level:</span>
+                {[
+                  { key:'brief',    label:'Brief',    hint:'6 cards · 5 Qs'  },
+                  { key:'standard', label:'Standard', hint:'14 cards · 10 Qs' },
+                  { key:'detailed', label:'Detailed', hint:'20 cards · 15 Qs' },
+                ].map(d => (
+                  <button key={d.key}
+                    className={`detail-tab${detail === d.key ? ' active' : ''}`}
+                    style={{fontSize:'0.73rem',padding:'0.28rem 0.6rem'}}
+                    title={d.hint}
+                    onClick={() => setDetail(d.key)}>
+                    {d.label}
+                  </button>
+                ))}
+                <span style={{fontSize:'0.7rem',color:'var(--text-muted)',marginLeft:'auto',flexShrink:0}}>
+                  {detail === 'brief' ? '6 cards · 5 Qs' : detail === 'standard' ? '14 cards · 10 Qs' : '20 cards · 15 Qs'}
+                </span>
+              </div>
+
               {/* Language + Generate All row (only for upload tab) */}
               {inputTab === 'upload' && (
-                <div className="options-row" style={{marginTop:'1rem'}}>
+                <div className="options-row" style={{marginTop:'0.65rem'}}>
                   <select className="lang-select" value={lang} onChange={e => setLang(e.target.value)}>
                     <option value="auto">{t.langAuto}</option>
                     <option value="en">{t.langEn}</option>
