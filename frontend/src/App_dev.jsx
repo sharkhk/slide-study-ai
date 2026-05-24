@@ -44,13 +44,13 @@ const T = {
     textBtn: 'Generate from Text',
     // Auth
     loginTitle: 'Sign in to continue',
-    loginSub: '1 free token per month — no credit card required',
+    loginSub: '3 free tokens per month — no credit card required',
     loginBtn: 'Continue with Google',
     upgradeTitle: 'Out of tokens',
-    upgradeSub: "You've used your free token for this month.",
+    upgradeSub: "You've used all your free tokens for this month.",
     upgradeFeatures: ['20 tokens per month', 'Priority processing', 'All features included'],
     upgradeBtn: 'Upgrade — $2.99 / month',
-    upgradeFree: 'Free plan: 1 token per month',
+    upgradeFree: 'Free plan: 3 tokens per month',
     signIn: 'Sign in',
     signOut: 'Sign out',
     tokensLeft: 'tokens',
@@ -96,13 +96,13 @@ const T = {
     textBtn: 'توليد من النص',
     // Auth
     loginTitle: 'سجّل الدخول للمتابعة',
-    loginSub: 'رمز مجاني واحد شهرياً — بدون بطاقة ائتمانية',
+    loginSub: '3 رموز مجانية شهرياً — بدون بطاقة ائتمانية',
     loginBtn: 'المتابعة عبر Google',
     upgradeTitle: 'نفدت رموزك',
-    upgradeSub: 'لقد استخدمت رمزك المجاني لهذا الشهر.',
+    upgradeSub: 'لقد استخدمت رموزك المجانية لهذا الشهر.',
     upgradeFeatures: ['20 رمزاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
     upgradeBtn: 'ترقية — 2.99$ / شهر',
-    upgradeFree: 'الخطة المجانية: رمز واحد شهرياً',
+    upgradeFree: 'الخطة المجانية: 3 رموز شهرياً',
     signIn: 'تسجيل الدخول',
     signOut: 'تسجيل الخروج',
     tokensLeft: 'رموز متبقية',
@@ -792,7 +792,7 @@ Effective: May 2026
 Alimne is an AI-powered study tool registered under the souc.ai platform. It converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided for educational and personal use on a freemium subscription model.
 
 2. SUBSCRIPTION & BILLING
-• Free plan: 1 processing token per month. No credit card required.
+• Free plan: 3 processing tokens per month. No credit card required.
 • Pro plan: $2.99/month (billed via Stripe). Includes 20 tokens per month.
 • Tokens reset at the start of each calendar month.
 • Subscriptions can be cancelled anytime via the billing portal. No refunds for partial months.
@@ -848,7 +848,7 @@ Alimne (علّمني) — منتج souc.ai
 Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصطناعي مسجّلة تحت منصة souc.ai. تحوّل ملفات PowerPoint وPDF ومقاطع YouTube والنصوص إلى أدلة دراسة منظمة للاختبارات. تُقدَّم الخدمة للاستخدام التعليمي والشخصي وفق نموذج اشتراك مجاني مدفوع.
 
 ٢. الاشتراك والفوترة
-• الخطة المجانية: رمز معالجة واحد شهرياً. لا تحتاج إلى بطاقة ائتمانية.
+• الخطة المجانية: 3 رموز معالجة شهرياً. لا تحتاج إلى بطاقة ائتمانية.
 • الخطة الاحترافية: 2.99$ شهرياً (عبر Stripe). تشمل 20 رمزاً شهرياً.
 • تُعاد الرموز في بداية كل شهر.
 • يمكن إلغاء الاشتراك في أي وقت عبر بوابة الفوترة. لا يوجد استرداد للأشهر الجزئية.
@@ -1413,8 +1413,8 @@ export default function App() {
                         className="ctrl-btn"
                         style={{
                           cursor: 'pointer',
-                          borderColor: (userInfo?.tokens_remaining ?? 1) <= 0 ? 'rgba(239,68,68,0.4)' : 'rgba(34,197,94,0.3)',
-                          color: (userInfo?.tokens_remaining ?? 1) <= 0 ? '#ef4444' : '#22c55e',
+                          borderColor: (userInfo?.tokens_remaining ?? 3) <= 0 ? 'rgba(239,68,68,0.4)' : 'rgba(34,197,94,0.3)',
+                          color: (userInfo?.tokens_remaining ?? 3) <= 0 ? '#ef4444' : '#22c55e',
                         }}
                         onClick={() => setShowUpgrade(true)}
                         title="Tokens remaining"
@@ -1766,8 +1766,8 @@ export default function App() {
             </button>
             &nbsp;·&nbsp;
             {lang === 'ar'
-              ? 'رمز مجاني شهرياً · لا يُحفظ أي شيء'
-              : '1 free token/month · No data stored'}
+              ? '3 رموز مجانية شهرياً · لا يُحفظ أي شيء'
+              : '3 free tokens/month · No data stored'}
           </div>
           <a
             href="https://souc.ai"

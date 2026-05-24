@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS public.users (
   subscription_period_end TIMESTAMPTZ,
 
   -- Tokens
-  tokens_remaining        INTEGER DEFAULT 1,
+  tokens_remaining        INTEGER DEFAULT 3,
   tokens_month            TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM')
 );
 
@@ -88,7 +88,7 @@ BEGIN
             OR v_user.subscription_period_end > NOW()) THEN
       v_new_tokens := 20;
     ELSE
-      v_new_tokens := 1;
+      v_new_tokens := 3;
     END IF;
 
     UPDATE public.users
