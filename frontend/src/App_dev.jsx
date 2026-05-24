@@ -564,7 +564,13 @@ function QuizModal({ jobId, filename, onClose }) {
 
 // ── Quiz History Modal ─────────────────────────────────────────────────────────
 function HistoryModal({ onClose }) {
-  const hist = JSON.parse(localStorage.getItem('quizHistory') || '[]')
+  const [hist, setHist] = useState(() => JSON.parse(localStorage.getItem('quizHistory') || '[]'))
+
+  const clearAll = () => {
+    localStorage.removeItem('quizHistory')
+    setHist([])
+  }
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-box" style={{maxWidth:480}} onClick={e => e.stopPropagation()}>
@@ -572,39 +578,58 @@ function HistoryModal({ onClose }) {
           <span style={{fontWeight:600,color:'var(--text-primary)',display:'flex',alignItems:'center',gap:'0.5rem'}}>
             <History size={15} /> Quiz History
           </span>
-          <button className="modal-close" onClick={onClose}><X size={16} /></button>
+          <div style={{display:'flex',gap:'0.4rem',alignItems:'center'}}>
+            {hist.length > 0 && (
+              <button className="ctrl-btn" style={{fontSize:'0.73rem',color:'#ef4444',borderColor:'rgba(239,68,68,0.3)'}} onClick={clearAll}>
+                Clear
+              </button>
+            )}
+            <button className="modal-close" onClick={onClose}><X size={16} /></button>
+          </div>
         </div>
-        <div style={{padding:'1rem 1.25rem',flex:1,overflowY:'auto',maxHeight:400}}>
+        <div style={{padding:'1rem 1.25rem',flex:1,overflowY:'auto',maxHeight:420}}>
           {hist.length === 0 ? (
             <div style={{textAlign:'center',color:'var(--text-muted)',padding:'2rem'}}>No quiz results yet.</div>
-          ) : hist.map((h, i) => (
-            <div key={i} style={{
-              display:'flex',alignItems:'center',justifyContent:'space-between',
-              padding:'0.65rem 0',
-              borderBottom: i < hist.length - 1 ? '1px solid var(--glass-border)' : 'none'
-            }}>
-              <div>
-                <div style={{fontSize:'0.88rem',fontWeight:500,color:'var(--text-primary)'}}>{h.filename}</div>
-                <div style={{fontSize:'0.75rem',color:'var(--text-muted)'}}>{h.date}</div>
-              </div>
-              <div style={{
-                fontWeight:700,fontSize:'0.97rem',
-                color: h.score / h.total >= 0.7 ? '#22c55e' : h.score / h.total >= 0.4 ? '#fbbf24' : '#ef4444'
+          ) : hist.map((h, i) => {
+            const pct   = Math.round(h.score / h.total * 100)
+            const grade = pct >= 90 ? 'A' : pct >= 80 ? 'B' : pct >= 70 ? 'C' : pct >= 60 ? 'D' : 'F'
+            const col   = pct >= 70 ? '#22c55e' : pct >= 50 ? '#fbbf24' : '#ef4444'
+            return (
+              <div key={i} style={{
+                display:'flex',alignItems:'center',justifyContent:'space-between',
+                padding:'0.7rem 0',
+                borderBottom: i < hist.length - 1 ? '1px solid var(--glass-border)' : 'none'
               }}>
-                {h.score}/{h.total}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:'0.87rem',fontWeight:500,color:'var(--text-primary)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{h.filename}</div>
+                  <div style={{fontSize:'0.73rem',color:'var(--text-muted)',marginTop:2}}>{h.date}</div>
+                </div>
+                <div style={{display:'flex',alignItems:'center',gap:'0.6rem',flexShrink:0}}>
+                  <div style={{fontSize:'0.8rem',color:'var(--text-muted)'}}>{h.score}/{h.total}</div>
+                  <div style={{
+                    fontWeight:700,fontSize:'0.97rem',color:col,
+                    minWidth:28,textAlign:'right'
+                  }}>
+                    {grade}
+                    <div style={{fontSize:'0.68rem',fontWeight:500,color:col,textAlign:'center'}}>{pct}%</div>
+                  </div>
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       </div>
     </div>
   )
 }
 
-// ── Mindmap Modal ──────────────────────────────────────────────────────────────
-function MindmapModal({ jobId, onClose }) {
-  const [guide, setGuide] = useState(null)
-  const [error, setError] = useState(null)
+// ── Overview Modal ─────────────────────────────────────────────────────────────
+function OverviewModal({ jobId, onClose }) {
+  const [guide, setGuide]         = useState(null)
+  const [error, setError]         = useState(null)
+  const [openSections, setOpen]   = useState({})
+
+  useEscapeKey(onClose)
 
   useEffect(() => {
     fetch(`/api/guide/${jobId}`)
@@ -613,12 +638,14 @@ function MindmapModal({ jobId, onClose }) {
       .catch(() => setError('Failed to load guide'))
   }, [jobId])
 
+  const toggle = (i) => setOpen(s => ({ ...s, [i]: !s[i] }))
+
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" style={{maxWidth:640,maxHeight:'90vh'}} onClick={e => e.stopPropagation()}>
+      <div className="modal-box" style={{maxWidth:660,maxHeight:'90vh'}} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <span style={{fontWeight:600,color:'var(--text-primary)',display:'flex',alignItems:'center',gap:'0.5rem'}}>
-            <Map size={15} /> Mindmap
+            <Map size={15} /> Overview
           </span>
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
@@ -628,46 +655,111 @@ function MindmapModal({ jobId, onClose }) {
               {error ? <div style={{color:'#ef4444'}}>{error}</div> : <Loader2 size={20} className="spin" />}
             </div>
           ) : (
-            <div style={{fontFamily:'inherit'}}>
+            <div>
+              {/* Title */}
               <div style={{textAlign:'center',marginBottom:'1.5rem'}}>
                 <div style={{
-                  display:'inline-block',padding:'0.6rem 1.4rem',
+                  display:'inline-block',padding:'0.65rem 1.5rem',
                   background:'linear-gradient(135deg,var(--navy-600),var(--navy-400))',
-                  color:'var(--white)',borderRadius:12,fontWeight:700,fontSize:'1rem',
+                  color:'#fff',borderRadius:14,fontWeight:700,fontSize:'1.05rem',
                   boxShadow:'0 4px 18px var(--accent-glow)'
                 }}>
                   {guide.title || 'Study Guide'}
                 </div>
+                <div style={{marginTop:'0.6rem',fontSize:'0.75rem',color:'var(--text-muted)'}}>
+                  {(guide.sections||[]).length} sections · {(guide.keywords||[]).length} keywords · {(guide.flashcards||[]).length} flash cards
+                </div>
               </div>
-              {(guide.keywords || []).length > 0 && (
-                <div style={{marginBottom:'1.25rem'}}>
-                  <div style={{
-                    fontSize:'0.8rem',fontWeight:700,textTransform:'uppercase',
-                    color:'var(--accent)',letterSpacing:'0.06em',marginBottom:'0.6rem'
-                  }}>Keywords</div>
-                  <div style={{display:'flex',flexWrap:'wrap',gap:'0.4rem'}}>
-                    {(guide.keywords || []).slice(0, 20).map((k, i) => (
-                      <span key={i} style={{
-                        padding:'0.25rem 0.7rem',borderRadius:50,
-                        background:'rgba(79,142,247,0.12)',border:'1px solid rgba(79,142,247,0.25)',
-                        color:'var(--text-secondary)',fontSize:'0.78rem',fontWeight:500
-                      }}>
-                        {typeof k === 'object' ? k.term : k}
-                      </span>
-                    ))}
+
+              {/* Objectives */}
+              {(guide.objectives||[]).length > 0 && (
+                <div style={{
+                  padding:'0.85rem 1rem',borderRadius:10,marginBottom:'1.1rem',
+                  background:'rgba(34,197,94,0.06)',border:'1px solid rgba(34,197,94,0.2)',
+                }}>
+                  <div style={{fontSize:'0.72rem',fontWeight:700,color:'#22c55e',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'0.5rem'}}>
+                    Learning Objectives
                   </div>
+                  {(guide.objectives||[]).map((o,i) => (
+                    <div key={i} style={{fontSize:'0.84rem',color:'var(--text-secondary)',marginBottom:'0.25rem',display:'flex',gap:'0.4rem',lineHeight:1.5}}>
+                      <span style={{color:'#22c55e',flexShrink:0}}>◆</span>{o}
+                    </div>
+                  ))}
                 </div>
               )}
-              {(guide.objectives || []).length > 0 && (
-                <div style={{
-                  padding:'0.75rem 1rem',borderRadius:10,
-                  background:'rgba(34,197,94,0.06)',border:'1px solid rgba(34,197,94,0.2)',
-                  marginBottom:'1rem'
-                }}>
-                  <div style={{fontSize:'0.78rem',fontWeight:700,color:'#22c55e',textTransform:'uppercase',marginBottom:6}}>Objectives</div>
-                  {(guide.objectives || []).map((o, i) => (
-                    <div key={i} style={{fontSize:'0.84rem',color:'var(--text-secondary)',marginBottom:2}}>◆ {o}</div>
-                  ))}
+
+              {/* Sections — collapsible */}
+              {(guide.sections||[]).length > 0 && (
+                <div style={{marginBottom:'1.1rem'}}>
+                  <div style={{fontSize:'0.72rem',fontWeight:700,color:'var(--accent)',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'0.6rem'}}>
+                    Sections
+                  </div>
+                  {(guide.sections||[]).map((sec,i) => {
+                    const bullets = Array.isArray(sec.bullets) ? sec.bullets : []
+                    const isOpen  = !!openSections[i]
+                    return (
+                      <div key={i} style={{borderRadius:10,marginBottom:'0.45rem',border:'1px solid var(--glass-border)',overflow:'hidden'}}>
+                        <button onClick={() => toggle(i)} style={{
+                          width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',
+                          padding:'0.65rem 0.9rem',background:'none',border:'none',cursor:'pointer',
+                          color:'var(--text-primary)',fontWeight:600,fontSize:'0.88rem',
+                          fontFamily:'inherit',textAlign:'left',gap:'0.5rem'
+                        }}>
+                          <span style={{flex:1}}>{sec.title || `Section ${i+1}`}</span>
+                          <span style={{display:'flex',alignItems:'center',gap:'0.4rem',flexShrink:0}}>
+                            {bullets.length > 0 && (
+                              <span style={{fontSize:'0.68rem',color:'var(--text-muted)',fontWeight:400}}>
+                                {bullets.length} point{bullets.length !== 1 ? 's' : ''}
+                              </span>
+                            )}
+                            <ChevronDown size={13} style={{color:'var(--text-muted)',transform:isOpen?'rotate(180deg)':'none',transition:'transform 0.15s'}} />
+                          </span>
+                        </button>
+                        {isOpen && bullets.length > 0 && (
+                          <div style={{padding:'0.5rem 0.9rem 0.8rem',borderTop:'1px solid var(--glass-border)'}}>
+                            {bullets.map((b,j) => {
+                              const text = typeof b === 'string' ? b : (b.text || b.fact || b.point || JSON.stringify(b))
+                              return (
+                                <div key={j} style={{
+                                  fontSize:'0.82rem',color:'var(--text-secondary)',
+                                  padding:'0.28rem 0',display:'flex',gap:'0.5rem',lineHeight:1.55,
+                                  borderBottom: j < bullets.length-1 ? '1px solid rgba(79,142,247,0.05)' : 'none'
+                                }}>
+                                  <span style={{color:'var(--accent)',flexShrink:0,marginTop:'0.15rem'}}>·</span>
+                                  {text}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* Keywords */}
+              {(guide.keywords||[]).length > 0 && (
+                <div>
+                  <div style={{fontSize:'0.72rem',fontWeight:700,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'0.55rem'}}>
+                    Keywords
+                  </div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:'0.4rem'}}>
+                    {(guide.keywords||[]).slice(0,30).map((k,i) => {
+                      const term = typeof k === 'object' ? k.term : k
+                      const def  = typeof k === 'object' ? k.definition : ''
+                      return (
+                        <span key={i} title={def||undefined} style={{
+                          padding:'0.28rem 0.72rem',borderRadius:50,
+                          background:'rgba(79,142,247,0.1)',border:'1px solid rgba(79,142,247,0.22)',
+                          color:'var(--text-secondary)',fontSize:'0.77rem',fontWeight:500,
+                          cursor: def ? 'help' : 'default'
+                        }}>
+                          {term}
+                        </span>
+                      )
+                    })}
+                  </div>
                 </div>
               )}
             </div>
@@ -679,6 +771,13 @@ function MindmapModal({ jobId, onClose }) {
 }
 
 // ── Chat Modal ─────────────────────────────────────────────────────────────────
+const CHAT_SUGGESTIONS = [
+  'Summarize the key points',
+  'What are the main topics?',
+  'What should I focus on for the exam?',
+  'Give me the most important definitions',
+]
+
 function ChatModal({ jobId, onClose, lang }) {
   const [msgs, setMsgs] = useState([{ role: 'ai', text: 'Ask me anything — definitions, hints, explanations, key points.' }])
   const [input, setInput] = useState('')
@@ -688,10 +787,8 @@ function ChatModal({ jobId, onClose, lang }) {
   useEscapeKey(onClose)
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [msgs])
 
-  const send = async () => {
-    const q = input.trim()
+  const sendMsg = async (q) => {
     if (!q || loading) return
-    setInput('')
     setMsgs(m => [...m, { role: 'user', text: q }])
     setLoading(true)
     try {
@@ -707,6 +804,15 @@ function ChatModal({ jobId, onClose, lang }) {
     }
     setLoading(false)
   }
+
+  const send = () => {
+    const q = input.trim()
+    if (!q) return
+    setInput('')
+    sendMsg(q)
+  }
+
+  const showSuggestions = msgs.length === 1 && !loading
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -731,6 +837,22 @@ function ChatModal({ jobId, onClose, lang }) {
               </div>
             </div>
           ))}
+          {showSuggestions && (
+            <div style={{padding:'0.5rem 0.75rem 0.25rem',display:'flex',flexWrap:'wrap',gap:'0.35rem'}}>
+              {CHAT_SUGGESTIONS.map(q => (
+                <button key={q} onClick={() => sendMsg(q)} style={{
+                  padding:'0.3rem 0.7rem',borderRadius:50,fontSize:'0.76rem',fontWeight:500,
+                  border:'1px solid var(--glass-border)',background:'var(--glass-light)',
+                  color:'var(--text-secondary)',cursor:'pointer',fontFamily:'inherit',
+                  transition:'border-color 0.15s,color 0.15s'
+                }}
+                onMouseOver={e=>{e.currentTarget.style.borderColor='var(--accent)';e.currentTarget.style.color='var(--accent)'}}
+                onMouseOut={e=>{e.currentTarget.style.borderColor='var(--glass-border)';e.currentTarget.style.color='var(--text-secondary)'}}>
+                  {q}
+                </button>
+              ))}
+            </div>
+          )}
           {loading && (
             <div className="chat-msg ai">
               <div className="chat-bubble"><Loader2 size={14} className="spin" /></div>
@@ -1409,19 +1531,30 @@ export default function App() {
                   session ? (
                     <>
                       {/* Token counter */}
-                      <button
-                        className="ctrl-btn"
-                        style={{
-                          cursor: 'pointer',
-                          borderColor: (userInfo?.tokens_remaining ?? 3) <= 0 ? 'rgba(239,68,68,0.4)' : 'rgba(34,197,94,0.3)',
-                          color: (userInfo?.tokens_remaining ?? 3) <= 0 ? '#ef4444' : '#22c55e',
-                        }}
-                        onClick={() => setShowUpgrade(true)}
-                        title="Tokens remaining"
-                      >
-                        <Zap size={12} />
-                        <span className="ctrl-label"> {userInfo?.tokens_remaining ?? '…'} {t.tokensLeft}</span>
-                      </button>
+                      {(() => {
+                        const rem  = userInfo?.tokens_remaining ?? null
+                        const max  = isSubscribed ? 20 : 3
+                        const low  = rem !== null && rem <= 1 && !isSubscribed
+                        const dead = rem !== null && rem <= 0
+                        return (
+                          <button
+                            className="ctrl-btn"
+                            style={{
+                              cursor: 'pointer',
+                              borderColor: dead ? 'rgba(239,68,68,0.4)' : low ? 'rgba(251,191,36,0.5)' : 'rgba(34,197,94,0.3)',
+                              color: dead ? '#ef4444' : low ? '#fbbf24' : '#22c55e',
+                              animation: low && !dead ? 'tokenPulse 2s ease infinite' : 'none',
+                            }}
+                            onClick={() => setShowUpgrade(true)}
+                            title="Tokens remaining"
+                          >
+                            <Zap size={12} />
+                            <span className="ctrl-label">
+                              {' '}{rem ?? '…'}/{max} {isSubscribed ? 'Pro' : 'Free'}
+                            </span>
+                          </button>
+                        )
+                      })()}
                       {/* User avatar / sign out */}
                       <button className="ctrl-btn" onClick={signOut} title={t.signOut}>
                         {userInfo?.avatar_url
@@ -1729,8 +1862,8 @@ export default function App() {
                           <button className="action-btn" title="Quiz" onClick={() => setQuizModal({jobId:item.jobId,filename:item.name})}>
                             <ClipboardList size={12} /><span className="action-label"> Quiz</span>
                           </button>
-                          <button className="action-btn" title="Mindmap" onClick={() => setMindmapModal(item.jobId)}>
-                            <Map size={12} /><span className="action-label"> Map</span>
+                          <button className="action-btn" title="Overview" onClick={() => setMindmapModal(item.jobId)}>
+                            <Map size={12} /><span className="action-label"> Overview</span>
                           </button>
                           <button className="action-btn" title="Print / View" onClick={() => openPrint(item)}>
                             <Printer size={12} /><span className="action-label"> Print</span>
@@ -1785,7 +1918,7 @@ export default function App() {
       {flashModal   && <FlashCardModal jobId={flashModal} onClose={() => setFlashModal(null)} />}
       {quizModal    && <QuizModal jobId={quizModal.jobId} filename={quizModal.filename} onClose={() => setQuizModal(null)} />}
       {chatModal    && <ChatModal jobId={chatModal} onClose={() => setChatModal(null)} lang={lang} />}
-      {mindmapModal && <MindmapModal jobId={mindmapModal} onClose={() => setMindmapModal(null)} />}
+      {mindmapModal && <OverviewModal jobId={mindmapModal} onClose={() => setMindmapModal(null)} />}
       {showHistory  && <HistoryModal onClose={() => setShowHistory(false)} />}
       {showTerms    && <TermsModal lang={lang} onClose={() => setShowTerms(false)} />}
       {showLogin    && <LoginModal onClose={() => setShowLogin(false)} onLogin={signIn} lang={lang} />}
@@ -1807,6 +1940,10 @@ export default function App() {
         @keyframes toastIn {
           from { opacity:0; transform: translateY(8px); }
           to   { opacity:1; transform: translateY(0); }
+        }
+        @keyframes tokenPulse {
+          0%,100% { box-shadow: 0 0 0 0 rgba(251,191,36,0); }
+          50%      { box-shadow: 0 0 0 3px rgba(251,191,36,0.25); }
         }
         .chat-input {
           flex: 1;
