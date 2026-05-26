@@ -434,9 +434,11 @@ function QuizModal({ jobId, filename, onClose }) {
 
   const next = () => {
     if (idx + 1 >= mcqs.length) {
-      const hist = JSON.parse(localStorage.getItem('quizHistory') || '[]')
-      hist.unshift({ jobId, filename: filename || 'Quiz', score, total: mcqs.length, date: new Date().toLocaleDateString() })
-      localStorage.setItem('quizHistory', JSON.stringify(hist.slice(0, 50)))
+      try {
+        const hist = JSON.parse(localStorage.getItem('quizHistory') || '[]')
+        hist.unshift({ jobId, filename: filename || 'Quiz', score, total: mcqs.length, date: new Date().toLocaleDateString() })
+        localStorage.setItem('quizHistory', JSON.stringify(hist.slice(0, 50)))
+      } catch {}
       setDone(true)
     } else {
       setIdx(i => i + 1)
@@ -485,8 +487,8 @@ function QuizModal({ jobId, filename, onClose }) {
             <div style={{padding:'0.5rem 0'}}>
               <div style={{textAlign:'center',marginBottom:'1.25rem'}}>
                 <div style={{display:'flex',alignItems:'baseline',justifyContent:'center',gap:'0.75rem',marginBottom:'0.4rem'}}>
-                  <div style={{fontSize:'2.8rem',fontWeight:800,color:'var(--accent)',lineHeight:1}}>{score}/{mcqs.length}</div>
-                  <div style={{fontSize:'2rem',fontWeight:800,color:gradeColor,lineHeight:1}}>{grade}</div>
+                  <div className="quiz-score-display" style={{fontSize:'2.8rem',fontWeight:800,color:'var(--accent)',lineHeight:1}}>{score}/{mcqs.length}</div>
+                  <div className="quiz-grade-display" style={{fontSize:'2rem',fontWeight:800,color:gradeColor,lineHeight:1}}>{grade}</div>
                 </div>
                 <div style={{fontSize:'1.1rem',fontWeight:600,color:gradeColor,marginBottom:'0.3rem'}}>{pct}%</div>
                 <div style={{fontSize:'0.82rem',color:'var(--text-muted)'}}>
@@ -778,7 +780,7 @@ const CHAT_SUGGESTIONS = [
   'Give me the most important definitions',
 ]
 
-function ChatModal({ jobId, onClose, lang }) {
+function ChatModal({ jobId, onClose, lang, getAuthHeaders }) {
   const [msgs, setMsgs] = useState([{ role: 'ai', text: 'Ask me anything — definitions, hints, explanations, key points.' }])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -794,7 +796,7 @@ function ChatModal({ jobId, onClose, lang }) {
     try {
       const r = await fetch(`/api/chat/${jobId}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ question: q, language: lang })
       })
       const d = await r.json()
@@ -1188,7 +1190,7 @@ export default function App() {
   const inputRef = useRef()
   const t = T[lang] || T['en']
 
-  const quizHistory = JSON.parse(localStorage.getItem('quizHistory') || '[]')
+  const quizHistory = (() => { try { return JSON.parse(localStorage.getItem('quizHistory') || '[]') } catch { return [] } })()
 
   // ── Capture referral code from URL ────────────────────────────────────────
   useEffect(() => {
@@ -1299,8 +1301,8 @@ export default function App() {
       body: JSON.stringify({})
     })
       .then(r => r.json())
-      .then(d => { if (d.url) window.location.href = d.url })
-      .catch(() => {})
+      .then(d => { if (d.url) window.location.href = d.url; else throw new Error(d.error || 'No URL') })
+      .catch(e => toast(`Payment error — ${e.message || 'please try again'}`, 'error'))
   }
 
   const handleManageBilling = () => {
@@ -1310,8 +1312,8 @@ export default function App() {
       body: JSON.stringify({})
     })
       .then(r => r.json())
-      .then(d => { if (d.url) window.location.href = d.url })
-      .catch(() => {})
+      .then(d => { if (d.url) window.location.href = d.url; else throw new Error(d.error || 'No URL') })
+      .catch(e => toast(`Billing error — ${e.message || 'please try again'}`, 'error'))
   }
 
   // handle 401/402 from any SSE stream
@@ -1391,7 +1393,8 @@ export default function App() {
   // ── YouTube SSE ────────────────────────────────────────────────────────────
   const processYoutube = () => {
     const url = ytUrl.trim()
-    if (!url) return
+    if (!url || running) return
+    setRunning(true)
     const qitem = { id: uid(), file: null, name: url, status: 'processing', jobId: null, error: null, step: 'extract', msg: 'Fetching transcript…' }
     setQueue(prev => [...prev, qitem])
     setInputTab('upload')
@@ -1405,16 +1408,18 @@ export default function App() {
       },
       (ev) => {
         if (ev.language && lang === 'auto') setLang(ev.language)
-        if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); return }
+        if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); setRunning(false); return }
         if (ev.step === 'done') {
           updateItem(qitem.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
           if (ev.tokens_remaining !== undefined && userInfo)
             setUserInfo(u => ({ ...u, tokens_remaining: ev.tokens_remaining }))
+          setRunning(false)
         } else {
           updateItem(qitem.id, { step: ev.step, msg: ev.msg })
         }
       },
       (err, status) => {
+        setRunning(false)
         if (!handleAuthError(status, qitem, null))
           updateItem(qitem.id, { status: 'error', error: err })
       }
@@ -1426,7 +1431,8 @@ export default function App() {
   const processText = () => {
     const text = pasteText.trim()
     const url  = pasteUrl.trim()
-    if (!text && !url) return
+    if ((!text && !url) || running) return
+    setRunning(true)
     const name = url ? url.replace(/^https?:\/\//, '').slice(0, 40) : 'Pasted text'
     const qitem = { id: uid(), file: null, name, status: 'processing', jobId: null, error: null, step: 'extract', msg: 'Processing text…' }
     setQueue(prev => [...prev, qitem])
@@ -1440,16 +1446,18 @@ export default function App() {
         body: JSON.stringify({ text, url, language: lang, filename: name, detail })
       },
       (ev) => {
-        if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); return }
+        if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); setRunning(false); return }
         if (ev.step === 'done') {
           updateItem(qitem.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
           if (ev.tokens_remaining !== undefined && userInfo)
             setUserInfo(u => ({ ...u, tokens_remaining: ev.tokens_remaining }))
+          setRunning(false)
         } else {
           updateItem(qitem.id, { step: ev.step, msg: ev.msg })
         }
       },
       (err, status) => {
+        setRunning(false)
         if (!handleAuthError(status, qitem, null))
           updateItem(qitem.id, { status: 'error', error: err })
       }
@@ -1917,7 +1925,7 @@ export default function App() {
       {/* ── Modals ── */}
       {flashModal   && <FlashCardModal jobId={flashModal} onClose={() => setFlashModal(null)} />}
       {quizModal    && <QuizModal jobId={quizModal.jobId} filename={quizModal.filename} onClose={() => setQuizModal(null)} />}
-      {chatModal    && <ChatModal jobId={chatModal} onClose={() => setChatModal(null)} lang={lang} />}
+      {chatModal    && <ChatModal jobId={chatModal} onClose={() => setChatModal(null)} lang={lang} getAuthHeaders={getAuthHeaders} />}
       {mindmapModal && <OverviewModal jobId={mindmapModal} onClose={() => setMindmapModal(null)} />}
       {showHistory  && <HistoryModal onClose={() => setShowHistory(false)} />}
       {showTerms    && <TermsModal lang={lang} onClose={() => setShowTerms(false)} />}

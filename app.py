@@ -145,7 +145,8 @@ def _verify_jwt(token):
             algorithms=["HS256"], audience="authenticated"
         )
         return payload.get("sub")
-    except Exception:
+    except Exception as _e:
+        _log.warning("JWT verify failed: %s", type(_e).__name__)
         return None
 
 # ── Token helpers ──────────────────────────────────────────────────────────────
@@ -230,10 +231,10 @@ def _auth_check(req):
 app = Flask(__name__, static_folder=DIST, static_url_path="")
 app.config['SECRET_KEY'] = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload limit
-CORS(app, origins="*")
+CORS(app, origins=[APP_URL, "http://localhost:5173", "http://127.0.0.1:5173"])
 
 # ── Visitor tracking ──────────────────────────────────────────────────────────
-ADMIN_TOKEN  = os.environ.get("ADMIN_TOKEN", "admin123")
+ADMIN_TOKEN  = os.environ.get("ADMIN_TOKEN") or secrets.token_urlsafe(24)
 _visitors    = []
 _vis_lock    = threading.Lock()
 _blocked_ips = set()   # IPs that are blocked from using the app
@@ -738,6 +739,8 @@ def _call_ollama(prompt, retries=3, num_predict=4096):
 
 
 def _call_groq(prompt, retries=5, max_tokens=2048):
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY is not set — configure it in Render environment variables.")
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
@@ -1942,6 +1945,7 @@ def summarize_stream():
             store_job(job_id, pdf_bytes, md_text, overview, slides, f"{out_name}_study_guide.pdf")
 
             yield _sse({"step": "done", "job_id": job_id,
+                        "tokens_remaining": tok_left,
                         "sections":   len(sections),
                         "keywords":   len(overview.get("keywords",   [])),
                         "flashcards": len(overview.get("flashcards", [])),
@@ -1964,8 +1968,7 @@ def download_job(job_id):
         return jsonify({"error": "Invalid job ID"}), 400
     fmt      = request.args.get("format", "pdf")
     filename = _safe_name(request.args.get("filename", "study_guide"))
-    with _jobs_lock:
-        job = get_job(job_id)   # keep in store — TTL handles cleanup
+    job = get_job(job_id)
     if not job:
         return jsonify({"error": "File not found or expired"}), 404
     if fmt == "md":
@@ -2085,26 +2088,26 @@ def view_md(job_id):
         while i < len(lines):
             l = lines[i]
             if l.startswith('# '):
-                out.append(f'<h1>{l[2:]}</h1>')
+                out.append(f'<h1>{_inline(_he(l[2:]))}</h1>')
             elif l.startswith('## '):
-                out.append(f'<h2>{l[3:]}</h2>')
+                out.append(f'<h2>{_inline(_he(l[3:]))}</h2>')
             elif l.startswith('### '):
-                out.append(f'<h3>{l[4:]}</h3>')
+                out.append(f'<h3>{_inline(_he(l[4:]))}</h3>')
             elif l.startswith('- ') or l.startswith('* '):
-                out.append(f'<li>{_inline(l[2:])}</li>')
+                out.append(f'<li>{_inline(_he(l[2:]))}</li>')
             elif l.startswith('| ') and '|' in l[2:]:
                 rows, align = [], l
                 while i < len(lines) and lines[i].startswith('|'):
                     if not re.match(r'^\|[-| :]+\|$', lines[i]):
                         cells = [c.strip() for c in lines[i].strip('|').split('|')]
                         tag = 'th' if rows == [] else 'td'
-                        out.append('<tr>' + ''.join(f'<{tag}>{_inline(c)}</{tag}>' for c in cells) + '</tr>')
+                        out.append('<tr>' + ''.join(f'<{tag}>{_inline(_he(c))}</{tag}>' for c in cells) + '</tr>')
                     i += 1
                 i -= 1
             elif l.strip() == '':
                 out.append('<br>')
             else:
-                out.append(f'<p>{_inline(l)}</p>')
+                out.append(f'<p>{_inline(_he(l))}</p>')
             i += 1
         return '\n'.join(out)
 
@@ -2487,7 +2490,12 @@ def _text_to_slides(text, chunk_size=500):
 
 
 def _extract_video_id(url):
-    """Extract YouTube video ID from various URL formats."""
+    """Extract YouTube video ID — only accepts youtube.com and youtu.be hostnames."""
+    import urllib.parse
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower().lstrip("www.")
+    if host not in ("youtube.com", "youtu.be", "m.youtube.com"):
+        return None
     patterns = [
         r'(?:v=|youtu\.be/|/embed/|/shorts/)([a-zA-Z0-9_-]{11})',
     ]
@@ -2498,7 +2506,7 @@ def _extract_video_id(url):
     return None
 
 
-def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None):
+def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None):
     """Shared SSE generator for YouTube/text endpoints."""
     _dcfg = dcfg or DETAIL["standard"]
     def generate():
@@ -2545,11 +2553,14 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None):
             job_id = uuid.uuid4().hex
             store_job(job_id, pdf_bytes, md_text, overview, slides, f"{out_name}_study_guide.pdf")
 
-            yield _sse({"step": "done", "job_id": job_id,
-                        "sections":   len(sections),
-                        "keywords":   len(overview.get("keywords",   [])),
-                        "flashcards": len(overview.get("flashcards", [])),
-                        "mcqs":       len(overview.get("mcqs",       []))})
+            done_data = {"step": "done", "job_id": job_id,
+                         "sections":   len(sections),
+                         "keywords":   len(overview.get("keywords",   [])),
+                         "flashcards": len(overview.get("flashcards", [])),
+                         "mcqs":       len(overview.get("mcqs",       []))}
+            if tok_left is not None:
+                done_data["tokens_remaining"] = tok_left
+            yield _sse(done_data)
 
         except Exception as e:
             _log.error("STREAM_TEXT_ERROR: %s\n%s", e, _tb.format_exc())
@@ -2606,7 +2617,7 @@ def youtube_transcript():
             language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
             lang_label = "Arabic" if language == "ar" else "English"
             yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language})
-            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg)():
+            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left)():
                 yield event
         except Exception as ex:
             _log.error("youtube SSE error: %s", ex)
@@ -2621,8 +2632,32 @@ def youtube_transcript():
 
 # ── URL / pasted text endpoint ─────────────────────────────────────────────────
 
+_PRIVATE_IP_PREFIXES = (
+    "127.", "10.", "192.168.", "169.254.", "0.", "::1", "fc", "fd",
+    "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.",
+    "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
+    "172.28.", "172.29.", "172.30.", "172.31.",
+)
+
+def _safe_external_url(url):
+    """Raise ValueError if url is a private/internal address or non-http(s) scheme."""
+    import urllib.parse, socket
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Only http:// and https:// URLs are supported.")
+    host = parsed.hostname or ""
+    if any(host.startswith(p) for p in _PRIVATE_IP_PREFIXES):
+        raise ValueError("Private/internal IP addresses are not allowed.")
+    try:
+        addr = socket.gethostbyname(host)
+        if any(addr.startswith(p) for p in _PRIVATE_IP_PREFIXES):
+            raise ValueError("URL resolves to a private/internal IP address.")
+    except socket.gaierror:
+        raise ValueError(f"Could not resolve hostname: {host}")
+
 def _fetch_url_text(url):
     """Fetch a webpage and extract readable text from p/h/li tags."""
+    _safe_external_url(url)
     try:
         r = http.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
@@ -2675,7 +2710,7 @@ def summarize_text():
         return jsonify({"error": "No text or URL provided"}), 400
 
     language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
-    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg)
+    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left)
     return Response(
         stream_with_context(gen()),
         mimetype="text/event-stream",
@@ -2715,27 +2750,9 @@ def export_anki(job_id):
     )
 
 
-# Keep old endpoint for backwards compat
 @app.route("/api/summarize", methods=["POST"])
 def summarize():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    f = request.files["file"]
-    language = request.form.get("language", "en")
-    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
-    if not f.filename.lower().endswith(_ALLOWED_EXT):
-        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
-    if not ollama_running():
-        return jsonify({"error": "Ollama is not running"}), 503
-    try:
-        raw = f.read()
-        slides = extract_slides(io.BytesIO(raw), filename=f.filename)
-        guide  = ask_ollama(slides, language)
-        pdf    = build_pdf(guide, language)
-        return send_file(pdf, mimetype="application/pdf", as_attachment=True,
-                         download_name=f"study_guide_{uuid.uuid4().hex[:6]}.pdf")
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "This endpoint is deprecated. Use /api/summarize-stream instead."}), 410
 
 
 @app.route("/", defaults={"path": ""})
