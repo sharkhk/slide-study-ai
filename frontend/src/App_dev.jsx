@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import {
   BookOpen, Sun, Moon, Upload, FileText, Download,
   Loader2, CheckCircle2, AlertCircle, Sparkles, RotateCcw,
-  Globe, Cpu, WifiOff, X, Files, ChevronDown,
+  Globe, X, Files, ChevronDown,
   Youtube, Type, Brain, BarChart2, Map, Printer,
   ThumbsUp, ThumbsDown, MessageSquare, History, ClipboardList, ShieldCheck, ScrollText,
   LogIn, LogOut, User, Zap, Copy, Gift
@@ -21,7 +21,7 @@ const T = {
     langAuto: 'Auto-detect language',
     langEn: 'English output',
     langAr: 'Arabic output (عربي)',
-    privacy: 'Your files are processed in memory and never saved or seen by anyone. Nothing is stored after your session ends.',
+    privacy: 'Your files are processed in memory only — never written to disk or seen by anyone. Everything is wiped automatically within 90 minutes.',
     generateAll: 'Generate All',
     generating: 'Processing…',
     download: 'Download PDF',
@@ -73,7 +73,7 @@ const T = {
     langAuto: 'اكتشاف اللغة تلقائياً',
     langEn: 'الإخراج بالإنجليزية',
     langAr: 'الإخراج بالعربية',
-    privacy: 'ملفاتك تُعالج في الذاكرة فقط ولا تُحفظ أو يراها أحد. لا يُخزَّن أي شيء بعد انتهاء جلستك.',
+    privacy: 'ملفاتك تُعالَج في الذاكرة فقط — لا تُكتب على القرص ولا يراها أحد. يُمسح كل شيء تلقائياً خلال 90 دقيقة.',
     generateAll: 'توليد الكل',
     generating: 'جارٍ المعالجة…',
     download: 'تحميل PDF',
@@ -1157,7 +1157,7 @@ export default function App() {
   const [queue, setQueue]   = useState([])
   const [drag, setDrag]     = useState(false)
   const [running, setRunning] = useState(false)
-  const [ollama, setOllama]   = useState(null)
+
   const [inputTab, setInputTab] = useState('upload')
   const [ytUrl, setYtUrl]     = useState('')
   const [pasteText, setPasteText] = useState('')
@@ -1202,14 +1202,6 @@ export default function App() {
     }
   }, [])
 
-  // ── Status polling ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    const check = () =>
-      fetch('/api/status').then(r => r.json()).then(setOllama).catch(() => setOllama({ ollama: false }))
-    check()
-    const id = setInterval(check, 8000)
-    return () => clearInterval(id)
-  }, [])
 
   // ── Supabase init + auth ────────────────────────────────────────────────────
   useEffect(() => {
@@ -1519,15 +1511,6 @@ export default function App() {
                 </div>
               </div>
               <div className="nav-controls">
-                {ollama === null ? (
-                  <div className="ctrl-btn"><Loader2 size={13} className="spin" /></div>
-                ) : ollama.ollama ? (
-                  <div className="ctrl-btn active"><Cpu size={13} /><span className="ctrl-label"> {(ollama.model||'AI').split('-')[0]}</span></div>
-                ) : (
-                  <div className="ctrl-btn" style={{borderColor:'rgba(79,142,247,0.4)',color:'var(--text-muted)'}}>
-                    <Cpu size={13} />
-                  </div>
-                )}
                 {hasHistory && (
                   <button className="ctrl-btn" onClick={() => setShowHistory(true)}>
                     <History size={13} /><span className="ctrl-label"> Scores</span>

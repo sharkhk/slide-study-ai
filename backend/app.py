@@ -230,10 +230,56 @@ def _auth_check(req):
 app = Flask(__name__, static_folder=DIST, static_url_path="")
 app.config['SECRET_KEY'] = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload limit
-CORS(app, origins="*")
+_cors_origins = [o for o in {
+    os.environ.get("APP_URL", "").rstrip("/"),
+    "http://localhost:3000",   # vite dev server
+    "http://localhost:5000",   # local flask
+} if o]
+CORS(app, origins=_cors_origins)
+
+# ── Security headers on every response ────────────────────────────────────────────────────────
+@app.after_request
+def _security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https":
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    if request.path.startswith("/api/"):
+        # study material / summaries of sensitive data must never be cached
+        resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
+
+# Pre-load Arabic font in background so the first Arabic PDF request isn't blocked
+threading.Thread(target=_ensure_arabic_font, daemon=True).start()
+
+# ── Per-IP rate limiting for the summarize endpoint ───────────────────────────
+_rate_limit_lock = threading.Lock()
+_rate_limit      = {}   # ip -> [timestamp, ...]
+_RATE_WINDOW     = 60   # seconds
+_RATE_MAX        = 5    # requests per window per IP
+
+def _check_rate_limit(ip):
+    """Return True if request is allowed, False if rate-limited."""
+    if _is_private(ip):
+        return True
+    now = time.time()
+    with _rate_limit_lock:
+        times = [t for t in _rate_limit.get(ip, []) if now - t < _RATE_WINDOW]
+        if len(times) >= _RATE_MAX:
+            _rate_limit[ip] = times
+            return False
+        times.append(now)
+        _rate_limit[ip] = times
+    return True
 
 # ── Visitor tracking ──────────────────────────────────────────────────────────
-ADMIN_TOKEN  = os.environ.get("ADMIN_TOKEN", "admin123")
+ADMIN_TOKEN  = os.environ.get("ADMIN_TOKEN", "")
+if not ADMIN_TOKEN:
+    ADMIN_TOKEN = secrets.token_hex(16)
+    _log.warning("ADMIN_TOKEN not set — generated a random ephemeral token. "
+                 "Set the ADMIN_TOKEN env var to access admin endpoints.")
 _visitors    = []
 _vis_lock    = threading.Lock()
 _blocked_ips = set()   # IPs that are blocked from using the app
@@ -247,6 +293,17 @@ _PRIVATE_RANGES = (
 
 def _is_private(ip):
     return any(ip.startswith(p) for p in _PRIVATE_RANGES)
+
+def _client_ip():
+    """Real client IP. Forwarded headers (CF-Connecting-IP / X-Forwarded-For)
+    are only trusted when the direct peer is our own proxy (private/loopback);
+    a client connecting directly cannot spoof another identity."""
+    ra = request.remote_addr or "unknown"
+    if not _is_private(ra):
+        return ra
+    fwd = (request.headers.get("CF-Connecting-IP") or
+           request.headers.get("X-Forwarded-For", "").split(",")[0].strip())
+    return fwd or ra
 
 def _enrich_geo(entry, ip):
     """Background thread: full geolocation via ip-api.com."""
@@ -284,9 +341,7 @@ def track_visitor():
     if any(request.path.startswith(s) for s in skip):
         # still enforce block on non-admin paths
         pass
-    ip = (request.headers.get("CF-Connecting-IP") or
-          request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or
-          request.remote_addr or "unknown")
+    ip = _client_ip()
 
     # Block check — return 403 immediately for blocked IPs (except admin itself)
     if ip in _blocked_ips and not request.path.startswith("/admin"):
@@ -504,10 +559,12 @@ def _valid_job(job_id):
 def _he(s):
     return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;')
 
-# ── Job store (memory + /tmp disk fallback) ───────────────────────────────────
+# ── Job store (memory ONLY — uploads and guides are never written to disk)
 _JOB_TTL   = 5400  # 90 minutes
-_JOBS_DIR  = os.path.join(os.sep, "tmp", "slide-study-jobs")
-os.makedirs(_JOBS_DIR, exist_ok=True)
+
+# Purge any job files left on disk by older versions that persisted to /tmp
+import shutil as _shutil
+_shutil.rmtree(os.path.join(os.sep, "tmp", "slide-study-jobs"), ignore_errors=True)
 
 _jobs      = OrderedDict()
 _jobs_lock = threading.RLock()  # reentrant — get_job may acquire while route holds it
@@ -528,42 +585,14 @@ def store_job(job_id, pdf_bytes, md_text, guide, slides, filename):
         stale = [k for k, v in list(_jobs.items()) if time.time() - v["ts"] > _JOB_TTL]
         for k in stale:
             del _jobs[k]
-    try:
-        meta = {"md": md_text, "guide": guide, "slides": slides, "filename": filename, "ts": ts}
-        with open(os.path.join(_JOBS_DIR, f"{job_id}.json"), "w", encoding="utf-8") as f:
-            json.dump(meta, f)
-        with open(os.path.join(_JOBS_DIR, f"{job_id}.pdf"), "wb") as f:
-            f.write(pdf_bytes)
-    except Exception as e:
-        _log.warning("store_job disk write failed: %s", e)
-
-def _load_job_from_disk(job_id):
-    try:
-        json_path = os.path.join(_JOBS_DIR, f"{job_id}.json")
-        pdf_path  = os.path.join(_JOBS_DIR, f"{job_id}.pdf")
-        if not os.path.exists(json_path):
-            return None
-        with open(json_path, encoding="utf-8") as f:
-            meta = json.load(f)
-        if time.time() - meta.get("ts", 0) > _JOB_TTL:
-            os.remove(json_path)
-            if os.path.exists(pdf_path): os.remove(pdf_path)
-            return None
-        pdf_bytes = open(pdf_path, "rb").read() if os.path.exists(pdf_path) else b""
-        job = {"pdf": pdf_bytes, **meta}
-        with _jobs_lock:
-            _jobs[job_id] = job
-        return job
-    except Exception as e:
-        _log.warning("load_job disk read failed: %s", e)
-        return None
 
 def get_job(job_id):
     with _jobs_lock:
         job = _jobs.get(job_id)
-    if job:
-        return job
-    return _load_job_from_disk(job_id)
+        if job and time.time() - job["ts"] > _JOB_TTL:
+            del _jobs[job_id]
+            return None
+    return job
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY        = colors.HexColor('#0a1628')
@@ -1853,6 +1882,10 @@ def _sse(data):
 
 @app.route("/api/summarize-stream", methods=["POST"])
 def summarize_stream():
+    # ── Per-IP rate limit (checked first, before any other validation) ─────────
+    if not _check_rate_limit(_client_ip()):
+        return jsonify({"error": "Too many requests. Please wait a minute before trying again."}), 429
+
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
@@ -2387,7 +2420,7 @@ def _transcribe_with_whisper(video_id):
     except ImportError:
         raise ValueError("yt-dlp not installed — cannot transcribe audio.")
 
-    prefix = os.path.join("/tmp", f"yt_{video_id}")
+    prefix = os.path.join("/tmp", f"yt_{video_id}_{uuid.uuid4().hex[:8]}")
     try:
         ydl_opts = {
             # Prefer smallest audio: opus<96k > m4a < 96k > any audio

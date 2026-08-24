@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import {
   BookOpen, Sun, Moon, Upload, FileText, Download, Loader2,
-  CheckCircle2, AlertCircle, Sparkles, Globe, Cpu, WifiOff,
+  CheckCircle2, AlertCircle, Sparkles, Globe,
   X, Files, RotateCcw, Pencil, Check, ChevronRight, History,
   HelpCircle, Clock, Archive, GripVertical,
   Play, Pause, Layers, ThumbsUp, ThumbsDown, Trophy,
@@ -273,10 +273,11 @@ function FlashCardModal({ jobId, title, lang, t, onClose }) {
     if (autoRef.current) return            // ignore taps during auto-play
     const next = { ...known, [idx]: k }
     setKnown(next)
-    try { localStorage.setItem(`fc_${title}`, JSON.stringify(next)) } catch {}
+    try { localStorage.setItem(`fc_${title}`, JSON.stringify(next)) } catch { console.warn('localStorage full — flashcard progress not saved') }
     window.speechSynthesis?.cancel()
     setSpeaking(false)
     if (idx < cards.length - 1) { setIdx(i => i + 1); setFlipped(false) }
+    else { setIdx(cards.length) }   // triggers "done" trophy screen
   }
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────────────
@@ -624,7 +625,7 @@ export default function App() {
   const [queue,       setQueue]       = useState([])
   const [drag,        setDrag]        = useState(false)
   const [running,     setRunning]     = useState(false)
-  const [ollama,      setOllama]      = useState(null)
+
   const [history,     setHistory]     = useState([])
   const [showHist,    setShowHist]    = useState(false)
   const [editId,      setEditId]      = useState(null)
@@ -637,14 +638,6 @@ export default function App() {
   const [quizModal,   setQuizModal]   = useState(null)
   const inputRef = useRef()
   const t = T[lang]
-
-  useEffect(() => {
-    const check = () =>
-      fetch('/api/status').then(r => r.json()).then(setOllama).catch(() => setOllama({ ollama: false }))
-    check()
-    const id = setInterval(check, 8000)
-    return () => clearInterval(id)
-  }, [])
 
   const addFiles = useCallback(fileList => {
     const valid = Array.from(fileList).filter(f => f.name.match(/\.(pptx?|pdf)$/i))
@@ -810,12 +803,6 @@ export default function App() {
                 {t.brand}
               </div>
               <div className="nav-controls">
-                {ollama === null
-                  ? <div className="ctrl-btn"><Loader2 size={13} className="spin"/>Checking…</div>
-                  : ollama.ollama
-                  ? <div className="ctrl-btn active"><Cpu size={13}/>{ollama.model || 'Ollama'}</div>
-                  : <div className="ctrl-btn" style={{borderColor:'#f74f4f',color:'#f74f4f'}}><WifiOff size={13}/>Offline</div>
-                }
                 {history.length > 0 && (
                   <button className={`ctrl-btn${showHist ? ' active' : ''}`} onClick={() => setShowHist(p => !p)}>
                     <History size={14}/>{history.length}
@@ -838,16 +825,6 @@ export default function App() {
         <main className="main">
           <div className="container">
 
-            {/* Ollama warning */}
-            {ollama && !ollama.ollama && (
-              <div className="glass error-card" style={{marginBottom:'1.25rem'}}>
-                <WifiOff size={20} className="error-icon"/>
-                <div>
-                  <div className="error-msg">{t.ollamaOff}</div>
-                  <div className="error-sub">{t.ollamaOffSub}</div>
-                </div>
-              </div>
-            )}
 
             {/* History panel */}
             {showHist && history.length > 0 && (
@@ -924,7 +901,7 @@ export default function App() {
                 </select>
                 {hasQueue && (
                   <button className="submit-btn"
-                    disabled={running || !pendingCount || (ollama && !ollama.ollama)}
+                    disabled={running || !pendingCount}
                     onClick={processAll}>
                     {running
                       ? <><Loader2 size={15} className="spin"/>{t.processing}</>
