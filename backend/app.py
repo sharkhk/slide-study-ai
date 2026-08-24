@@ -260,18 +260,19 @@ _rate_limit      = {}   # ip -> [timestamp, ...]
 _RATE_WINDOW     = 60   # seconds
 _RATE_MAX        = 5    # requests per window per IP
 
-def _check_rate_limit(ip):
+def _check_rate_limit(ip, scope="main", limit=_RATE_MAX):
     """Return True if request is allowed, False if rate-limited."""
     if _is_private(ip):
         return True
+    key = f"{scope}:{ip}"
     now = time.time()
     with _rate_limit_lock:
-        times = [t for t in _rate_limit.get(ip, []) if now - t < _RATE_WINDOW]
-        if len(times) >= _RATE_MAX:
-            _rate_limit[ip] = times
+        times = [t for t in _rate_limit.get(key, []) if now - t < _RATE_WINDOW]
+        if len(times) >= limit:
+            _rate_limit[key] = times
             return False
         times.append(now)
-        _rate_limit[ip] = times
+        _rate_limit[key] = times
     return True
 
 # ── Visitor tracking ──────────────────────────────────────────────────────────
@@ -293,6 +294,19 @@ _PRIVATE_RANGES = (
 
 def _is_private(ip):
     return any(ip.startswith(p) for p in _PRIVATE_RANGES)
+
+def _admin_ok():
+    """Admin auth: X-Admin-Token header (preferred) or ?token= query,
+    compared in constant time."""
+    supplied = request.headers.get("X-Admin-Token") or request.args.get("token") or ""
+    return secrets.compare_digest(supplied, ADMIN_TOKEN)
+
+def _safe_err(e):
+    """User-facing error text: pass through intentional ValueErrors, hide internals."""
+    if isinstance(e, ValueError):
+        return str(e)
+    _log.error("internal error: %s\n%s", e, _tb.format_exc())
+    return "Processing failed — please try again."
 
 def _client_ip():
     """Real client IP. Forwarded headers (CF-Connecting-IP / X-Forwarded-For)
@@ -374,7 +388,7 @@ def track_visitor():
 
 @app.route("/admin/block", methods=["POST"])
 def admin_block():
-    if request.args.get("token") != ADMIN_TOKEN:
+    if not _admin_ok():
         return jsonify({"error": "Unauthorized"}), 401
     ip = request.json.get("ip", "").strip()
     if not ip:
@@ -386,7 +400,7 @@ def admin_block():
 
 @app.route("/admin/unblock", methods=["POST"])
 def admin_unblock():
-    if request.args.get("token") != ADMIN_TOKEN:
+    if not _admin_ok():
         return jsonify({"error": "Unauthorized"}), 401
     ip = request.json.get("ip", "").strip()
     with _vis_lock:
@@ -396,7 +410,7 @@ def admin_unblock():
 
 @app.route("/admin/clear", methods=["POST"])
 def admin_clear_log():
-    if request.args.get("token") != ADMIN_TOKEN:
+    if not _admin_ok():
         return jsonify({"error": "Unauthorized"}), 401
     with _vis_lock:
         _visitors.clear()
@@ -405,7 +419,7 @@ def admin_clear_log():
 
 @app.route("/admin")
 def admin_page():
-    if request.args.get("token") != ADMIN_TOKEN:
+    if not _admin_ok():
         return ("<h2 style='font-family:sans-serif;margin:2rem'>🔒 Unauthorized — "
                 "add <code>?token=YOUR_TOKEN</code> to the URL</h2>"), 401
     token = ADMIN_TOKEN
@@ -572,6 +586,7 @@ _jobs_lock = threading.RLock()  # reentrant — get_job may acquire while route 
 # Ollama can only run one inference at a time locally. Serialise all calls so
 # the ThreadPoolExecutor doesn't flood it, which causes truncated JSON output.
 _ollama_sem      = threading.Semaphore(1)
+_DEBUG_RAW = os.environ.get("DEBUG_RAW") == "1"  # never dump user content unless explicitly enabled
 _ollama_raw_lock = threading.Lock()  # protect concurrent debug-file writes
 
 def store_job(job_id, pdf_bytes, md_text, guide, slides, filename):
@@ -753,9 +768,10 @@ def _call_ollama(prompt, retries=3, num_predict=4096):
                 r.raise_for_status()
                 raw_content = r.json()["message"]["content"]
 
-            with _ollama_raw_lock:
-                with open(os.path.join(os.path.dirname(__file__), "ollama_raw.txt"), "w", encoding="utf-8") as _f:
-                    _f.write(raw_content)
+            if _DEBUG_RAW:
+                with _ollama_raw_lock:
+                    with open(os.path.join(os.path.dirname(__file__), "ollama_raw.txt"), "w", encoding="utf-8") as _f:
+                        _f.write(raw_content)
 
             return _extract_json(raw_content)
         except Exception as e:
@@ -1982,7 +1998,7 @@ def summarize_stream():
 
         except Exception as e:
             _log.error("GENERATE_ERROR: %s\n%s", e, _tb.format_exc())
-            yield _sse({"error": str(e)})
+            yield _sse({"error": _safe_err(e)})
 
     return Response(
         stream_with_context(generate()),
@@ -2029,6 +2045,11 @@ def get_guide(job_id):
 
 @app.route("/api/chat/<job_id>", methods=["POST"])
 def chat_with_slides(job_id):
+    if not _check_rate_limit(_client_ip(), scope="chat", limit=20):
+        return jsonify({"error": "Too many requests. Please wait a minute."}), 429
+    uid, err = _auth_check(request)
+    if err:
+        return err
     if not _valid_job(job_id):
         return jsonify({"error": "Invalid job ID"}), 400
     data     = request.json or {}
@@ -2063,7 +2084,7 @@ Rules:
 - JSON only""", num_predict=1024)
         return jsonify({"answer": result.get("answer", "No answer found in the slides.")})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _safe_err(e)}), 500
 
 
 @app.route("/api/download-zip", methods=["POST"])
@@ -2099,26 +2120,26 @@ def view_md(job_id):
         while i < len(lines):
             l = lines[i]
             if l.startswith('# '):
-                out.append(f'<h1>{l[2:]}</h1>')
+                out.append(f'<h1>{_he(l[2:])}</h1>')
             elif l.startswith('## '):
-                out.append(f'<h2>{l[3:]}</h2>')
+                out.append(f'<h2>{_he(l[3:])}</h2>')
             elif l.startswith('### '):
-                out.append(f'<h3>{l[4:]}</h3>')
+                out.append(f'<h3>{_he(l[4:])}</h3>')
             elif l.startswith('- ') or l.startswith('* '):
-                out.append(f'<li>{_inline(l[2:])}</li>')
+                out.append(f'<li>{_inline(_he(l[2:]))}</li>')
             elif l.startswith('| ') and '|' in l[2:]:
                 rows, align = [], l
                 while i < len(lines) and lines[i].startswith('|'):
                     if not re.match(r'^\|[-| :]+\|$', lines[i]):
                         cells = [c.strip() for c in lines[i].strip('|').split('|')]
                         tag = 'th' if rows == [] else 'td'
-                        out.append('<tr>' + ''.join(f'<{tag}>{_inline(c)}</{tag}>' for c in cells) + '</tr>')
+                        out.append('<tr>' + ''.join(f'<{tag}>{_inline(_he(c))}</{tag}>' for c in cells) + '</tr>')
                     i += 1
                 i -= 1
             elif l.strip() == '':
                 out.append('<br>')
             else:
-                out.append(f'<p>{_inline(l)}</p>')
+                out.append(f'<p>{_inline(_he(l))}</p>')
             i += 1
         return '\n'.join(out)
 
@@ -2222,6 +2243,7 @@ def view_cards(job_id):
 </div>"""
     script = f"""
 const cards = {cards_json};
+const esc = s => String(s ?? '').replace(/[&<>"']/g, m => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[m]));
 let idx = 0, known = 0;
 function render() {{
   if (idx >= cards.length) {{
@@ -2236,8 +2258,8 @@ function render() {{
   document.getElementById('cardWrap').innerHTML = `
     <div class="card" id="card" onclick="flip()">
       <div class="inner">
-        <div class="front"><div class="q">${{c.q}}</div><div class="hint">Click to reveal answer</div></div>
-        <div class="back"><div class="a">${{c.a}}</div></div>
+        <div class="front"><div class="q">${{esc(c.q)}}</div><div class="hint">Click to reveal answer</div></div>
+        <div class="back"><div class="a">${{esc(c.a)}}</div></div>
       </div>
     </div>`;
 }}
@@ -2291,6 +2313,7 @@ def view_quiz(job_id):
 <div id="qWrap"></div>"""
     script = f"""
 const qs = {mcqs_json};
+const esc = s => String(s ?? '').replace(/[&<>"']/g, m => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[m]));
 let idx=0, score=0, answered=false;
 function render() {{
   if(idx>=qs.length){{
@@ -2303,12 +2326,12 @@ function render() {{
   }}
   const q=qs[idx]; answered=false;
   document.getElementById('pb').style.width=(idx/qs.length*100)+'%';
-  const opts=q.options.map((o,i)=>`<button class="opt" id="o${{i}}" onclick="pick('${{o[0]}}',this)">${{o}}</button>`).join('');
+  const opts=q.options.map((o,i)=>`<button class="opt" id="o${{i}}" data-l="${{esc(o[0])}}" onclick="pick(this.dataset.l,this)">${{esc(o)}}</button>`).join('');
   document.getElementById('qWrap').innerHTML=`
     <div class="q-num">Question ${{idx+1}} of ${{qs.length}}</div>
-    <div class="q-text">${{q.q}}</div>
+    <div class="q-text">${{esc(q.q)}}</div>
     ${{opts}}
-    <div class="explanation" id="exp">${{q.explanation||''}}</div>
+    <div class="explanation" id="exp">${{esc(q.explanation||'')}}</div>
     <div class="nav"><button class="next-btn" id="nxt" onclick="next()">Next →</button></div>`;
 }}
 function pick(letter,btn) {{
@@ -2566,7 +2589,7 @@ def _stream_text_as_sse(text, language, out_name, job_source):
 
         except Exception as e:
             _log.error("STREAM_TEXT_ERROR: %s\n%s", e, _tb.format_exc())
-            yield _sse({"error": str(e)})
+            yield _sse({"error": _safe_err(e)})
     return generate
 
 
@@ -2604,7 +2627,7 @@ def youtube_transcript():
                 yield _sse({"step": "transcript", "msg": "Captions found — processing…"})
             except ValueError as e:
                 if str(e) != "no_captions":
-                    yield _sse({"error": str(e)}); return
+                    yield _sse({"error": _safe_err(e)}); return
                 if not GROQ_API_KEY:
                     yield _sse({"error": "No captions found and GROQ_API_KEY not set."}); return
                 yield _sse({"step": "transcript", "msg": "No captions — downloading audio for Whisper transcription…"})
@@ -2633,13 +2656,37 @@ def youtube_transcript():
 # ── URL / pasted text endpoint ─────────────────────────────────────────────────
 
 def _fetch_url_text(url):
-    """Fetch a webpage and extract readable text from p/h/li tags."""
+    """Fetch a PUBLIC webpage and extract readable text from p/h/li tags.
+    SSRF guard: public http(s) only, no private/internal addresses, no
+    redirects, 5 MB response cap."""
+    from urllib.parse import urlparse
+    import socket, ipaddress
+    p = urlparse(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise ValueError("Only public http(s) URLs are supported.")
     try:
-        r = http.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        infos = socket.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80))
+    except OSError:
+        raise ValueError("Could not resolve URL host.")
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if (addr.is_private or addr.is_loopback or addr.is_link_local or
+                addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+            raise ValueError("URL points to a private/internal address — not allowed.")
+    try:
+        r = http.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"},
+                     allow_redirects=False, stream=True)
+        if 300 <= r.status_code < 400:
+            raise ValueError("URL redirects are not supported — paste the final URL.")
         r.raise_for_status()
+        content = r.raw.read(5 * 1024 * 1024 + 1, decode_content=True)
+        if len(content) > 5 * 1024 * 1024:
+            raise ValueError("Page too large (max 5 MB).")
+    except ValueError:
+        raise
     except Exception as e:
         raise ValueError(f"Could not fetch URL: {e}")
-    html = r.text
+    html = content.decode(r.encoding or "utf-8", "replace")
     # Remove script/style blocks
     html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
     # Extract text from meaningful tags
@@ -2710,8 +2757,11 @@ def export_anki(job_id):
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["front", "back"])
+    def _csv_safe(v):
+        v = str(v)
+        return "'" + v if v[:1] in ("=", "+", "-", "@", "\t") else v
     for fc in flashcards:
-        writer.writerow([fc.get("q", ""), fc.get("a", "")])
+        writer.writerow([_csv_safe(fc.get("q", "")), _csv_safe(fc.get("a", ""))])
 
     csv_bytes = buf.getvalue().encode("utf-8")
     base = job.get("filename", "study_guide").replace(".pdf", "")
@@ -2722,29 +2772,6 @@ def export_anki(job_id):
         as_attachment=True,
         download_name=download_name
     )
-
-
-# Keep old endpoint for backwards compat
-@app.route("/api/summarize", methods=["POST"])
-def summarize():
-    if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    f = request.files["file"]
-    language = request.form.get("language", "en")
-    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
-    if not f.filename.lower().endswith(_ALLOWED_EXT):
-        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
-    if not ollama_running():
-        return jsonify({"error": "Ollama is not running"}), 503
-    try:
-        raw = f.read()
-        slides = extract_slides(io.BytesIO(raw), filename=f.filename)
-        guide  = ask_ollama(slides, language)
-        pdf    = build_pdf(guide, language)
-        return send_file(pdf, mimetype="application/pdf", as_attachment=True,
-                         download_name=f"study_guide_{uuid.uuid4().hex[:6]}.pdf")
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/", defaults={"path": ""})
