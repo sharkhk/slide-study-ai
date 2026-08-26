@@ -54,7 +54,7 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID      = os.environ.get("STRIPE_PRICE_ID", "")
 APP_URL              = os.environ.get("APP_URL", "https://slide-study-ai.onrender.com")
 
-_AUTH_ENABLED = bool(SUPABASE_URL and SUPABASE_JWT_SECRET)  # False in local dev without Supabase
+_AUTH_ENABLED = bool(SUPABASE_URL)  # verify via JWKS (asymmetric) or HS256 shared secret
 
 DETAIL = {
     "brief":    {"slide_chars": 400,  "max_slides": 30,  "keywords": "8-10",  "bullets": "2-4",  "n_flash": 6,  "n_mcq": 5,  "num_predict": 2048},
@@ -134,16 +134,33 @@ def _get_bearer(req):
     auth = req.headers.get("Authorization", "")
     return auth[7:] if auth.startswith("Bearer ") else None
 
+_jwks_client = None
+def _get_jwks_client():
+    global _jwks_client
+    if _jwks_client is None and SUPABASE_URL:
+        import jwt as _pyjwt
+        _jwks_client = _pyjwt.PyJWKClient(SUPABASE_URL.rstrip("/") + "/auth/v1/.well-known/jwks.json")
+    return _jwks_client
+
 def _verify_jwt(token):
-    """Verify a Supabase-issued JWT. Returns user_id (str) or None."""
-    if not token or not SUPABASE_JWT_SECRET:
+    """Verify a Supabase-issued JWT. Asymmetric (ES256/RS256) tokens are
+    verified against the project's public JWKS; HS256 tokens against the
+    shared secret. Returns user_id (str) or None."""
+    if not token:
         return None
     try:
         import jwt as _pyjwt
-        payload = _pyjwt.decode(
-            token, SUPABASE_JWT_SECRET,
-            algorithms=["HS256"], audience="authenticated"
-        )
+        alg = _pyjwt.get_unverified_header(token).get("alg", "")
+        if alg.startswith(("ES", "RS", "PS", "Ed")):
+            client = _get_jwks_client()
+            if client is None:
+                return None
+            key = client.get_signing_key_from_jwt(token).key
+            payload = _pyjwt.decode(token, key, algorithms=[alg], audience="authenticated")
+        elif SUPABASE_JWT_SECRET:
+            payload = _pyjwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated")
+        else:
+            return None
         return payload.get("sub")
     except Exception as _e:
         _log.warning("JWT verify failed: %s", type(_e).__name__)

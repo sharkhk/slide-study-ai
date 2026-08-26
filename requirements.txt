@@ -14,3 +14,4 @@ python-bidi
 supabase
 stripe
 PyJWT
+cryptography
