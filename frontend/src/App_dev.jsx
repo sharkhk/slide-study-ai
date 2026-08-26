@@ -1,13 +1,22 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { createClient } from '@supabase/supabase-js'
 import {
-  BookOpen, Sun, Moon, Upload, FileText, Download,
+  Sun, Moon, Upload, FileText, Download,
   Loader2, CheckCircle2, AlertCircle, Sparkles, RotateCcw,
   Globe, X, Files, ChevronDown,
   Youtube, Type, Brain, BarChart2, Map, Printer,
   ThumbsUp, ThumbsDown, MessageSquare, History, ClipboardList, ShieldCheck, ScrollText,
   LogIn, LogOut, User, Zap, Copy, Gift
 } from 'lucide-react'
+
+// Alimne brand mark — the "A + spark" glyph (white, for use inside a gradient tile)
+const AlimneGlyph = ({ size = 24 }) => (
+  <svg width={size} height={size} viewBox="0 0 96 96" fill="none" aria-hidden="true">
+    <path d="M31 69 L48 27 L65 69" fill="none" stroke="#fff" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M39.5 55 H56.5" stroke="#fff" strokeWidth="8" strokeLinecap="round"/>
+    <path d="M71 24 l2.4 6 6 2.4 -6 2.4 -2.4 6 -2.4 -6 -6 -2.4 6 -2.4 Z" fill="#fff"/>
+  </svg>
+)
 
 const T = {
   en: {
@@ -1099,7 +1108,7 @@ function LoginModal({ onClose, onLogin, lang, sbClient, toast }) {
             display:'flex', alignItems:'center', justifyContent:'center',
             boxShadow:'0 4px 18px var(--accent-glow)'
           }}>
-            <BookOpen size={24} color="#fff" />
+            <AlimneGlyph size={26} />
           </div>
           <div style={{fontWeight:700, fontSize:'1.15rem', color:'var(--text-primary)', marginBottom:'0.4rem'}}>
             {t.loginTitle}
@@ -1580,7 +1589,7 @@ export default function App() {
           <div className="container">
             <div className="nav-inner">
               <div className="nav-brand">
-                <div className="brand-icon"><BookOpen size={16} color="#fff" /></div>
+                <div className="brand-icon"><AlimneGlyph size={18} /></div>
                 <div style={{display:'flex',flexDirection:'column',gap:'1px',lineHeight:1}}>
                   <span className="brand-name">{t.brand}</span>
                   <span style={{fontSize:'0.62rem',color:'var(--text-muted)',letterSpacing:'0.02em',fontWeight:400}}>
