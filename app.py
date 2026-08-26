@@ -1004,9 +1004,14 @@ def _sections_parallel(sections, content_slides, language, dcfg):
         yield {"step": "section", "msg": f"Sections: {i+1}/{n} done…"}
 
 
-def _flashcards_mcq_parallel(overview, language, dcfg):
+def _flashcards_mcq_parallel(overview, language, dcfg, include_quiz=True):
     """Run pass3 then pass4 sequentially (Groq free tier rate limits concurrent calls).
-    Yields plain dicts."""
+    Yields plain dicts. When include_quiz is False, skip flashcards + quiz (summary-only)."""
+    if not include_quiz:
+        overview["flashcards"] = []
+        overview["mcqs"] = []
+        yield {"step": "summary", "msg": "Summary-only mode — skipping flash cards and quiz…"}
+        return
     yield {"step": "flashcards", "msg": "Generating flash cards…"}
     try:
         overview["flashcards"] = pass3_flashcards(overview, language, dcfg).get("flashcards", [])
@@ -1902,6 +1907,7 @@ def summarize_stream():
     out_name     = _safe_name(request.form.get("filename", f.filename.rsplit(".", 1)[0]))
     detail_level = request.form.get("detail", "standard")
     dcfg         = DETAIL.get(detail_level, DETAIL["standard"])
+    include_quiz = request.form.get("mode", "full") != "summary"
 
     _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
     if not f.filename.lower().endswith(_ALLOWED_EXT):
@@ -1959,7 +1965,7 @@ def summarize_stream():
             for evt in _sections_parallel(sections, content_slides, language, dcfg):
                 yield _sse(evt)
 
-            for evt in _flashcards_mcq_parallel(overview, language, dcfg):
+            for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz):
                 yield _sse(evt)
 
             # Build PDF + Markdown
@@ -2004,6 +2010,16 @@ def download_job(job_id):
                          as_attachment=True, download_name=f"{filename}.md")
     return send_file(io.BytesIO(job["pdf"]), mimetype="application/pdf",
                      as_attachment=True, download_name=job.get("filename", f"{filename}.pdf"))
+
+
+@app.route("/api/delete/<job_id>", methods=["POST"])
+def delete_job(job_id):
+    """Immediately purge a job from memory (user-requested delete-now)."""
+    if not _valid_job(job_id):
+        return jsonify({"error": "Invalid job ID"}), 400
+    with _jobs_lock:
+        existed = _jobs.pop(job_id, None) is not None
+    return jsonify({"ok": True, "deleted": existed})
 
 
 @app.route("/api/guide/<job_id>")
@@ -2540,7 +2556,7 @@ def _extract_video_id(url):
     return None
 
 
-def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None):
+def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True):
     """Shared SSE generator for YouTube/text endpoints."""
     _dcfg = dcfg or DETAIL["standard"]
     def generate():
@@ -2576,7 +2592,7 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             for evt in _sections_parallel(sections, slides, language, dcfg):
                 yield _sse(evt)
 
-            for evt in _flashcards_mcq_parallel(overview, language, dcfg):
+            for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz):
                 yield _sse(evt)
 
             yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"})
@@ -2602,23 +2618,29 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
     return generate
 
 
+def _yt_duration(video_id):
+    """Return video duration in seconds (or None if unknown)."""
+    try:
+        import yt_dlp
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True, "socket_timeout": 20}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+        return info.get("duration")
+    except Exception:
+        return None
+
 @app.route("/api/youtube", methods=["POST"])
 def youtube_transcript():
     uid, err = _auth_check(request)
     if err:
         return err
-    ok, tok_left, reason = _consume_token(uid)
-    if not ok:
-        return jsonify({
-            "error": "You have no tokens left. Upgrade to continue.",
-            "code": "no_tokens", "tokens_remaining": 0
-        }), 402
 
     data = request.json or {}
     url = (data.get("url") or "").strip()
     lang_param = data.get("language", "auto")
     detail_level = data.get("detail", "standard")
     yt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
+    include_quiz = data.get("mode", "full") != "summary"
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not ollama_running():
@@ -2627,6 +2649,18 @@ def youtube_transcript():
     video_id = _extract_video_id(url)
     if not video_id:
         return jsonify({"error": "Could not extract video ID from URL"}), 400
+
+    # Reject videos longer than 50 minutes (checked before consuming a token)
+    _dur = _yt_duration(video_id)
+    if _dur and _dur > 3000:
+        return jsonify({"error": "This video is too long. Maximum supported length is 50 minutes."}), 400
+
+    ok, tok_left, reason = _consume_token(uid)
+    if not ok:
+        return jsonify({
+            "error": "You have no tokens left. Upgrade to continue.",
+            "code": "no_tokens", "tokens_remaining": 0
+        }), 402
 
     out_name = _safe_name(f"youtube_{video_id}")
 
@@ -2651,7 +2685,7 @@ def youtube_transcript():
             language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
             lang_label = "Arabic" if language == "ar" else "English"
             yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language})
-            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left)():
+            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left, include_quiz)():
                 yield event
         except Exception as ex:
             _log.error("youtube SSE error: %s", ex)
@@ -2729,6 +2763,7 @@ def summarize_text():
     filename     = _safe_name(data.get("filename") or "pasted_text")
     detail_level = data.get("detail", "standard")
     txt_dcfg     = DETAIL.get(detail_level, DETAIL["standard"])
+    include_quiz = data.get("mode", "full") != "summary"
 
     if not ollama_running():
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
@@ -2743,7 +2778,7 @@ def summarize_text():
         return jsonify({"error": "No text or URL provided"}), 400
 
     language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
-    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left)
+    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz)
     return Response(
         stream_with_context(gen()),
         mimetype="text/event-stream",

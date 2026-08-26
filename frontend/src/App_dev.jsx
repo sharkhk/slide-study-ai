@@ -1228,6 +1228,7 @@ export default function App() {
 
   // Modals
   const [detail, setDetail] = useState('standard')
+  const [summaryOnly, setSummaryOnly] = useState(false)
 
   // Modals
   const [flashModal, setFlashModal] = useState(null)
@@ -1391,10 +1392,14 @@ export default function App() {
   const addFiles = useCallback(fileList => {
     const valid = Array.from(fileList).filter(f => f.name.match(/\.(pptx?|pdf|docx?|txt)$/i))
     if (!valid.length) return
-    setQueue(prev => [
-      ...prev,
-      ...valid.map(f => ({ id: uid(), file: f, name: f.name, status: 'queued', jobId: null, error: null, step: null, msg: null }))
-    ])
+    setQueue(prev => {
+      const merged = [
+        ...prev,
+        ...valid.map(f => ({ id: uid(), file: f, name: f.name, status: 'queued', jobId: null, error: null, step: null, msg: null }))
+      ]
+      if (merged.length > 3) toast('You can process up to 3 files at a time.', 'error')
+      return merged.slice(0, 3)
+    })
   }, [])
 
   const onDrop = e => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files) }
@@ -1420,6 +1425,7 @@ export default function App() {
         fd.append('file', item.file)
         fd.append('language', lang)
         fd.append('detail', detail)
+        fd.append('mode', summaryOnly ? 'summary' : 'full')
         streamSSE(
           '/api/summarize-stream',
           { method: 'POST', body: fd, headers: getAuthHeaders() },
@@ -1459,7 +1465,7 @@ export default function App() {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ url, language: lang, detail })
+        body: JSON.stringify({ url, language: lang, detail, mode: summaryOnly ? 'summary' : 'full' })
       },
       (ev) => {
         if (ev.language && lang === 'auto') setLang(ev.language)
@@ -1498,7 +1504,7 @@ export default function App() {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ text, url, language: lang, filename: name, detail })
+        body: JSON.stringify({ text, url, language: lang, filename: name, detail, mode: summaryOnly ? 'summary' : 'full' })
       },
       (ev) => {
         if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); setRunning(false); return }
@@ -1536,6 +1542,16 @@ export default function App() {
     a.href = `/api/export/anki/${item.jobId}`
     a.click()
     toast('Anki CSV downloading…', 'info')
+  }
+
+  const deleteNow = (item) => {
+    if (!item.jobId) return
+    fetch(`/api/delete/${item.jobId}`, { method: 'POST', headers: getAuthHeaders() })
+      .then(() => {
+        setQueue(prev => prev.filter(q => q.id !== item.id))
+        toast('Your data was deleted from the server.', 'success')
+      })
+      .catch(() => toast('Could not delete — it is auto-wiped within 90 minutes.', 'error'))
   }
 
   const openPrint = (item) => {
@@ -1752,6 +1768,23 @@ export default function App() {
                 </span>
               </div>
 
+              {/* Output mode: full (with quiz) or summary only */}
+              <div style={{display:'flex',alignItems:'center',gap:'0.55rem',marginTop:'0.6rem',flexWrap:'wrap'}}>
+                <span style={{fontSize:'0.73rem',color:'var(--text-muted)',fontWeight:500,flexShrink:0}}>Output:</span>
+                <button
+                  className={`detail-tab${!summaryOnly ? ' active' : ''}`}
+                  style={{fontSize:'0.73rem',padding:'0.28rem 0.6rem'}}
+                  onClick={() => setSummaryOnly(false)}>
+                  {lang === 'ar' ? 'دليل كامل + اختبار' : 'Full guide + quiz'}
+                </button>
+                <button
+                  className={`detail-tab${summaryOnly ? ' active' : ''}`}
+                  style={{fontSize:'0.73rem',padding:'0.28rem 0.6rem'}}
+                  onClick={() => setSummaryOnly(true)}>
+                  {lang === 'ar' ? 'ملخّص فقط' : 'Summary only'}
+                </button>
+              </div>
+
               {/* Language + Generate All row (only for upload tab) */}
               {inputTab === 'upload' && (
                 <div className="options-row" style={{marginTop:'0.65rem'}}>
@@ -1909,6 +1942,9 @@ export default function App() {
                           </button>
                           <button className="action-btn" title="Export Anki CSV" onClick={() => downloadAnki(item)}>
                             <Download size={12} /><span className="action-label"> Anki</span>
+                          </button>
+                          <button className="action-btn" title="Delete my data from the server now" onClick={() => deleteNow(item)}>
+                            <X size={12} /><span className="action-label"> Delete now</span>
                           </button>
                           <button className="action-btn" title="Flash Cards" onClick={() => setFlashModal(item.jobId)}>
                             <Brain size={12} /><span className="action-label"> Cards</span>
