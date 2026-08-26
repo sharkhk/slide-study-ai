@@ -46,6 +46,13 @@ const T = {
     loginTitle: 'Sign in to continue',
     loginSub: '3 free tokens per month — no credit card required',
     loginBtn: 'Continue with Google',
+    emailPh: 'you@email.com',
+    passwordPh: 'Password (min 6 characters)',
+    emailBtn: 'Continue with email',
+    orDivider: 'or',
+    authWeak: 'Enter a valid email and a password of at least 6 characters.',
+    authCheckEmail: 'Account created \u2014 check your email to confirm, then sign in.',
+    authError: 'Sign-in failed \u2014 please try again.',
     upgradeTitle: 'Out of tokens',
     upgradeSub: "You've used all your free tokens for this month.",
     upgradeFeatures: ['20 tokens per month', 'Priority processing', 'All features included'],
@@ -98,6 +105,13 @@ const T = {
     loginTitle: 'سجّل الدخول للمتابعة',
     loginSub: '3 رموز مجانية شهرياً — بدون بطاقة ائتمانية',
     loginBtn: 'المتابعة عبر Google',
+    emailPh: 'you@email.com',
+    passwordPh: 'كلمة المرور (6 أحرف على الأقل)',
+    emailBtn: 'المتابعة بالبريد',
+    orDivider: 'أو',
+    authWeak: 'أدخل بريداً صحيحاً وكلمة مرور من 6 أحرف على الأقل.',
+    authCheckEmail: 'تم إنشاء الحساب — تحقق من بريدك للتأكيد ثم سجّل الدخول.',
+    authError: 'فشل تسجيل الدخول — حاول مجدداً.',
     upgradeTitle: 'نفدت رموزك',
     upgradeSub: 'لقد استخدمت رموزك المجانية لهذا الشهر.',
     upgradeFeatures: ['20 رمزاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
@@ -1050,9 +1064,30 @@ function TermsModal({ lang, onClose }) {
 }
 
 // ── Login Modal ────────────────────────────────────────────────────────────────
-function LoginModal({ onClose, onLogin, lang }) {
+function LoginModal({ onClose, onLogin, lang, sbClient, toast }) {
   const t = T[lang] || T['en']
   const isAr = lang === 'ar'
+  const [email, setEmail]       = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy]         = useState(false)
+  const emailAuth = async () => {
+    const em = email.trim()
+    if (!sbClient) { toast && toast(t.authError, 'error'); return }
+    if (!/.+@.+\..+/.test(em) || password.length < 6) { toast && toast(t.authWeak, 'error'); return }
+    setBusy(true)
+    try {
+      const { error } = await sbClient.auth.signInWithPassword({ email: em, password })
+      if (error) {
+        const { data, error: suErr } = await sbClient.auth.signUp({ email: em, password })
+        if (suErr) throw suErr
+        if (!data.session) { toast && toast(t.authCheckEmail, 'success'); setBusy(false); return }
+      }
+      onClose()
+    } catch (e) {
+      toast && toast((e && e.message) || t.authError, 'error')
+      setBusy(false)
+    }
+  }
   return (
     <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
       <div className="modal-box" onClick={e => e.stopPropagation()}
@@ -1072,6 +1107,34 @@ function LoginModal({ onClose, onLogin, lang }) {
           <div style={{fontSize:'0.82rem', color:'var(--text-muted)', lineHeight:1.55}}>
             {t.loginSub}
           </div>
+        </div>
+        <input
+          type="email" value={email} onChange={e => setEmail(e.target.value)}
+          placeholder={t.emailPh} autoComplete="email"
+          style={{width:'100%', padding:'0.7rem 0.9rem', marginBottom:'0.6rem', borderRadius:10,
+                  border:'1px solid var(--border, rgba(120,140,180,0.3))', background:'var(--input-bg, rgba(255,255,255,0.04))',
+                  color:'var(--text-primary)', fontSize:'0.9rem', textAlign: isAr ? 'right' : 'left', direction:'ltr'}}
+        />
+        <input
+          type="password" value={password} onChange={e => setPassword(e.target.value)}
+          placeholder={t.passwordPh} autoComplete="current-password"
+          onKeyDown={e => { if (e.key === 'Enter') emailAuth() }}
+          style={{width:'100%', padding:'0.7rem 0.9rem', marginBottom:'0.8rem', borderRadius:10,
+                  border:'1px solid var(--border, rgba(120,140,180,0.3))', background:'var(--input-bg, rgba(255,255,255,0.04))',
+                  color:'var(--text-primary)', fontSize:'0.9rem', textAlign: isAr ? 'right' : 'left', direction:'ltr'}}
+        />
+        <button
+          className="submit-btn"
+          disabled={busy}
+          style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', marginBottom:'1rem', opacity: busy ? 0.7 : 1}}
+          onClick={emailAuth}
+        >
+          {busy ? '…' : t.emailBtn}
+        </button>
+        <div style={{display:'flex', alignItems:'center', gap:'0.75rem', margin:'0 0 1rem', color:'var(--text-muted)', fontSize:'0.75rem'}}>
+          <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
+          {t.orDivider}
+          <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
         </div>
         <button
           className="submit-btn"
@@ -1912,7 +1975,7 @@ export default function App() {
       {mindmapModal && <OverviewModal jobId={mindmapModal} onClose={() => setMindmapModal(null)} />}
       {showHistory  && <HistoryModal onClose={() => setShowHistory(false)} />}
       {showTerms    && <TermsModal lang={lang} onClose={() => setShowTerms(false)} />}
-      {showLogin    && <LoginModal onClose={() => setShowLogin(false)} onLogin={signIn} lang={lang} />}
+      {showLogin    && <LoginModal onClose={() => setShowLogin(false)} onLogin={signIn} lang={lang} sbClient={sbClient} toast={toast} />}
       {showUpgrade  && (
         <UpgradeModal
           onClose={() => setShowUpgrade(false)}
