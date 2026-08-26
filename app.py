@@ -46,7 +46,14 @@ from reportlab.pdfbase.ttfonts import TTFont as _TTFont
 
 DIST         = os.path.join(os.path.dirname(__file__), "dist")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
+# Fallbacks tried automatically if the primary model is unavailable to the key
+# (e.g. Groq deprecated/re-tiered it). Override via env (comma-separated).
+GROQ_FALLBACK_MODELS = [
+    m.strip() for m in os.environ.get(
+        "GROQ_FALLBACK_MODELS", "openai/gpt-oss-120b,llama-3.3-70b-versatile"
+    ).split(",") if m.strip()
+]
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral")
 
@@ -796,41 +803,53 @@ def _call_groq(prompt, retries=5, max_tokens=2048):
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": "You output only valid JSON. No markdown, no explanation."},
-            {"role": "user",   "content": prompt},
-        ],
-        "temperature": 0,
-        "max_tokens": max_tokens,
-    }
+    # Try the primary model, then fall back to alternates if the model is
+    # unavailable to this key (deprecated / re-tiered → 404/400 model_not_found).
+    models = [GROQ_MODEL] + [m for m in GROQ_FALLBACK_MODELS if m != GROQ_MODEL]
     last_err = None
-    for attempt in range(retries):
-        try:
-            r = http.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                json=payload, headers=headers, timeout=120
-            )
-            if r.status_code == 429:
-                wait = int(r.headers.get("retry-after", 10))
-                _log.warning("GROQ rate limited (429) — waiting %ds. body=%s", wait, r.text[:300])
-                last_err = RuntimeError(f"GROQ rate limited (429): {r.text[:200]}")
-                time.sleep(wait)
-                continue
-            if r.status_code >= 400:
-                # Surface the real reason (bad key, decommissioned model, quota…)
-                _log.error("GROQ HTTP %s (model=%s): %s", r.status_code, GROQ_MODEL, r.text[:400])
-            r.raise_for_status()
-            raw_content = r.json()["choices"][0]["message"]["content"]
-            return _extract_json(raw_content)
-        except Exception as e:
-            last_err = e
-            _log.warning("GROQ attempt %d/%d failed: %s", attempt + 1, retries, e)
-            if attempt < retries - 1:
-                time.sleep(2 * (attempt + 1))
+    for model in models:
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You output only valid JSON. No markdown, no explanation."},
+                {"role": "user",   "content": prompt},
+            ],
+            "temperature": 0,
+            "max_tokens": max_tokens,
+        }
+        for attempt in range(retries):
+            try:
+                r = http.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    json=payload, headers=headers, timeout=120
+                )
+                if r.status_code == 429:
+                    wait = int(r.headers.get("retry-after", 10))
+                    _log.warning("GROQ rate limited (429) — waiting %ds. body=%s", wait, r.text[:300])
+                    last_err = RuntimeError(f"GROQ rate limited (429): {r.text[:200]}")
+                    time.sleep(wait)
+                    continue
+                if r.status_code in (400, 404):
+                    # Model-level problem (unknown/deprecated/no-access) — don't
+                    # burn retries; move on to the next fallback model.
+                    _log.error("GROQ HTTP %s (model=%s) — trying next model. body=%s",
+                               r.status_code, model, r.text[:400])
+                    last_err = RuntimeError(f"GROQ {r.status_code} for model {model}: {r.text[:200]}")
+                    break
+                if r.status_code >= 400:
+                    _log.error("GROQ HTTP %s (model=%s): %s", r.status_code, model, r.text[:400])
+                r.raise_for_status()
+                raw_content = r.json()["choices"][0]["message"]["content"]
+                if model != GROQ_MODEL:
+                    _log.warning("GROQ served by fallback model %s", model)
+                return _extract_json(raw_content)
+            except Exception as e:
+                last_err = e
+                _log.warning("GROQ attempt %d/%d (model=%s) failed: %s", attempt + 1, retries, model, e)
+                if attempt < retries - 1:
+                    time.sleep(2 * (attempt + 1))
     if last_err is None:
-        last_err = RuntimeError("GROQ call failed — all retries exhausted")
+        last_err = RuntimeError("GROQ call failed — all models/retries exhausted")
     raise last_err
 
 
