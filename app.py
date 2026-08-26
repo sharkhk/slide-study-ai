@@ -1,5 +1,6 @@
 import io
 import re
+import sys
 import uuid
 import json
 import os
@@ -12,11 +13,19 @@ import requests as http
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 
-# ── File logger ────────────────────────────────────────────────────────────────
+# ── Logger ─────────────────────────────────────────────────────────────────────
+# Stream to stdout so the hosting platform (Render) captures app errors/warnings
+# in its live log feed. Also keep a best-effort file log for local debugging.
 _LOG_FILE = os.path.join(os.path.dirname(__file__), "debug.log")
+_log_handlers = [logging.StreamHandler(sys.stdout)]
+try:
+    _log_handlers.append(logging.FileHandler(_LOG_FILE))
+except Exception:
+    pass  # read-only FS — stdout handler is enough
 logging.basicConfig(
-    filename=_LOG_FILE, level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=_log_handlers,
 )
 _log = logging.getLogger("app")
 from flask import Flask, request, jsonify, send_file, send_from_directory, Response, stream_with_context
@@ -805,9 +814,13 @@ def _call_groq(prompt, retries=5, max_tokens=2048):
             )
             if r.status_code == 429:
                 wait = int(r.headers.get("retry-after", 10))
-                _log.warning("GROQ rate limited — waiting %ds", wait)
+                _log.warning("GROQ rate limited (429) — waiting %ds. body=%s", wait, r.text[:300])
+                last_err = RuntimeError(f"GROQ rate limited (429): {r.text[:200]}")
                 time.sleep(wait)
                 continue
+            if r.status_code >= 400:
+                # Surface the real reason (bad key, decommissioned model, quota…)
+                _log.error("GROQ HTTP %s (model=%s): %s", r.status_code, GROQ_MODEL, r.text[:400])
             r.raise_for_status()
             raw_content = r.json()["choices"][0]["message"]["content"]
             return _extract_json(raw_content)
@@ -816,6 +829,8 @@ def _call_groq(prompt, retries=5, max_tokens=2048):
             _log.warning("GROQ attempt %d/%d failed: %s", attempt + 1, retries, e)
             if attempt < retries - 1:
                 time.sleep(2 * (attempt + 1))
+    if last_err is None:
+        last_err = RuntimeError("GROQ call failed — all retries exhausted")
     raise last_err
 
 
