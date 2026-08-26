@@ -21,7 +21,7 @@ const T = {
     langAuto: 'Auto-detect language',
     langEn: 'English output',
     langAr: 'Arabic output (عربي)',
-    privacy: 'Your files are processed in memory only — never written to disk or seen by anyone. Everything is wiped automatically within 90 minutes.',
+    privacy: 'Your files are processed in memory only — never written to disk or seen by anyone. Everything is wiped automatically within 15 minutes.',
     generateAll: 'Generate All',
     generating: 'Processing…',
     download: 'Download PDF',
@@ -55,7 +55,7 @@ const T = {
     authError: 'Sign-in failed \u2014 please try again.',
     upgradeTitle: 'Out of tokens',
     upgradeSub: "You've used all your free tokens for this month.",
-    upgradeFeatures: ['20 tokens per month', 'Priority processing', 'All features included'],
+    upgradeFeatures: ['30 tokens per month', 'Priority processing', 'All features included'],
     upgradeBtn: 'Upgrade — $2.99 / month',
     upgradeFree: 'Free plan: 3 tokens per month',
     signIn: 'Sign in',
@@ -80,7 +80,7 @@ const T = {
     langAuto: 'اكتشاف اللغة تلقائياً',
     langEn: 'الإخراج بالإنجليزية',
     langAr: 'الإخراج بالعربية',
-    privacy: 'ملفاتك تُعالَج في الذاكرة فقط — لا تُكتب على القرص ولا يراها أحد. يُمسح كل شيء تلقائياً خلال 90 دقيقة.',
+    privacy: 'ملفاتك تُعالَج في الذاكرة فقط — لا تُكتب على القرص ولا يراها أحد. يُمسح كل شيء تلقائياً خلال 15 دقيقة.',
     generateAll: 'توليد الكل',
     generating: 'جارٍ المعالجة…',
     download: 'تحميل PDF',
@@ -114,7 +114,7 @@ const T = {
     authError: 'فشل تسجيل الدخول — حاول مجدداً.',
     upgradeTitle: 'نفدت رموزك',
     upgradeSub: 'لقد استخدمت رموزك المجانية لهذا الشهر.',
-    upgradeFeatures: ['20 رمزاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
+    upgradeFeatures: ['30 رمزاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
     upgradeBtn: 'ترقية — 2.99$ / شهر',
     upgradeFree: 'الخطة المجانية: 3 رموز شهرياً',
     signIn: 'تسجيل الدخول',
@@ -931,7 +931,7 @@ Alimne is an AI-powered study tool registered under the souc.ai platform. It con
 
 2. SUBSCRIPTION & BILLING
 • Free plan: 3 processing tokens per month. No credit card required.
-• Pro plan: $2.99/month (billed via Stripe). Includes 20 tokens per month.
+• Pro plan: $2.99/month (billed via Stripe). Includes 30 tokens per month.
 • Tokens reset at the start of each calendar month.
 • Subscriptions can be cancelled anytime via the billing portal. No refunds for partial months.
 • Payments are processed by Stripe, Inc. and are subject to Stripe's Terms of Service.
@@ -939,7 +939,7 @@ Alimne is an AI-powered study tool registered under the souc.ai platform. It con
 3. YOUR FILES — PRIVACY & NO STORAGE
 • Files you upload are processed entirely in server memory and never written to permanent storage.
 • No copy of your document is retained after processing is complete.
-• Generated study guides are held in temporary server memory for up to 90 minutes so you can download them, then deleted automatically.
+• Generated study guides are held in temporary server memory for up to 15 minutes so you can download them, then deleted automatically.
 • We do not access, read, or review the content of your files. Your documents are your own.
 
 4. AI-GENERATED CONTENT DISCLAIMER
@@ -987,7 +987,7 @@ Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصط
 
 ٢. الاشتراك والفوترة
 • الخطة المجانية: 3 رموز معالجة شهرياً. لا تحتاج إلى بطاقة ائتمانية.
-• الخطة الاحترافية: 2.99$ شهرياً (عبر Stripe). تشمل 20 رمزاً شهرياً.
+• الخطة الاحترافية: 2.99$ شهرياً (عبر Stripe). تشمل 30 رمزاً شهرياً.
 • تُعاد الرموز في بداية كل شهر.
 • يمكن إلغاء الاشتراك في أي وقت عبر بوابة الفوترة. لا يوجد استرداد للأشهر الجزئية.
 • تُعالَج المدفوعات بواسطة Stripe وتخضع لشروط خدمة Stripe.
@@ -995,7 +995,7 @@ Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصط
 ٣. ملفاتك — الخصوصية وعدم التخزين
 • تُعالَج الملفات التي ترفعها في ذاكرة الخادم فقط ولا تُكتب على أي تخزين دائم.
 • لا تُحتفظ بأي نسخة من مستنداتك بعد اكتمال المعالجة.
-• تُحفظ أدلة الدراسة المولَّدة في ذاكرة الخادم المؤقتة لمدة 90 دقيقة للتنزيل ثم تُحذف تلقائياً.
+• تُحفظ أدلة الدراسة المولَّدة في ذاكرة الخادم المؤقتة لمدة 15 دقيقة للتنزيل ثم تُحذف تلقائياً.
 • لا نطّلع على محتوى ملفاتك ولا نراجعها. مستنداتك ملكك وحدك.
 
 ٤. إخلاء مسؤولية المحتوى المولَّد بالذكاء الاصطناعي
@@ -1551,7 +1551,7 @@ export default function App() {
         setQueue(prev => prev.filter(q => q.id !== item.id))
         toast('Your data was deleted from the server.', 'success')
       })
-      .catch(() => toast('Could not delete — it is auto-wiped within 90 minutes.', 'error'))
+      .catch(() => toast('Could not delete — it is auto-wiped within 15 minutes.', 'error'))
   }
 
   const openPrint = (item) => {
@@ -1987,6 +1987,10 @@ export default function App() {
             <button onClick={() => setShowTerms(true)} className="footer-terms-btn">
               {lang === 'ar' ? 'الشروط والأحكام' : 'Terms & Conditions'}
             </button>
+            &nbsp;·&nbsp;
+            <a href="/privacy" className="footer-terms-btn" style={{textDecoration:'none'}}>
+              {lang === 'ar' ? 'سياسة الخصوصية' : 'Privacy Policy'}
+            </a>
             &nbsp;·&nbsp;
             {lang === 'ar'
               ? '3 رموز مجانية شهرياً · لا يُحفظ أي شيء'

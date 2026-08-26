@@ -572,7 +572,7 @@ def _he(s):
     return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;')
 
 # ── Job store (memory ONLY — uploads and guides are never written to disk)
-_JOB_TTL   = 5400  # 90 minutes
+_JOB_TTL   = 900  # 15 minutes
 
 # Purge any job files left on disk by older versions that persisted to /tmp
 import shutil as _shutil
@@ -1861,7 +1861,7 @@ def stripe_webhook():
         if user_id and sb:
             sb.table("users").update({
                 "subscription_status": "active",
-                "tokens_remaining":    20,
+                "tokens_remaining":    30,
                 "tokens_month":        time.strftime("%Y-%m"),
             }).eq("id", user_id).execute()
             _award_referral(user_id, sb)   # reward referrer if applicable
@@ -1889,7 +1889,7 @@ def stripe_webhook():
         cust_id = inv.get("customer")
         if inv.get("billing_reason") == "subscription_cycle" and sb and cust_id:
             sb.table("users").update({
-                "tokens_remaining": 20,
+                "tokens_remaining": 30,
                 "tokens_month":     time.strftime("%Y-%m"),
             }).eq("stripe_customer_id", cust_id).execute()
 
@@ -2841,6 +2841,143 @@ def export_anki(job_id):
 @app.route("/api/summarize", methods=["POST"])
 def summarize():
     return jsonify({"error": "This endpoint is deprecated. Use /api/summarize-stream instead."}), 410
+
+
+
+# \u2500\u2500 Legal pages (privacy / terms) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+def _legal_shell(title, body):
+    return """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>""" + title + """ \u2014 Alimne</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;background:#0a1628;color:#dce6f5;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;line-height:1.7}
+  .wrap{max-width:820px;margin:0 auto;padding:2.5rem 1.5rem 4rem}
+  .brand{display:flex;align-items:center;gap:.6rem;margin-bottom:2rem;text-decoration:none}
+  .logo{width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,#4f8ef7,#a78bfa);
+        display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff;font-size:1.1rem;flex-shrink:0}
+  .brand span{font-weight:800;font-size:1.15rem;color:#fff}
+  .brand small{display:block;font-weight:500;font-size:.7rem;color:#7f93b3;letter-spacing:.02em}
+  h1{font-size:1.9rem;color:#fff;margin:.2rem 0 .3rem}
+  .updated{color:#7f93b3;font-size:.85rem;margin-bottom:2rem}
+  h2{color:#8fb4ff;font-size:1.15rem;margin:2.2rem 0 .6rem}
+  p,li{color:#c2d0e6;font-size:.95rem}
+  a{color:#6fa8ff}
+  ul{padding-left:1.2rem}
+  .note{background:rgba(79,142,247,.08);border:1px solid rgba(79,142,247,.2);border-radius:12px;padding:1rem 1.2rem;margin:1.5rem 0}
+  footer{margin-top:3rem;padding-top:1.5rem;border-top:1px solid rgba(120,140,180,.18);color:#7f93b3;font-size:.82rem}
+  footer a{margin-right:1rem}
+</style></head><body><div class="wrap">
+<a class="brand" href="/"><div class="logo">A</div><span>Alimne<small>by souc ai</small></span></a>
+""" + body + """
+<footer>
+  <a href="/">Home</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a>
+  <div style="margin-top:.6rem">\u00a9 2026 Alimne \u00b7 a souc ai product \u00b7 <a href="mailto:sales@souc.ai">sales@souc.ai</a></div>
+</footer></div></body></html>"""
+
+
+@app.route("/privacy")
+def privacy_page():
+    body = """
+<h1>Privacy Policy</h1>
+<div class="updated">Last updated: 26 August 2026</div>
+<p>Alimne ("we", "us"), operated by souc ai, turns your slides, documents, pasted text and
+YouTube videos into study guides and summaries. Privacy is core to how the product is built.
+This policy explains what we handle and why.</p>
+
+<div class="note"><strong>The short version:</strong> the files and text you upload are processed
+<strong>in memory only</strong>, are <strong>never written to disk or seen by any human</strong>, and are
+<strong>automatically deleted within 15 minutes</strong> \u2014 or immediately when you press
+"Delete now". We do not sell your data and we do not show ads.</div>
+
+<h2>1. Study content you submit</h2>
+<ul>
+<li><strong>Files, pasted text and URLs</strong> are held in server memory only for the length of your
+session (maximum 15 minutes) and are purged automatically after that window, or instantly on your request.
+They are never persisted to disk, logged in full, or reviewed by a person.</li>
+<li>To generate a guide, the extracted text is sent to our AI provider (Groq) for processing. It is used
+only to produce your result and is not used to train models by us.</li>
+</ul>
+
+<h2>2. Account information</h2>
+<ul>
+<li>If you sign in, we store your <strong>email address</strong> and a display name/avatar (when provided by
+Google) in our authentication database (Supabase) to identify your account and track your monthly token balance.</li>
+<li>We use a session cookie / local storage entry to keep you signed in.</li>
+</ul>
+
+<h2>3. Payments</h2>
+<p>Subscriptions are processed by <strong>Stripe, Inc.</strong> We never receive or store your full card
+number \u2014 Stripe handles payment details directly. We store only a Stripe customer reference and your
+subscription status.</p>
+
+<h2>4. What we do not do</h2>
+<ul>
+<li>We do not sell, rent, or trade your personal data.</li>
+<li>We do not run advertising or third-party ad trackers.</li>
+<li>We do not retain your study material beyond the 90-minute processing window.</li>
+</ul>
+
+<h2>5. Data retention &amp; your rights</h2>
+<p>Study jobs: deleted within 15 minutes (or on demand). Account data: kept until you ask us to delete it.
+You may request access to, or deletion of, your account data at any time by emailing
+<a href="mailto:sales@souc.ai">sales@souc.ai</a>.</p>
+
+<h2>6. Third-party services</h2>
+<p>We rely on Supabase (authentication &amp; account database), Stripe (payments), Groq (AI processing),
+Render (hosting) and Cloudflare (DNS/network). Each processes data only as needed to provide the service.</p>
+
+<h2>7. Changes &amp; contact</h2>
+<p>We may update this policy; material changes will be reflected here with a new date. Questions?
+Email <a href="mailto:sales@souc.ai">sales@souc.ai</a>.</p>
+"""
+    return _legal_shell("Privacy Policy", body), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/terms")
+def terms_page():
+    body = """
+<h1>Terms &amp; Conditions</h1>
+<div class="updated">Last updated: 26 August 2026</div>
+<p>By using Alimne (the "Service"), operated by souc ai, you agree to these terms.</p>
+
+<h2>1. The Service</h2>
+<p>Alimne converts uploaded slides, documents, pasted text and YouTube videos into study guides,
+summaries, flashcards and quizzes using AI. Output is generated automatically and may contain
+inaccuracies \u2014 always verify important information against the source material.</p>
+
+<h2>2. Plans &amp; billing</h2>
+<ul>
+<li><strong>Free plan:</strong> 3 processing tokens per month. No credit card required.</li>
+<li><strong>Pro plan:</strong> US$2.99 per month, billed via Stripe, including <strong>30 tokens per month</strong>
+and priority processing. Your token allowance renews each billing cycle.</li>
+<li>You can cancel anytime; access continues until the end of the paid period. Charges are non-refundable
+except where required by law.</li>
+</ul>
+
+<h2>3. Acceptable use</h2>
+<ul>
+<li>Only upload content you have the right to use.</li>
+<li>Do not use the Service for unlawful purposes or to process content that infringes others' rights.</li>
+<li>Do not attempt to disrupt, overload, or reverse-engineer the Service.</li>
+</ul>
+
+<h2>4. Your content</h2>
+<p>You retain all rights to the content you submit. As described in our
+<a href="/privacy">Privacy Policy</a>, your content is processed in memory only and deleted within
+15 minutes. You are responsible for keeping your own copies.</p>
+
+<h2>5. Disclaimers &amp; liability</h2>
+<p>The Service is provided "as is", without warranties of any kind. To the maximum extent permitted by
+law, souc ai is not liable for any indirect or consequential damages, or for reliance on AI-generated
+output. Third-party services (Stripe, Google, YouTube, etc.) are governed by their own terms.</p>
+
+<h2>6. Changes &amp; governing law</h2>
+<p>We may update these terms; continued use means acceptance. These terms are governed by the laws of
+the United Arab Emirates (Dubai). Contact: <a href="mailto:sales@souc.ai">sales@souc.ai</a>.</p>
+"""
+    return _legal_shell("Terms & Conditions", body), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/", defaults={"path": ""})
