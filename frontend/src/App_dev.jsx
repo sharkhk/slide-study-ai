@@ -268,20 +268,6 @@ function FlashCardModal({ jobId, onClose }) {
 
   useEscapeKey(onClose)
 
-  // Keyboard shortcuts: Space=flip, K/←=Know, M/→=Missed
-  useEffect(() => {
-    if (!cards || roundDone) return
-    const h = (e) => {
-      if (e.key === ' ') { e.preventDefault(); setFlipped(f => !f); return }
-      if (!currentCard) return
-      if (e.key === 'k' || e.key === 'K' || e.key === 'ArrowLeft') { if (flipped) mark(true) }
-      if (e.key === 'm' || e.key === 'M' || e.key === 'ArrowRight') { if (flipped) mark(false) }
-    }
-    document.addEventListener('keydown', h)
-    return () => document.removeEventListener('keydown', h)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cards, roundDone, currentCard, flipped])
-
   const shuffle = () => {
     setCards(c => [...c].sort(() => Math.random() - 0.5))
     setIdx(0); setFlipped(false); setRoundDone(false)
@@ -333,6 +319,21 @@ function FlashCardModal({ jobId, onClose }) {
       setIdx(idx + 1)
     }
   }
+
+  // Keyboard shortcuts: Space=flip, K/←=Know, M/→=Missed
+  // (declared after currentCard/mark to avoid a temporal-dead-zone crash)
+  useEffect(() => {
+    if (!cards || roundDone) return
+    const h = (e) => {
+      if (e.key === ' ') { e.preventDefault(); setFlipped(f => !f); return }
+      if (!currentCard) return
+      if (e.key === 'k' || e.key === 'K' || e.key === 'ArrowLeft') { if (flipped) mark(true) }
+      if (e.key === 'm' || e.key === 'M' || e.key === 'ArrowRight') { if (flipped) mark(false) }
+    }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cards, roundDone, currentCard, flipped])
 
   const resetReview = () => {
     setIdx(0)
