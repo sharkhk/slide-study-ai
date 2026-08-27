@@ -46,12 +46,14 @@ from reportlab.pdfbase.ttfonts import TTFont as _TTFont
 
 DIST         = os.path.join(os.path.dirname(__file__), "dist")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL   = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
-# Fallbacks tried automatically if the primary model is unavailable to the key
-# (e.g. Groq deprecated/re-tiered it). Override via env (comma-separated).
+# Primary model — gpt-oss-120b is far more faithful to the source (fewer
+# hallucinations / changed names) and stronger in Arabic than the 20b. Needs the
+# Groq Developer tier for its rate limits (which this account has).
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+# Fallbacks tried automatically if the primary model is unavailable to the key.
 GROQ_FALLBACK_MODELS = [
     m.strip() for m in os.environ.get(
-        "GROQ_FALLBACK_MODELS", "openai/gpt-oss-120b,llama-3.3-70b-versatile"
+        "GROQ_FALLBACK_MODELS", "openai/gpt-oss-20b,llama-3.3-70b-versatile"
     ).split(",") if m.strip()
 ]
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -899,7 +901,11 @@ def _call_groq(prompt, retries=5, max_tokens=2048):
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You output only valid JSON. No markdown, no explanation."},
+                {"role": "system", "content":
+                    "You are a precise study-guide generator. Output ONLY valid JSON — no markdown, no commentary. "
+                    "Use ONLY the information the user provides. Never invent, guess, add, or rename facts, people, "
+                    "places, terms, acronyms, symbols or numbers. Copy every name and technical term exactly as it "
+                    "appears in the source; do not translate or alter names."},
                 {"role": "user",   "content": prompt},
             ],
             "temperature": 0,
@@ -947,6 +953,25 @@ def _call_groq(prompt, retries=5, max_tokens=2048):
 
 # ── Three-pass AI processing ──────────────────────────────────────────────────
 
+def _lang_rules(language):
+    """Faithfulness + language rules injected into every prompt so the model
+    stays true to the source and outputs cleanly in the requested language."""
+    if language == "ar":
+        lang_line = ("Write every text value in Modern Standard Arabic (العربية). "
+                     "Use correct, natural Arabic grammar and spelling.")
+    else:
+        lang_line = "Write every text value in clear English."
+    return (
+        "- " + lang_line + " Keep all JSON keys in English exactly as shown.\n"
+        "- ACCURACY IS CRITICAL: use ONLY facts that appear in the source above. "
+        "Do NOT invent, assume, or add anything that is not stated in the source.\n"
+        "- Copy every name, person, place, acronym, symbol (e.g. ATP, CO2, DNA) and number "
+        "EXACTLY as written in the source. Never rename, translate, transliterate, or alter a "
+        "proper noun, technical term, or formula — even when writing in Arabic.\n"
+        "- If the source does not cover something, leave it out rather than making it up."
+    )
+
+
 def _as_dict(result, list_key=None):
     """If the model returned a list instead of a dict, coerce it."""
     if isinstance(result, dict):
@@ -987,7 +1012,7 @@ def pass1_overview(slides, language, dcfg=None):
         f"Slide {s['slide_num']}: {s['title']}\n"
         for i, s in enumerate(slides)
     )
-    result = _call_ollama(f"""Create a study guide overview {lang} from this PowerPoint outline.
+    result = _call_ollama(f"""Create a study guide overview {lang} from this source material.
 
 {outline}
 
@@ -1006,8 +1031,9 @@ Return JSON:
 
 Rules:
 - Group related slides into 3-7 logical sections
-- objectives: extract from learning objectives slide or infer from content
-- keywords: {dcfg['keywords']} terms — every key concept, acronym, role, process mentioned
+- objectives: take from a learning-objectives section if present, otherwise summarise the actual content (do not invent goals)
+- keywords: {dcfg['keywords']} terms — only concepts, acronyms, roles and processes that actually appear in the source
+{_lang_rules(language)}
 - Output JSON only""", num_predict=dcfg["num_predict"])
     return _as_dict(result)
 
@@ -1037,8 +1063,9 @@ Return JSON:
 }}
 
 Rules:
-- bullets: {dcfg['bullets']} specific, exam-worthy facts from the slides
+- bullets: {dcfg['bullets']} specific, exam-worthy facts taken directly from the content above
 - table: include ONLY if content has roles/comparisons/structured lists; otherwise omit the table field entirely
+{_lang_rules(language)}
 - Output JSON only""", num_predict=dcfg["num_predict"])
     result = _as_dict(result, list_key="bullets")
     # If model returned a flat list of strings under "bullets", normalise each element
@@ -1074,9 +1101,10 @@ Return JSON:
 
 Rules:
 - Create exactly {dcfg['n_flash']} flash cards
-- Base EVERY question directly on the study content provided above — no generic questions
+- Base EVERY question and answer directly on the study content provided above — no generic or invented questions
 - Mix definition questions, "what is" questions, "name the" questions, and role/responsibility questions
-- Answers must be specific, referencing actual details from the content
+- Answers must be specific and factually match the content
+{_lang_rules(language)}
 - Output JSON only""", num_predict=dcfg["num_predict"])
     # Model may return the array directly instead of wrapping it
     if isinstance(result, list):
@@ -1115,8 +1143,10 @@ Return JSON:
 
 Rules:
 - Exactly {n} questions, 4 options each (A B C D)
+- Every question, the correct option, and the explanation must be grounded in the study content above — do not invent facts or use outside knowledge
 - answer: just the letter
 - Mix easy and hard questions
+{_lang_rules(language)}
 - JSON only""", num_predict=dcfg["num_predict"])
     if isinstance(result, list):
         return {"mcqs": [x for x in result if isinstance(x, dict)]}
