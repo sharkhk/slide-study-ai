@@ -70,7 +70,17 @@ const T = {
     signIn: 'Sign in',
     signOut: 'Sign out',
     tokensLeft: 'tokens',
-    manageBtn: 'Manage subscription',
+    manageBtn: 'Manage / cancel subscription',
+    loginTitleSignup: 'Create your free account',
+    loginSubSignup: '3 free tokens every month, no card required',
+    emailBtnSignup: 'Create free account',
+    noAccount: 'New here? Create a free account',
+    haveAccount: 'Already have an account? Sign in',
+    wrongPassword: 'Incorrect email or password.',
+    accountExists: 'An account already exists for this email. Sign in instead.',
+    freeLeft: (n) => `${n} free ${n === 1 ? 'preview' : 'previews'} left`,
+    freeTry: 'Try free, no sign-up',
+    signInForMore: 'Free previews used. Sign up free for more.',
     // Referral
     referTitle: 'Refer & Earn',
     referSub: 'Share your link. Each person who subscribes earns you 10 free tokens — no limit.',
@@ -129,7 +139,17 @@ const T = {
     signIn: 'تسجيل الدخول',
     signOut: 'تسجيل الخروج',
     tokensLeft: 'رموز متبقية',
-    manageBtn: 'إدارة الاشتراك',
+    manageBtn: 'إدارة / إلغاء الاشتراك',
+    loginTitleSignup: 'أنشئ حسابك المجاني',
+    loginSubSignup: '3 رموز مجانية شهرياً، بدون بطاقة',
+    emailBtnSignup: 'إنشاء حساب مجاني',
+    noAccount: 'جديد هنا؟ أنشئ حساباً مجانياً',
+    haveAccount: 'لديك حساب بالفعل؟ سجّل الدخول',
+    wrongPassword: 'البريد أو كلمة المرور غير صحيحة.',
+    accountExists: 'يوجد حساب بهذا البريد بالفعل. سجّل الدخول بدلاً من ذلك.',
+    freeLeft: (n) => `${n} ${n === 1 ? 'معاينة' : 'معاينات'} مجانية متبقية`,
+    freeTry: 'جرّب مجاناً، بدون تسجيل',
+    signInForMore: 'انتهت المعاينات المجانية. سجّل مجاناً للمزيد.',
     // Referral
     referTitle: 'أحِل واكسب',
     referSub: 'شارك رابطك. كل شخص يشترك عبر رابطك يمنحك 10 رموز مجانية — بلا حدود.',
@@ -1073,25 +1093,40 @@ function TermsModal({ lang, onClose }) {
 }
 
 // ── Login Modal ────────────────────────────────────────────────────────────────
-function LoginModal({ onClose, onLogin, lang, sbClient, toast }) {
+function LoginModal({ onClose, onLogin, lang, sbClient, toast, initialMode }) {
   const t = T[lang] || T['en']
   const isAr = lang === 'ar'
+  const [mode, setMode]         = useState(initialMode === 'signup' ? 'signup' : 'signin')
   const [email, setEmail]       = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy]         = useState(false)
+  const isSignup = mode === 'signup'
   const emailAuth = async () => {
     const em = email.trim()
     if (!sbClient) { toast && toast(t.authError, 'error'); return }
     if (!/.+@.+\..+/.test(em) || password.length < 6) { toast && toast(t.authWeak, 'error'); return }
     setBusy(true)
     try {
-      const { error } = await sbClient.auth.signInWithPassword({ email: em, password })
-      if (error) {
-        const { data, error: suErr } = await sbClient.auth.signUp({ email: em, password })
-        if (suErr) throw suErr
+      if (isSignup) {
+        const { data, error } = await sbClient.auth.signUp({ email: em, password })
+        if (error) {
+          const m = (error.message || '').toLowerCase()
+          if (m.includes('already') || m.includes('registered') || m.includes('exists')) {
+            toast && toast(t.accountExists, 'error'); setMode('signin'); setBusy(false); return
+          }
+          throw error
+        }
         if (!data.session) { toast && toast(t.authCheckEmail, 'success'); setBusy(false); return }
+        onClose()
+      } else {
+        const { error } = await sbClient.auth.signInWithPassword({ email: em, password })
+        if (error) {
+          const m = (error.message || '').toLowerCase()
+          toast && toast(m.includes('invalid') || m.includes('credentials') ? t.wrongPassword : (error.message || t.authError), 'error')
+          setBusy(false); return
+        }
+        onClose()
       }
-      onClose()
     } catch (e) {
       toast && toast((e && e.message) || t.authError, 'error')
       setBusy(false)
@@ -1111,10 +1146,10 @@ function LoginModal({ onClose, onLogin, lang, sbClient, toast }) {
             <AlimneGlyph size={26} />
           </div>
           <div style={{fontWeight:700, fontSize:'1.15rem', color:'var(--text-primary)', marginBottom:'0.4rem'}}>
-            {t.loginTitle}
+            {isSignup ? t.loginTitleSignup : t.loginTitle}
           </div>
           <div style={{fontSize:'0.82rem', color:'var(--text-muted)', lineHeight:1.55}}>
-            {t.loginSub}
+            {isSignup ? t.loginSubSignup : t.loginSub}
           </div>
         </div>
         <input
@@ -1126,7 +1161,7 @@ function LoginModal({ onClose, onLogin, lang, sbClient, toast }) {
         />
         <input
           type="password" value={password} onChange={e => setPassword(e.target.value)}
-          placeholder={t.passwordPh} autoComplete="current-password"
+          placeholder={t.passwordPh} autoComplete={isSignup ? 'new-password' : 'current-password'}
           onKeyDown={e => { if (e.key === 'Enter') emailAuth() }}
           style={{width:'100%', padding:'0.7rem 0.9rem', marginBottom:'0.8rem', borderRadius:10,
                   border:'1px solid var(--border, rgba(120,140,180,0.3))', background:'var(--input-bg, rgba(255,255,255,0.04))',
@@ -1135,10 +1170,16 @@ function LoginModal({ onClose, onLogin, lang, sbClient, toast }) {
         <button
           className="submit-btn"
           disabled={busy}
-          style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', marginBottom:'1rem', opacity: busy ? 0.7 : 1}}
+          style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', marginBottom:'0.75rem', opacity: busy ? 0.7 : 1}}
           onClick={emailAuth}
         >
-          {busy ? '…' : t.emailBtn}
+          {busy ? '…' : (isSignup ? t.emailBtnSignup : t.emailBtn)}
+        </button>
+        <button
+          onClick={() => setMode(isSignup ? 'signin' : 'signup')}
+          style={{background:'none', border:'none', color:'var(--accent)', fontSize:'0.8rem', cursor:'pointer', marginBottom:'1rem', padding:'0.25rem'}}
+        >
+          {isSignup ? t.haveAccount : t.noAccount}
         </button>
         <div style={{display:'flex', alignItems:'center', gap:'0.75rem', margin:'0 0 1rem', color:'var(--text-muted)', fontSize:'0.75rem'}}>
           <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
@@ -1253,8 +1294,12 @@ export default function App() {
   const [sbClient, setSbClient]       = useState(null)
   const [authEnabled, setAuthEnabled] = useState(false)
   const [showLogin, setShowLogin]     = useState(false)
+  const [loginMode, setLoginMode]     = useState('signin')
   const [showUpgrade, setShowUpgrade] = useState(false)
   const [authLoading, setAuthLoading] = useState(true)
+  const [anonInfo, setAnonInfo]       = useState(null)  // {limit, remaining} for signed-out users
+
+  const openLogin = (mode = 'signin') => { setLoginMode(mode); setShowLogin(true) }
 
   // Referral
   const [refStats, setRefStats]     = useState(null)
@@ -1282,6 +1327,8 @@ export default function App() {
       .then(r => r.json())
       .then(cfg => {
         setAuthEnabled(!!cfg.auth_enabled)
+        if (cfg.anon_free_limit !== undefined)
+          setAnonInfo({ limit: cfg.anon_free_limit, remaining: cfg.anon_remaining ?? cfg.anon_free_limit })
         if (!cfg.auth_enabled || !cfg.supabase_url || !cfg.supabase_anon_key) {
           setAuthLoading(false)
           return
@@ -1382,16 +1429,24 @@ export default function App() {
   }
 
   // handle 401/402 from any SSE stream
-  const handleAuthError = (status, item, resolve) => {
-    if (status === 401) {
-      setShowLogin(true)
-      if (item) updateItem(item.id, { status: 'error', error: 'Please sign in to continue.' })
+  const handleAuthError = (status, item, resolve, data) => {
+    const code = data?.code
+    if (status === 401 || code === 'auth_required') {
+      openLogin('signin')
+      if (item) updateItem(item.id, { status: 'error', error: t.signInForMore })
       if (resolve) resolve()
       return true
     }
     if (status === 402) {
-      setShowUpgrade(true)
-      if (item) updateItem(item.id, { status: 'error', error: 'No tokens remaining. Upgrade to continue.' })
+      // Anonymous visitor out of free previews → invite sign-up (free tokens).
+      // Signed-in user out of tokens → show the upgrade / subscribe modal.
+      if (code === 'signin_for_more') {
+        openLogin('signup')
+        if (item) updateItem(item.id, { status: 'error', error: t.signInForMore })
+      } else {
+        setShowUpgrade(true)
+        if (item) updateItem(item.id, { status: 'error', error: 'No tokens remaining. Upgrade to continue.' })
+      }
       if (resolve) resolve()
       return true
     }
@@ -1450,8 +1505,8 @@ export default function App() {
               updateItem(item.id, { step: ev.step, msg: ev.msg })
             }
           },
-          (err, status) => {
-            if (!handleAuthError(status, item, resolve))
+          (err, status, data) => {
+            if (!handleAuthError(status, item, resolve, data))
               { updateItem(item.id, { status: 'error', error: err }); resolve() }
           }
         )
@@ -1483,14 +1538,16 @@ export default function App() {
           updateItem(qitem.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
           if (ev.tokens_remaining !== undefined && userInfo)
             setUserInfo(u => ({ ...u, tokens_remaining: ev.tokens_remaining }))
+          else if (ev.tokens_remaining !== undefined && !session)
+            setAnonInfo(a => a ? { ...a, remaining: ev.tokens_remaining } : a)
           setRunning(false)
         } else {
           updateItem(qitem.id, { step: ev.step, msg: ev.msg })
         }
       },
-      (err, status) => {
+      (err, status, data) => {
         setRunning(false)
-        if (!handleAuthError(status, qitem, null))
+        if (!handleAuthError(status, qitem, null, data))
           updateItem(qitem.id, { status: 'error', error: err })
       }
     )
@@ -1521,14 +1578,16 @@ export default function App() {
           updateItem(qitem.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
           if (ev.tokens_remaining !== undefined && userInfo)
             setUserInfo(u => ({ ...u, tokens_remaining: ev.tokens_remaining }))
+          else if (ev.tokens_remaining !== undefined && !session)
+            setAnonInfo(a => a ? { ...a, remaining: ev.tokens_remaining } : a)
           setRunning(false)
         } else {
           updateItem(qitem.id, { step: ev.step, msg: ev.msg })
         }
       },
-      (err, status) => {
+      (err, status, data) => {
         setRunning(false)
-        if (!handleAuthError(status, qitem, null))
+        if (!handleAuthError(status, qitem, null, data))
           updateItem(qitem.id, { status: 'error', error: err })
       }
     )
@@ -1612,7 +1671,7 @@ export default function App() {
                       {/* Token counter */}
                       {(() => {
                         const rem  = userInfo?.tokens_remaining ?? null
-                        const max  = isSubscribed ? 20 : 3
+                        const max  = isSubscribed ? 30 : 3
                         const low  = rem !== null && rem <= 1 && !isSubscribed
                         const dead = rem !== null && rem <= 0
                         return (
@@ -1642,13 +1701,31 @@ export default function App() {
                       </button>
                     </>
                   ) : (
-                    <button
-                      className="ctrl-btn"
-                      style={{borderColor:'var(--accent)',color:'var(--accent)'}}
-                      onClick={() => setShowLogin(true)}
-                    >
-                      <LogIn size={13} /><span className="ctrl-label"> {t.signIn}</span>
-                    </button>
+                    <>
+                      {/* Anonymous free-preview counter */}
+                      {anonInfo && anonInfo.limit > 0 && (
+                        <button
+                          className="ctrl-btn"
+                          style={{
+                            cursor:'pointer',
+                            borderColor: anonInfo.remaining > 0 ? 'rgba(34,197,94,0.3)' : 'rgba(251,191,36,0.5)',
+                            color: anonInfo.remaining > 0 ? '#22c55e' : '#fbbf24',
+                          }}
+                          onClick={() => openLogin('signup')}
+                          title={anonInfo.remaining > 0 ? t.freeLeft(anonInfo.remaining) : t.signInForMore}
+                        >
+                          <Zap size={12} />
+                          <span className="ctrl-label"> {anonInfo.remaining > 0 ? t.freeLeft(anonInfo.remaining) : t.signInForMore}</span>
+                        </button>
+                      )}
+                      <button
+                        className="ctrl-btn"
+                        style={{borderColor:'var(--accent)',color:'var(--accent)'}}
+                        onClick={() => openLogin('signin')}
+                      >
+                        <LogIn size={13} /><span className="ctrl-label"> {t.signIn}</span>
+                      </button>
+                    </>
                   )
                 )}
 
@@ -2024,7 +2101,7 @@ export default function App() {
       {mindmapModal && <OverviewModal jobId={mindmapModal} onClose={() => setMindmapModal(null)} />}
       {showHistory  && <HistoryModal onClose={() => setShowHistory(false)} />}
       {showTerms    && <TermsModal lang={lang} onClose={() => setShowTerms(false)} />}
-      {showLogin    && <LoginModal onClose={() => setShowLogin(false)} onLogin={signIn} lang={lang} sbClient={sbClient} toast={toast} />}
+      {showLogin    && <LoginModal onClose={() => setShowLogin(false)} onLogin={signIn} lang={lang} sbClient={sbClient} toast={toast} initialMode={loginMode} />}
       {showUpgrade  && (
         <UpgradeModal
           onClose={() => setShowUpgrade(false)}

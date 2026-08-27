@@ -276,6 +276,55 @@ def _auth_check(req):
         return None, (jsonify({"error": "Sign in required", "code": "auth_required"}), 401)
     return uid, None
 
+def _auth_optional(req):
+    """Return a verified user id, or None for anonymous callers (no / invalid token).
+    Used by endpoints that also allow signed-out users a small free quota."""
+    if not _AUTH_ENABLED:
+        return "dev"
+    tok = _get_bearer(req)
+    return _verify_jwt(tok) if tok else None
+
+# ── Anonymous (no-login) free credits ──────────────────────────────────────────
+# Let visitors try the product a few times without an account. Tracked per-IP in
+# memory over a rolling window; tune with ANON_FREE_LIMIT (0 disables anon use).
+ANON_FREE_LIMIT = int(os.environ.get("ANON_FREE_LIMIT", "2"))
+_ANON_WINDOW    = int(os.environ.get("ANON_WINDOW_SEC", str(24 * 3600)))
+_anon_lock      = threading.Lock()
+_anon_usage     = {}  # ip -> [timestamps]
+
+def _anon_remaining(ip):
+    now = time.time()
+    with _anon_lock:
+        times = [t for t in _anon_usage.get(ip, []) if now - t < _ANON_WINDOW]
+        _anon_usage[ip] = times
+        return max(0, ANON_FREE_LIMIT - len(times))
+
+def _anon_consume(ip):
+    """Consume one anonymous free credit. Returns (ok, remaining)."""
+    now = time.time()
+    with _anon_lock:
+        times = [t for t in _anon_usage.get(ip, []) if now - t < _ANON_WINDOW]
+        if len(times) >= ANON_FREE_LIMIT:
+            _anon_usage[ip] = times
+            return False, 0
+        times.append(now)
+        _anon_usage[ip] = times
+        return True, max(0, ANON_FREE_LIMIT - len(times))
+
+def _anon_refund(ip):
+    with _anon_lock:
+        times = _anon_usage.get(ip)
+        if times:
+            times.pop()
+            _anon_usage[ip] = times
+
+def _refund_credit(uid, ip):
+    """Refund one credit to whoever was charged — signed-in user or anon IP."""
+    if uid:
+        _refund_token(uid)
+    elif ip:
+        _anon_refund(ip)
+
 app = Flask(__name__, static_folder=DIST, static_url_path="")
 app.config['SECRET_KEY'] = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload limit
@@ -1773,6 +1822,8 @@ def api_config():
         "supabase_anon_key":     SUPABASE_ANON_KEY,
         "stripe_publishable_key": STRIPE_PUBLISHABLE_KEY,
         "auth_enabled":          _AUTH_ENABLED,
+        "anon_free_limit":       ANON_FREE_LIMIT,
+        "anon_remaining":        _anon_remaining(_client_ip()),
     })
 
 
@@ -1985,16 +2036,25 @@ def summarize_stream():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
-    # ── Auth + token gate ──────────────────────────────────────────────────────
-    uid, err = _auth_check(request)
-    if err:
-        return err
-    ok, tok_left, reason = _consume_token(uid)
-    if not ok:
-        return jsonify({
-            "error": "You have no tokens left. Upgrade to continue.",
-            "code": "no_tokens", "tokens_remaining": 0
-        }), 402
+    # ── Credit gate: signed-in users spend a token; anonymous users get a
+    #    small free quota per IP so they can try without an account. ───────────
+    uid = _auth_optional(request)
+    anon_ip = None
+    if uid:
+        ok, tok_left, reason = _consume_token(uid)
+        if not ok:
+            return jsonify({
+                "error": "You have no tokens left. Upgrade to continue.",
+                "code": "no_tokens", "tokens_remaining": 0
+            }), 402
+    else:
+        anon_ip = _client_ip()
+        ok, tok_left = _anon_consume(anon_ip)
+        if not ok:
+            return jsonify({
+                "error": "You've used your free previews. Sign up free to get more.",
+                "code": "signin_for_more", "tokens_remaining": 0
+            }), 402
 
     f            = request.files["file"]
     lang_param   = request.form.get("language", "auto")
@@ -2005,11 +2065,11 @@ def summarize_stream():
 
     _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
     if not f.filename.lower().endswith(_ALLOWED_EXT):
-        _refund_token(uid)
+        _refund_credit(uid, anon_ip)
         return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     if not ollama_running():
-        _refund_token(uid)
+        _refund_credit(uid, anon_ip)
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
 
     file_bytes = f.read()
@@ -2019,7 +2079,7 @@ def summarize_stream():
             yield _sse({"step": "extract", "msg": "Extracting content…"})
             slides = extract_slides(io.BytesIO(file_bytes), filename=f.filename)
             if not any(s["content"] or s["title"] for s in slides):
-                _refund_token(uid)
+                _refund_credit(uid, anon_ip)
                 yield _sse({"error": "No readable content in this file"}); return
 
             total = len([s for s in slides if s["content"].strip()])
@@ -2083,7 +2143,7 @@ def summarize_stream():
 
         except Exception as e:
             _log.error("GENERATE_ERROR: %s\n%s", e, _tb.format_exc())
-            _refund_token(uid)
+            _refund_credit(uid, anon_ip)
             yield _sse({"error": _safe_err(e)})
 
     return Response(
@@ -2654,7 +2714,7 @@ def _extract_video_id(url):
     return None
 
 
-def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True, uid=None):
+def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True, uid=None, anon_ip=None):
     """Shared SSE generator for YouTube/text endpoints."""
     _dcfg = dcfg or DETAIL["standard"]
     def generate():
@@ -2662,7 +2722,7 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             yield _sse({"step": "extract", "msg": "Preparing content…"})
             slides = _text_to_slides(text)
             if not slides:
-                _refund_token(uid)
+                _refund_credit(uid, anon_ip)
                 yield _sse({"error": "No content extracted"}); return
             yield _sse({"step": "extract", "msg": f"Split into {len(slides)} segments — analysing…"})
 
@@ -2713,7 +2773,7 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
 
         except Exception as e:
             _log.error("STREAM_TEXT_ERROR: %s\n%s", e, _tb.format_exc())
-            _refund_token(uid)
+            _refund_credit(uid, anon_ip)
             yield _sse({"error": _safe_err(e)})
     return generate
 
@@ -2731,9 +2791,8 @@ def _yt_duration(video_id):
 
 @app.route("/api/youtube", methods=["POST"])
 def youtube_transcript():
-    uid, err = _auth_check(request)
-    if err:
-        return err
+    uid = _auth_optional(request)
+    anon_ip = None
 
     data = request.json or {}
     url = (data.get("url") or "").strip()
@@ -2755,12 +2814,21 @@ def youtube_transcript():
     if _dur and _dur > 3000:
         return jsonify({"error": "This video is too long. Maximum supported length is 50 minutes."}), 400
 
-    ok, tok_left, reason = _consume_token(uid)
-    if not ok:
-        return jsonify({
-            "error": "You have no tokens left. Upgrade to continue.",
-            "code": "no_tokens", "tokens_remaining": 0
-        }), 402
+    if uid:
+        ok, tok_left, reason = _consume_token(uid)
+        if not ok:
+            return jsonify({
+                "error": "You have no tokens left. Upgrade to continue.",
+                "code": "no_tokens", "tokens_remaining": 0
+            }), 402
+    else:
+        anon_ip = _client_ip()
+        ok, tok_left = _anon_consume(anon_ip)
+        if not ok:
+            return jsonify({
+                "error": "You've used your free previews. Sign up free to get more.",
+                "code": "signin_for_more", "tokens_remaining": 0
+            }), 402
 
     out_name = _safe_name(f"youtube_{video_id}")
 
@@ -2772,27 +2840,27 @@ def youtube_transcript():
                 yield _sse({"step": "transcript", "msg": "Captions found — processing…"})
             except ValueError as e:
                 if str(e) != "no_captions":
-                    _refund_token(uid)
+                    _refund_credit(uid, anon_ip)
                     yield _sse({"error": _safe_err(e)}); return
                 if not GROQ_API_KEY:
-                    _refund_token(uid)
+                    _refund_credit(uid, anon_ip)
                     yield _sse({"error": "No captions found and GROQ_API_KEY not set."}); return
                 yield _sse({"step": "transcript", "msg": "No captions — downloading audio for Whisper transcription…"})
                 try:
                     transcript_text = _transcribe_with_whisper(video_id)
                     yield _sse({"step": "transcript", "msg": "Audio transcribed — processing…"})
                 except ValueError as we:
-                    _refund_token(uid)
+                    _refund_credit(uid, anon_ip)
                     yield _sse({"error": str(we)}); return
 
             language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
             lang_label = "Arabic" if language == "ar" else "English"
             yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language})
-            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left, include_quiz, uid=uid)():
+            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left, include_quiz, uid=uid, anon_ip=anon_ip)():
                 yield event
         except Exception as ex:
             _log.error("youtube SSE error: %s", ex)
-            _refund_token(uid)
+            _refund_credit(uid, anon_ip)
             yield _sse({"error": str(ex)})
 
     return Response(
@@ -2850,15 +2918,23 @@ def _fetch_url_text(url):
 
 @app.route("/api/summarize-text", methods=["POST"])
 def summarize_text():
-    uid, err = _auth_check(request)
-    if err:
-        return err
-    ok, tok_left, reason = _consume_token(uid)
-    if not ok:
-        return jsonify({
-            "error": "You have no tokens left. Upgrade to continue.",
-            "code": "no_tokens", "tokens_remaining": 0
-        }), 402
+    uid = _auth_optional(request)
+    anon_ip = None
+    if uid:
+        ok, tok_left, reason = _consume_token(uid)
+        if not ok:
+            return jsonify({
+                "error": "You have no tokens left. Upgrade to continue.",
+                "code": "no_tokens", "tokens_remaining": 0
+            }), 402
+    else:
+        anon_ip = _client_ip()
+        ok, tok_left = _anon_consume(anon_ip)
+        if not ok:
+            return jsonify({
+                "error": "You've used your free previews. Sign up free to get more.",
+                "code": "signin_for_more", "tokens_remaining": 0
+            }), 402
 
     data = request.json or {}
     text = (data.get("text") or "").strip()
@@ -2870,22 +2946,22 @@ def summarize_text():
     include_quiz = data.get("mode", "full") != "summary"
 
     if not ollama_running():
-        _refund_token(uid)
+        _refund_credit(uid, anon_ip)
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
 
     if not text and url:
         try:
             text = _fetch_url_text(url)
         except ValueError as e:
-            _refund_token(uid)
+            _refund_credit(uid, anon_ip)
             return jsonify({"error": str(e)}), 400
 
     if not text:
-        _refund_token(uid)
+        _refund_credit(uid, anon_ip)
         return jsonify({"error": "No text or URL provided"}), 400
 
     language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
-    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz, uid=uid)
+    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz, uid=uid, anon_ip=anon_ip)
     return Response(
         stream_with_context(gen()),
         mimetype="text/event-stream",
