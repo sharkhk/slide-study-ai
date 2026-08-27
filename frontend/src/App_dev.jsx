@@ -1671,7 +1671,6 @@ export default function App() {
                       {/* Token counter */}
                       {(() => {
                         const rem  = userInfo?.tokens_remaining ?? null
-                        const max  = isSubscribed ? 30 : 3
                         const low  = rem !== null && rem <= 1 && !isSubscribed
                         const dead = rem !== null && rem <= 0
                         return (
@@ -1684,11 +1683,11 @@ export default function App() {
                               animation: low && !dead ? 'tokenPulse 2s ease infinite' : 'none',
                             }}
                             onClick={() => setShowUpgrade(true)}
-                            title="Tokens remaining"
+                            title={rem === null ? 'Tokens' : `${rem} token${rem === 1 ? '' : 's'} remaining · ${isSubscribed ? 'Pro' : 'Free'} plan`}
                           >
                             <Zap size={12} />
                             <span className="ctrl-label">
-                              {' '}{rem ?? '…'}/{max} {isSubscribed ? 'Pro' : 'Free'}
+                              {' '}{rem ?? '…'} {isSubscribed ? 'Pro' : 'Free'}
                             </span>
                           </button>
                         )
