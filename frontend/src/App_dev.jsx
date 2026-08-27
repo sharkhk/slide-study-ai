@@ -1737,10 +1737,12 @@ export default function App() {
                         )
                       })()}
                       {/* User avatar / sign out */}
-                      <button className="ctrl-btn" onClick={signOut} title={t.signOut}>
+                      <button className="ctrl-btn" onClick={signOut}
+                        title={`${userInfo?.name || userInfo?.email || ''} — ${t.signOut}`}>
                         {userInfo?.avatar_url
                           ? <img src={userInfo.avatar_url} alt="" style={{width:18,height:18,borderRadius:'50%',objectFit:'cover'}} />
                           : <User size={13} />}
+                        {userInfo?.name && <span className="ctrl-label"> {String(userInfo.name).split(' ')[0]}</span>}
                       </button>
                     </>
                   ) : (
