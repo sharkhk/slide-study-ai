@@ -200,6 +200,21 @@ def _consume_token(user_id):
         print(f"consume_token error: {exc}", flush=True)
         return False, 0, "db_error"
 
+def _refund_token(user_id):
+    """Best-effort: give a token back when a job fails after consuming it,
+    so users are only charged for a study guide they actually receive."""
+    sb = _get_sb()
+    if not sb or not user_id:
+        return
+    try:
+        row = sb.table("users").select("tokens_remaining").eq("id", user_id).single().execute()
+        cur = (row.data or {}).get("tokens_remaining")
+        if cur is not None:
+            sb.table("users").update({"tokens_remaining": cur + 1}).eq("id", user_id).execute()
+            _log.info("Refunded 1 token to %s (%s -> %s)", user_id, cur, cur + 1)
+    except Exception as exc:
+        print(f"refund_token error: {exc}", flush=True)
+
 def _get_user(user_id):
     """Fetch full user row from Supabase."""
     sb = _get_sb()
@@ -1962,9 +1977,11 @@ def summarize_stream():
 
     _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
     if not f.filename.lower().endswith(_ALLOWED_EXT):
+        _refund_token(uid)
         return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     if not ollama_running():
+        _refund_token(uid)
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
 
     file_bytes = f.read()
@@ -1974,6 +1991,7 @@ def summarize_stream():
             yield _sse({"step": "extract", "msg": "Extracting content…"})
             slides = extract_slides(io.BytesIO(file_bytes), filename=f.filename)
             if not any(s["content"] or s["title"] for s in slides):
+                _refund_token(uid)
                 yield _sse({"error": "No readable content in this file"}); return
 
             total = len([s for s in slides if s["content"].strip()])
@@ -2037,6 +2055,7 @@ def summarize_stream():
 
         except Exception as e:
             _log.error("GENERATE_ERROR: %s\n%s", e, _tb.format_exc())
+            _refund_token(uid)
             yield _sse({"error": _safe_err(e)})
 
     return Response(
@@ -2607,7 +2626,7 @@ def _extract_video_id(url):
     return None
 
 
-def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True):
+def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True, uid=None):
     """Shared SSE generator for YouTube/text endpoints."""
     _dcfg = dcfg or DETAIL["standard"]
     def generate():
@@ -2615,6 +2634,7 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             yield _sse({"step": "extract", "msg": "Preparing content…"})
             slides = _text_to_slides(text)
             if not slides:
+                _refund_token(uid)
                 yield _sse({"error": "No content extracted"}); return
             yield _sse({"step": "extract", "msg": f"Split into {len(slides)} segments — analysing…"})
 
@@ -2665,6 +2685,7 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
 
         except Exception as e:
             _log.error("STREAM_TEXT_ERROR: %s\n%s", e, _tb.format_exc())
+            _refund_token(uid)
             yield _sse({"error": _safe_err(e)})
     return generate
 
@@ -2723,23 +2744,27 @@ def youtube_transcript():
                 yield _sse({"step": "transcript", "msg": "Captions found — processing…"})
             except ValueError as e:
                 if str(e) != "no_captions":
+                    _refund_token(uid)
                     yield _sse({"error": _safe_err(e)}); return
                 if not GROQ_API_KEY:
+                    _refund_token(uid)
                     yield _sse({"error": "No captions found and GROQ_API_KEY not set."}); return
                 yield _sse({"step": "transcript", "msg": "No captions — downloading audio for Whisper transcription…"})
                 try:
                     transcript_text = _transcribe_with_whisper(video_id)
                     yield _sse({"step": "transcript", "msg": "Audio transcribed — processing…"})
                 except ValueError as we:
+                    _refund_token(uid)
                     yield _sse({"error": str(we)}); return
 
             language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
             lang_label = "Arabic" if language == "ar" else "English"
             yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language})
-            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left, include_quiz)():
+            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left, include_quiz, uid=uid)():
                 yield event
         except Exception as ex:
             _log.error("youtube SSE error: %s", ex)
+            _refund_token(uid)
             yield _sse({"error": str(ex)})
 
     return Response(
@@ -2817,19 +2842,22 @@ def summarize_text():
     include_quiz = data.get("mode", "full") != "summary"
 
     if not ollama_running():
+        _refund_token(uid)
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
 
     if not text and url:
         try:
             text = _fetch_url_text(url)
         except ValueError as e:
+            _refund_token(uid)
             return jsonify({"error": str(e)}), 400
 
     if not text:
+        _refund_token(uid)
         return jsonify({"error": "No text or URL provided"}), 400
 
     language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
-    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz)
+    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz, uid=uid)
     return Response(
         stream_with_context(gen()),
         mimetype="text/event-stream",
