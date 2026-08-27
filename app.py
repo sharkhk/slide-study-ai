@@ -73,9 +73,9 @@ APP_URL              = os.environ.get("APP_URL", "https://slide-study-ai.onrende
 _AUTH_ENABLED = bool(SUPABASE_URL)  # verify via JWKS (asymmetric) or HS256 shared secret
 
 DETAIL = {
-    "brief":    {"slide_chars": 400,  "max_slides": 30,  "keywords": "8-10",  "bullets": "2-4",  "n_flash": 6,  "n_mcq": 5,  "num_predict": 2048},
-    "standard": {"slide_chars": 700,  "max_slides": 60,  "keywords": "18-25", "bullets": "3-8",  "n_flash": 14, "n_mcq": 10, "num_predict": 4096},
-    "detailed": {"slide_chars": 1200, "max_slides": 120, "keywords": "25-35", "bullets": "5-12", "n_flash": 20, "n_mcq": 15, "num_predict": 6000},
+    "brief":    {"slide_chars": 400,  "max_slides": 30,  "keywords": "8-10",  "bullets": "2-4",  "n_flash": 6,  "n_mcq": 5,  "num_predict": 1200},
+    "standard": {"slide_chars": 700,  "max_slides": 60,  "keywords": "18-25", "bullets": "3-8",  "n_flash": 14, "n_mcq": 10, "num_predict": 2200},
+    "detailed": {"slide_chars": 1200, "max_slides": 120, "keywords": "25-35", "bullets": "5-12", "n_flash": 20, "n_mcq": 15, "num_predict": 3200},
 }
 
 # ── Arabic PDF support ─────────────────────────────────────────────────────────
@@ -618,6 +618,30 @@ _ollama_sem      = threading.Semaphore(1)
 _DEBUG_RAW = os.environ.get("DEBUG_RAW") == "1"
 _ollama_raw_lock = threading.Lock()  # protect concurrent debug-file writes
 
+# ── Groq token-per-minute pacer ────────────────────────────────────────────────
+# Groq's free tier caps tokens-per-minute (default 8000). Rather than fire calls
+# and eat 30s "retry-after" waits on every 429, proactively pace: track tokens
+# used in a rolling 60s window and sleep just enough to stay under the limit.
+# Raise GROQ_TPM_LIMIT if you upgrade your Groq tier (Dev tier is ~250k).
+GROQ_TPM_LIMIT   = int(os.environ.get("GROQ_TPM_LIMIT", "7000"))  # headroom under 8000
+_groq_tpm_lock   = threading.Lock()
+_groq_tpm_events = []  # list of (timestamp, tokens)
+
+def _groq_pace(est_tokens):
+    """Block until sending `est_tokens` keeps the rolling-minute total under the
+    limit. A single call larger than the limit is allowed through on its own."""
+    for _ in range(120):  # safety bound (~2 min max wait)
+        with _groq_tpm_lock:
+            now = time.time()
+            while _groq_tpm_events and now - _groq_tpm_events[0][0] > 60:
+                _groq_tpm_events.pop(0)
+            used = sum(t for _, t in _groq_tpm_events)
+            if not _groq_tpm_events or used + est_tokens <= GROQ_TPM_LIMIT:
+                _groq_tpm_events.append((now, est_tokens))
+                return
+            wait = 60 - (now - _groq_tpm_events[0][0]) + 0.5
+        time.sleep(max(1.0, min(wait, 35)))
+
 def store_job(job_id, pdf_bytes, md_text, guide, slides, filename):
     ts = time.time()
     with _jobs_lock:
@@ -832,8 +856,12 @@ def _call_groq(prompt, retries=5, max_tokens=2048):
             "temperature": 0,
             "max_tokens": max_tokens,
         }
+        # Estimate this call's token cost (prompt ≈ chars/4, plus the reserved
+        # output) and pace to stay under the per-minute limit before sending.
+        est_tokens = len(prompt) // 4 + max_tokens + 120
         for attempt in range(retries):
             try:
+                _groq_pace(est_tokens)
                 r = http.post(
                     "https://api.groq.com/openai/v1/chat/completions",
                     json=payload, headers=headers, timeout=120
