@@ -160,10 +160,10 @@ def _get_jwks_client():
         _jwks_client = _pyjwt.PyJWKClient(SUPABASE_URL.rstrip("/") + "/auth/v1/.well-known/jwks.json")
     return _jwks_client
 
-def _verify_jwt(token):
-    """Verify a Supabase-issued JWT. Asymmetric (ES256/RS256) tokens are
-    verified against the project's public JWKS; HS256 tokens against the
-    shared secret. Returns user_id (str) or None."""
+def _jwt_payload(token):
+    """Verify a Supabase-issued JWT and return the full decoded payload dict,
+    or None. Asymmetric (ES/RS/PS/Ed) tokens verify against the project JWKS;
+    HS256 against the shared secret."""
     if not token:
         return None
     try:
@@ -174,15 +174,29 @@ def _verify_jwt(token):
             if client is None:
                 return None
             key = client.get_signing_key_from_jwt(token).key
-            payload = _pyjwt.decode(token, key, algorithms=[alg], audience="authenticated")
+            return _pyjwt.decode(token, key, algorithms=[alg], audience="authenticated")
         elif SUPABASE_JWT_SECRET:
-            payload = _pyjwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated")
-        else:
-            return None
-        return payload.get("sub")
+            return _pyjwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated")
+        return None
     except Exception as _e:
         _log.warning("JWT verify failed: %s", type(_e).__name__)
         return None
+
+def _verify_jwt(token):
+    """Return the verified user_id (str) or None."""
+    payload = _jwt_payload(token)
+    return payload.get("sub") if payload else None
+
+def _identity_from_jwt(token):
+    """Pull email / display name / avatar from a Google (or other) OAuth JWT.
+    Supabase puts these under user_metadata (full_name/name, avatar_url/picture)."""
+    p = _jwt_payload(token) or {}
+    meta = p.get("user_metadata") or {}
+    return {
+        "email":  p.get("email") or meta.get("email") or "",
+        "name":   meta.get("full_name") or meta.get("name") or "",
+        "avatar": meta.get("avatar_url") or meta.get("picture") or "",
+    }
 
 # ── Token helpers ──────────────────────────────────────────────────────────────
 def _consume_token(user_id):
@@ -1876,9 +1890,33 @@ def auth_me():
     if uid == "dev":
         return jsonify({"email": "dev@local", "name": "Dev", "tokens_remaining": 999,
                         "subscription_status": "active", "referral_code": "DEVLOCAL"})
-    user = _get_user(uid)
+    ident = _identity_from_jwt(_get_bearer(request))
+    user  = _get_user(uid)
+    sb    = _get_sb()
     if not user:
-        return jsonify({"error": "User not found"}), 404
+        # Row missing (signup trigger didn't run) — create it from the token.
+        if sb:
+            try:
+                sb.table("users").upsert({
+                    "id": uid, "email": ident["email"],
+                    "name": ident["name"], "avatar_url": ident["avatar"],
+                }).execute()
+            except Exception as exc:
+                _log.error("auth_me create-user failed: %s", exc)
+        user = _get_user(uid) or {"id": uid, "email": ident["email"],
+                                  "name": ident["name"], "avatar_url": ident["avatar"]}
+    elif sb:
+        # Backfill name/avatar/email from Google if we don't have them yet.
+        patch = {}
+        if ident["name"]   and not user.get("name"):       patch["name"]       = ident["name"]
+        if ident["avatar"] and not user.get("avatar_url"): patch["avatar_url"] = ident["avatar"]
+        if ident["email"]  and not user.get("email"):      patch["email"]      = ident["email"]
+        if patch:
+            try:
+                sb.table("users").update(patch).eq("id", uid).execute()
+                user.update(patch)
+            except Exception as exc:
+                _log.error("auth_me backfill failed: %s", exc)
     ref_code = user.get("referral_code") or _get_or_create_referral_code(uid)
     return jsonify({
         "id":                      user["id"],
