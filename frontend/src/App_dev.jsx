@@ -248,6 +248,23 @@ function FlashCardModal({ jobId, onClose }) {
   const [roundDone, setRoundDone]   = useState(false)
   const [error, setError]           = useState(null)
   const [speaking, setSpeaking]     = useState(false)
+  const [glang, setGlang]           = useState('en')
+  const isAr = glang === 'ar'
+  const FL = isAr ? {
+    title:'بطاقات المراجعة', reviewMissed:'مراجعة الأخطاء', shuffle:'خلط', reset:'إعادة',
+    known:(k,t)=>`${k}/${t} معروفة`, complete:'اكتمل', roundDone:'انتهت الجولة!',
+    summary:(k,r)=>`${k} معروفة · ${r} للمراجعة`, done:'تم', reveal:'اضغط لإظهار الإجابة',
+    missed:'خطأ', flip:'قلب', knowIt:'أعرفها', readAloud:'🔊 استماع', speaking:'يتحدث…',
+    shortcuts:'مسافة=قلب · K=أعرف · M=خطأ', noCards:'لا توجد بطاقات.', loading:'جارٍ تحميل البطاقات…',
+    reviewMissedN:(n)=>`مراجعة الأخطاء (${n})`
+  } : {
+    title:'Flash Cards', reviewMissed:'Review Missed', shuffle:'Shuffle', reset:'Reset',
+    known:(k,t)=>`${k}/${t} known`, complete:'Complete', roundDone:'Round Complete!',
+    summary:(k,r)=>`${k} known · ${r} to review`, done:'Done', reveal:'Click to reveal answer',
+    missed:'Missed', flip:'Flip', knowIt:'Know it', readAloud:'🔊 Read aloud', speaking:'Speaking…',
+    shortcuts:'Space=flip · K=know · M=missed', noCards:'No cards available.', loading:'Loading flash cards…',
+    reviewMissedN:(n)=>`Review Missed (${n})`
+  }
 
   useEscapeKey(onClose)
 
@@ -281,6 +298,7 @@ function FlashCardModal({ jobId, onClose }) {
       .then(d => {
         if (d.error) { setError(d.error); return }
         setCards(d.flashcards || [])
+        setGlang(d.language || 'en')
       })
       .catch(() => setError('Failed to load flashcards'))
   }, [jobId])
@@ -333,13 +351,13 @@ function FlashCardModal({ jobId, onClose }) {
 
   if (!cards) return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" onClick={e => e.stopPropagation()}>
+      <div className="modal-box" style={{direction:isAr?'rtl':'ltr'}} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
-          <span style={{fontWeight:600,color:'var(--text-primary)'}}>Flash Cards</span>
+          <span style={{fontWeight:600,color:'var(--text-primary)'}}>{FL.title}</span>
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
         <div style={{padding:'2rem',textAlign:'center',color:'var(--text-secondary)'}}>
-          {error ? <><AlertCircle size={20} style={{marginBottom:8,color:'#ef4444'}}/><div style={{color:'#ef4444'}}>{error}</div></> : <><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>Loading flash cards…</div></>}
+          {error ? <><AlertCircle size={20} style={{marginBottom:8,color:'#ef4444'}}/><div style={{color:'#ef4444'}}>{error}</div></> : <><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>{FL.loading}</div></>}
         </div>
       </div>
     </div>
@@ -349,17 +367,17 @@ function FlashCardModal({ jobId, onClose }) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" style={{maxWidth:560}} onClick={e => e.stopPropagation()}>
+      <div className="modal-box" style={{maxWidth:560,direction:isAr?'rtl':'ltr'}} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <span style={{fontWeight:600,color:'var(--text-primary)',display:'flex',alignItems:'center',gap:'0.5rem'}}>
-            <Brain size={15} /> Flash Cards
-            {reviewMode && <span style={{fontSize:'0.75rem',color:'#fbbf24',fontWeight:500}}> — Review Missed</span>}
+            <Brain size={15} /> {FL.title}
+            {reviewMode && <span style={{fontSize:'0.75rem',color:'#fbbf24',fontWeight:500}}> — {FL.reviewMissed}</span>}
           </span>
           <div style={{display:'flex',gap:'0.4rem',alignItems:'center'}}>
-            <button className="ctrl-btn" style={{fontSize:'0.75rem'}} onClick={shuffle} title="Shuffle cards">
-              <RotateCcw size={12} /> Shuffle
+            <button className="ctrl-btn" style={{fontSize:'0.75rem'}} onClick={shuffle} title={FL.shuffle}>
+              <RotateCcw size={12} /> {FL.shuffle}
             </button>
-            <button className="ctrl-btn" style={{fontSize:'0.75rem'}} onClick={resetAll}>Reset</button>
+            <button className="ctrl-btn" style={{fontSize:'0.75rem'}} onClick={resetAll}>{FL.reset}</button>
             <button className="modal-close" onClick={onClose}><X size={16} /></button>
           </div>
         </div>
@@ -367,8 +385,8 @@ function FlashCardModal({ jobId, onClose }) {
         {/* Progress bar */}
         <div style={{padding:'0.75rem 1.25rem 0'}}>
           <div style={{display:'flex',justifyContent:'space-between',fontSize:'0.75rem',color:'var(--text-muted)',marginBottom:4}}>
-            <span>{knownCount}/{cards.length} known</span>
-            <span>{activeCards.length > 0 ? `${idx+1}/${activeCards.length}` : 'Complete'}</span>
+            <span>{FL.known(knownCount, cards.length)}</span>
+            <span>{activeCards.length > 0 ? `${idx+1}/${activeCards.length}` : FL.complete}</span>
           </div>
           <div className="progress-track">
             <div className="progress-bar" style={{width:`${progressPct}%`}} />
@@ -380,18 +398,18 @@ function FlashCardModal({ jobId, onClose }) {
             <div style={{textAlign:'center',padding:'1.5rem 0'}}>
               <CheckCircle2 size={40} color="#22c55e" style={{marginBottom:12}} />
               <div style={{fontSize:'1.1rem',fontWeight:700,color:'var(--text-primary)',marginBottom:8}}>
-                Round Complete!
+                {FL.roundDone}
               </div>
               <div style={{fontSize:'0.88rem',color:'var(--text-secondary)',marginBottom:20}}>
-                {knownCount} known · {cards.length - knownCount} to review
+                {FL.summary(knownCount, cards.length - knownCount)}
               </div>
               <div style={{display:'flex',gap:'0.75rem',justifyContent:'center',flexWrap:'wrap'}}>
                 {cards.length - knownCount > 0 && (
                   <button className="submit-btn" style={{flex:'none',padding:'0.6rem 1.2rem'}} onClick={resetReview}>
-                    <RotateCcw size={14} /> Review Missed ({cards.length - knownCount})
+                    <RotateCcw size={14} /> {FL.reviewMissedN(cards.length - knownCount)}
                   </button>
                 )}
-                <button className="ctrl-btn" onClick={onClose}>Done</button>
+                <button className="ctrl-btn" onClick={onClose}>{FL.done}</button>
               </div>
             </div>
           ) : currentCard ? (
@@ -400,7 +418,7 @@ function FlashCardModal({ jobId, onClose }) {
                 <div className="fc-card-inner">
                   <div className="fc-front">
                     <div style={{fontSize:'0.97rem',fontWeight:600,textAlign:'center'}}>{currentCard.q}</div>
-                    <div style={{fontSize:'0.75rem',color:'rgba(255,255,255,0.5)',marginTop:'0.75rem',textAlign:'center'}}>Click to reveal answer</div>
+                    <div style={{fontSize:'0.75rem',color:'rgba(255,255,255,0.5)',marginTop:'0.75rem',textAlign:'center'}}>{FL.reveal}</div>
                   </div>
                   <div className="fc-back">
                     <div style={{fontSize:'0.92rem',lineHeight:1.6}}>{currentCard.a}</div>
@@ -413,27 +431,27 @@ function FlashCardModal({ jobId, onClose }) {
               </div>
               <div style={{display:'flex',gap:'0.5rem',marginBottom:'0.75rem'}}>
                 <button className="quiz-action-btn wrong" style={{flex:1}} onClick={() => mark(false)}>
-                  <ThumbsDown size={14} /> Missed
+                  <ThumbsDown size={14} /> {FL.missed}
                 </button>
                 <button className="quiz-action-btn" style={{flex:1}} onClick={() => setFlipped(f => !f)}>
-                  Flip
+                  {FL.flip}
                 </button>
                 <button className="quiz-action-btn correct" style={{flex:1}} onClick={() => mark(true)}>
-                  <ThumbsUp size={14} /> Know it
+                  <ThumbsUp size={14} /> {FL.knowIt}
                 </button>
               </div>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'0.5rem'}}>
                 <button className="ctrl-btn" style={{fontSize:'0.78rem'}}
                   onClick={() => speak(flipped ? currentCard.a : currentCard.q)}>
-                  {speaking ? <><Loader2 size={12} className="spin" /> Speaking…</> : '🔊 Read aloud'}
+                  {speaking ? <><Loader2 size={12} className="spin" /> {FL.speaking}</> : FL.readAloud}
                 </button>
                 <span style={{fontSize:'0.68rem',color:'var(--text-muted)',fontStyle:'italic'}}>
-                  Space=flip · K=know · M=missed
+                  {FL.shortcuts}
                 </span>
               </div>
             </>
           ) : (
-            <div style={{textAlign:'center',color:'var(--text-muted)',padding:'2rem'}}>No cards available.</div>
+            <div style={{textAlign:'center',color:'var(--text-muted)',padding:'2rem'}}>{FL.noCards}</div>
           )}
         </div>
       </div>
@@ -451,6 +469,17 @@ function QuizModal({ jobId, filename, onClose }) {
   const [done, setDone]       = useState(false)
   const [error, setError]     = useState(null)
   const [wrongs, setWrongs]   = useState([])
+  const [glang, setGlang]     = useState('en')
+  const isAr = glang === 'ar'
+  const QL = isAr ? {
+    title:'اختبار', loading:'جارٍ تحميل الاختبار…', perfect:'🎉 درجة كاملة!', complete:'انتهى الاختبار!',
+    toReview:(n)=>`${n} ${n===1?'سؤال':'أسئلة'} للمراجعة`, reviewMissed:'مراجعة الأخطاء',
+    restart:'إعادة', done:'تم', questionOf:(i,n)=>`سؤال ${i} من ${n}`, finish:'إنهاء', next:'التالي ←', noQ:'لا توجد أسئلة.'
+  } : {
+    title:'Quiz', loading:'Loading quiz…', perfect:'🎉 Perfect score!', complete:'Quiz complete!',
+    toReview:(n)=>`${n} question${n>1?'s':''} to review`, reviewMissed:'Review Missed',
+    restart:'Restart', done:'Done', questionOf:(i,n)=>`Question ${i} of ${n}`, finish:'Finish', next:'Next →', noQ:'No questions available.'
+  }
 
   useEscapeKey(onClose)
 
@@ -460,6 +489,7 @@ function QuizModal({ jobId, filename, onClose }) {
       .then(d => {
         if (d.error) { setError(d.error); return }
         setMcqs(d.mcqs || [])
+        setGlang(d.language || 'en')
       })
       .catch(() => setError('Failed to load quiz'))
   }, [jobId])
@@ -497,13 +527,13 @@ function QuizModal({ jobId, filename, onClose }) {
 
   if (!mcqs) return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" onClick={e => e.stopPropagation()}>
+      <div className="modal-box" style={{direction:isAr?'rtl':'ltr'}} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
-          <span style={{fontWeight:600,color:'var(--text-primary)'}}>Quiz</span>
+          <span style={{fontWeight:600,color:'var(--text-primary)'}}>{QL.title}</span>
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
         <div style={{padding:'2rem',textAlign:'center',color:'var(--text-secondary)'}}>
-          {error ? <div style={{color:'#ef4444'}}>{error}</div> : <><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>Loading quiz…</div></>}
+          {error ? <div style={{color:'#ef4444'}}>{error}</div> : <><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>{QL.loading}</div></>}
         </div>
       </div>
     </div>
@@ -514,10 +544,10 @@ function QuizModal({ jobId, filename, onClose }) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" style={{maxWidth:560}} onClick={e => e.stopPropagation()}>
+      <div className="modal-box" style={{maxWidth:560,direction:isAr?'rtl':'ltr'}} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <span style={{fontWeight:600,color:'var(--text-primary)',display:'flex',alignItems:'center',gap:'0.5rem'}}>
-            <ClipboardList size={15} /> Quiz
+            <ClipboardList size={15} /> {QL.title}
           </span>
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
@@ -535,13 +565,13 @@ function QuizModal({ jobId, filename, onClose }) {
                 </div>
                 <div style={{fontSize:'1.1rem',fontWeight:600,color:gradeColor,marginBottom:'0.3rem'}}>{pct}%</div>
                 <div style={{fontSize:'0.82rem',color:'var(--text-muted)'}}>
-                  {score === mcqs.length ? '🎉 Perfect score!' : wrongs.length === 0 ? 'Quiz complete!' : `${wrongs.length} question${wrongs.length > 1 ? 's' : ''} to review`}
+                  {score === mcqs.length ? QL.perfect : wrongs.length === 0 ? QL.complete : QL.toReview(wrongs.length)}
                 </div>
               </div>
               {wrongs.length > 0 && (
                 <div style={{marginBottom:'1rem'}}>
                   <div style={{fontSize:'0.75rem',fontWeight:700,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:'0.5rem'}}>
-                    Review Missed
+                    {QL.reviewMissed}
                   </div>
                   {wrongs.map((w, i) => (
                     <div key={i} style={{
@@ -559,9 +589,9 @@ function QuizModal({ jobId, filename, onClose }) {
               )}
               <div style={{display:'flex',gap:'0.5rem',justifyContent:'center'}}>
                 <button className="submit-btn" style={{flex:'none',padding:'0.5rem 1.1rem',fontSize:'0.85rem'}} onClick={restart}>
-                  <RotateCcw size={13} /> Restart
+                  <RotateCcw size={13} /> {QL.restart}
                 </button>
-                <button className="ctrl-btn" onClick={onClose}>Done</button>
+                <button className="ctrl-btn" onClick={onClose}>{QL.done}</button>
               </div>
             </div>
             )
@@ -570,7 +600,7 @@ function QuizModal({ jobId, filename, onClose }) {
               <div className="progress-track" style={{marginBottom:'1rem'}}>
                 <div className="progress-bar" style={{width:`${pct}%`}} />
               </div>
-              <div style={{fontSize:'0.8rem',color:'var(--text-muted)',marginBottom:6}}>Question {idx+1} of {mcqs.length}</div>
+              <div style={{fontSize:'0.8rem',color:'var(--text-muted)',marginBottom:6}}>{QL.questionOf(idx+1, mcqs.length)}</div>
               <div style={{fontSize:'0.97rem',fontWeight:600,color:'var(--text-primary)',marginBottom:'1rem',lineHeight:1.5}}>{q.q}</div>
               {(q.options || []).map((opt, i) => {
                 const letter = opt[0]
@@ -593,13 +623,13 @@ function QuizModal({ jobId, filename, onClose }) {
               {answered && (
                 <div style={{display:'flex',justifyContent:'flex-end',marginTop:'0.75rem'}}>
                   <button className="submit-btn" style={{flex:'none',padding:'0.5rem 1.2rem',fontSize:'0.85rem'}} onClick={next}>
-                    {idx + 1 >= mcqs.length ? 'Finish' : 'Next →'}
+                    {idx + 1 >= mcqs.length ? QL.finish : QL.next}
                   </button>
                 </div>
               )}
             </>
           ) : (
-            <div style={{textAlign:'center',color:'var(--text-muted)',padding:'2rem'}}>No questions available.</div>
+            <div style={{textAlign:'center',color:'var(--text-muted)',padding:'2rem'}}>{QL.noQ}</div>
           )}
         </div>
       </div>
@@ -685,12 +715,25 @@ function OverviewModal({ jobId, onClose }) {
 
   const toggle = (i) => setOpen(s => ({ ...s, [i]: !s[i] }))
 
+  const isAr = guide?.language === 'ar'
+  const GL = isAr ? {
+    overview:'نظرة عامة', title:'دليل الدراسة', objectives:'الأهداف التعليمية',
+    sections:'الأقسام', keywords:'المصطلحات',
+    summary:(s,k,f)=>`${s} أقسام · ${k} مصطلحاً · ${f} بطاقة`,
+    points:(n)=>`${n} نقطة`, section:(i)=>`القسم ${i}`
+  } : {
+    overview:'Overview', title:'Study Guide', objectives:'Learning Objectives',
+    sections:'Sections', keywords:'Keywords',
+    summary:(s,k,f)=>`${s} sections · ${k} keywords · ${f} flash cards`,
+    points:(n)=>`${n} point${n!==1?'s':''}`, section:(i)=>`Section ${i}`
+  }
+
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box" style={{maxWidth:660,maxHeight:'90vh'}} onClick={e => e.stopPropagation()}>
+      <div className="modal-box" style={{maxWidth:660,maxHeight:'90vh',direction:isAr?'rtl':'ltr'}} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <span style={{fontWeight:600,color:'var(--text-primary)',display:'flex',alignItems:'center',gap:'0.5rem'}}>
-            <Map size={15} /> Overview
+            <Map size={15} /> {GL.overview}
           </span>
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
@@ -709,10 +752,10 @@ function OverviewModal({ jobId, onClose }) {
                   color:'#fff',borderRadius:14,fontWeight:700,fontSize:'1.05rem',
                   boxShadow:'0 4px 18px var(--accent-glow)'
                 }}>
-                  {guide.title || 'Study Guide'}
+                  {guide.title || GL.title}
                 </div>
                 <div style={{marginTop:'0.6rem',fontSize:'0.75rem',color:'var(--text-muted)'}}>
-                  {(guide.sections||[]).length} sections · {(guide.keywords||[]).length} keywords · {(guide.flashcards||[]).length} flash cards
+                  {GL.summary((guide.sections||[]).length, (guide.keywords||[]).length, (guide.flashcards||[]).length)}
                 </div>
               </div>
 
@@ -723,7 +766,7 @@ function OverviewModal({ jobId, onClose }) {
                   background:'rgba(34,197,94,0.06)',border:'1px solid rgba(34,197,94,0.2)',
                 }}>
                   <div style={{fontSize:'0.72rem',fontWeight:700,color:'#22c55e',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'0.5rem'}}>
-                    Learning Objectives
+                    {GL.objectives}
                   </div>
                   {(guide.objectives||[]).map((o,i) => (
                     <div key={i} style={{fontSize:'0.84rem',color:'var(--text-secondary)',marginBottom:'0.25rem',display:'flex',gap:'0.4rem',lineHeight:1.5}}>
@@ -737,7 +780,7 @@ function OverviewModal({ jobId, onClose }) {
               {(guide.sections||[]).length > 0 && (
                 <div style={{marginBottom:'1.1rem'}}>
                   <div style={{fontSize:'0.72rem',fontWeight:700,color:'var(--accent)',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'0.6rem'}}>
-                    Sections
+                    {GL.sections}
                   </div>
                   {(guide.sections||[]).map((sec,i) => {
                     const bullets = Array.isArray(sec.bullets) ? sec.bullets : []
@@ -750,11 +793,11 @@ function OverviewModal({ jobId, onClose }) {
                           color:'var(--text-primary)',fontWeight:600,fontSize:'0.88rem',
                           fontFamily:'inherit',textAlign:'left',gap:'0.5rem'
                         }}>
-                          <span style={{flex:1}}>{sec.title || `Section ${i+1}`}</span>
+                          <span style={{flex:1}}>{sec.title || GL.section(i+1)}</span>
                           <span style={{display:'flex',alignItems:'center',gap:'0.4rem',flexShrink:0}}>
                             {bullets.length > 0 && (
                               <span style={{fontSize:'0.68rem',color:'var(--text-muted)',fontWeight:400}}>
-                                {bullets.length} point{bullets.length !== 1 ? 's' : ''}
+                                {GL.points(bullets.length)}
                               </span>
                             )}
                             <ChevronDown size={13} style={{color:'var(--text-muted)',transform:isOpen?'rotate(180deg)':'none',transition:'transform 0.15s'}} />
@@ -787,7 +830,7 @@ function OverviewModal({ jobId, onClose }) {
               {(guide.keywords||[]).length > 0 && (
                 <div>
                   <div style={{fontSize:'0.72rem',fontWeight:700,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:'0.55rem'}}>
-                    Keywords
+                    {GL.keywords}
                   </div>
                   <div style={{display:'flex',flexWrap:'wrap',gap:'0.4rem'}}>
                     {(guide.keywords||[]).slice(0,30).map((k,i) => {

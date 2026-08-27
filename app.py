@@ -1203,13 +1203,23 @@ def _flashcards_mcq_parallel(overview, language, dcfg, include_quiz=True):
 
 
 def build_markdown(guide):
-    """Convert guide dict to a Markdown string."""
-    lines = [f"# {guide.get('title', 'Study Guide')}", ""]
+    """Convert guide dict to a Markdown string (labels follow the guide language)."""
+    is_ar = guide.get("language") == "ar"
+    L = {
+        "title":      "دليل الدراسة" if is_ar else "Study Guide",
+        "objectives": "الأهداف التعليمية" if is_ar else "Learning Objectives",
+        "keywords":   "قاموس المصطلحات" if is_ar else "Keywords Cheatsheet",
+        "flashcards": "بطاقات المراجعة" if is_ar else "Flash Cards",
+        "quiz":       "أسئلة الاختيار من متعدد" if is_ar else "Multiple Choice Questions",
+        "q":          "سؤال" if is_ar else "Q",
+        "a":          "الإجابة" if is_ar else "A",
+    }
+    lines = [f"# {guide.get('title', L['title'])}", ""]
     if guide.get("subtitle"):
         lines += [f"*{guide['subtitle']}*", ""]
     objs = [o for o in guide.get("objectives", []) if isinstance(o, str)]
     if objs:
-        lines += ["## Learning Objectives", ""]
+        lines += [f"## {L['objectives']}", ""]
         for o in objs: lines.append(f"- {o}")
         lines.append("")
     for sec in guide.get("sections", []):
@@ -1226,17 +1236,17 @@ def build_markdown(guide):
         lines.append("")
     kws = [k for k in guide.get("keywords", []) if isinstance(k, dict)]
     if kws:
-        lines += ["## Keywords Cheatsheet", ""]
+        lines += [f"## {L['keywords']}", ""]
         for k in kws: lines.append(f"**{k.get('term','')}** — {k.get('definition','')}")
         lines.append("")
     fcs = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
     if fcs:
-        lines += ["## Flash Cards", ""]
+        lines += [f"## {L['flashcards']}", ""]
         for i, fc in enumerate(fcs, 1):
-            lines += [f"**Q{i}:** {fc.get('q','')}", f"**A:** {fc.get('a','')}", ""]
+            lines += [f"**{L['q']}{i}:** {fc.get('q','')}", f"**{L['a']}:** {fc.get('a','')}", ""]
     mcqs = [m for m in guide.get("mcqs", []) if isinstance(m, dict)]
     if mcqs:
-        lines += ["## Multiple Choice Questions", ""]
+        lines += [f"## {L['quiz']}", ""]
         for i, m in enumerate(mcqs, 1):
             lines.append(f"**{i}. {m.get('q','')}**")
             for opt in m.get("options", []): lines.append(f"   {opt}")
@@ -2156,6 +2166,7 @@ def summarize_stream():
                 yield _sse(evt)
 
             # Build PDF + Markdown
+            overview["language"] = language   # so exports + the in-app viewer localise
             yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"})
             pdf_buf   = build_pdf(overview, language, out_name)
             pdf_bytes = pdf_buf.read()
@@ -2221,10 +2232,13 @@ def get_guide(job_id):
     guide = job.get("guide", {})
     return jsonify({
         "title":      guide.get("title", ""),
+        "subtitle":   guide.get("subtitle", ""),
+        "sections":   guide.get("sections",   []),
         "flashcards": guide.get("flashcards", []),
         "mcqs":       guide.get("mcqs", []),
         "keywords":   guide.get("keywords",   []),
         "objectives": guide.get("objectives", []),
+        "language":   guide.get("language", "en"),
     })
 
 
@@ -2784,6 +2798,7 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz):
                 yield _sse(evt)
 
+            overview["language"] = language   # so exports + the in-app viewer localise
             yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"})
             pdf_buf = build_pdf(overview, language, out_name)
             pdf_bytes = pdf_buf.read()
