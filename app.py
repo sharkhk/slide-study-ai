@@ -1973,6 +1973,11 @@ def stripe_checkout():
             payment_method_types=["card"],
             line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
             mode="subscription",
+            # Collect address + phone: gives Stripe's fraud engine more legit
+            # signals (AVS, verified contact) and cuts false-positive blocks.
+            billing_address_collection="required",
+            phone_number_collection={"enabled": True},
+            customer_update={"address": "auto", "name": "auto"},
             success_url=f"{APP_URL}/?sub=success",
             cancel_url=f"{APP_URL}/?sub=canceled",
             metadata={"user_id": uid},
