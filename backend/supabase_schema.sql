@@ -136,3 +136,17 @@ BEGIN
   RETURN v_new;  -- NULL when the user row does not exist
 END;
 $$;
+
+-- ── Lock down the token RPCs (SECURITY) ────────────────────────────────────
+-- These SECURITY DEFINER functions are ONLY called by the backend's service-role
+-- client. Supabase grants EXECUTE to PUBLIC (anon + authenticated) by default,
+-- which would let anyone with the public anon key mint/drain tokens via PostgREST.
+-- Pin search_path (anti function-shadowing) and restrict EXECUTE to service_role.
+ALTER FUNCTION public.add_tokens(uuid, int) SET search_path = public, pg_temp;
+ALTER FUNCTION public.consume_token(uuid)   SET search_path = public, pg_temp;
+
+REVOKE ALL ON FUNCTION public.add_tokens(uuid, int) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.consume_token(uuid)   FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public.add_tokens(uuid, int) TO service_role;
+GRANT EXECUTE ON FUNCTION public.consume_token(uuid)   TO service_role;

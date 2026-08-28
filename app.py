@@ -71,8 +71,24 @@ STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID      = os.environ.get("STRIPE_PRICE_ID", "")
 APP_URL              = os.environ.get("APP_URL", "https://slide-study-ai.onrender.com")
+# Shared secret Cloudflare injects (via a Transform Rule adding header
+# X-Origin-Verify) so the origin can tell real Cloudflare traffic from requests
+# sent straight to the Render origin. When set, CF-Connecting-IP is only trusted
+# on verified requests. Leave unset to keep the old (trust-CF) behaviour.
+CF_ORIGIN_SECRET     = os.environ.get("CF_ORIGIN_SECRET", "")
 
 _AUTH_ENABLED = bool(SUPABASE_URL)  # verify via JWKS (asymmetric) or HS256 shared secret
+
+# FAIL CLOSED: with auth disabled every caller becomes a "dev" user with 999
+# tokens and an active subscription. That is fine for local dev, but if it ever
+# happened in production (SUPABASE_URL unset on a deploy) the whole app — paid
+# features included — would be wide open. On Render, refuse to start instead.
+_IS_PRODUCTION = bool(os.environ.get("RENDER") or os.environ.get("PRODUCTION"))
+if _IS_PRODUCTION and not _AUTH_ENABLED:
+    raise RuntimeError(
+        "SUPABASE_URL is not set but this is a production environment — refusing "
+        "to start in open (no-auth) dev mode. Set SUPABASE_URL and the Supabase keys."
+    )
 
 DETAIL = {
     "brief":    {"slide_chars": 400,  "max_slides": 30,  "keywords": "8-10",  "bullets": "2-4",  "n_flash": 6,  "n_mcq": 5,  "num_predict": 1200},
@@ -385,6 +401,22 @@ def _security_headers(resp):
         resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.path.startswith("/api/"):
         resp.headers.setdefault("Cache-Control", "no-store")
+    # Content-Security-Policy — defence-in-depth backstop behind the output
+    # escaping. The React SPA loads an external bundle (no inline JS), so it gets
+    # a strict script-src; the server-rendered pages (/admin, /api/view/*) use
+    # inline <script>/onclick, so only those routes relax script-src.
+    _p = request.path
+    _inline_html = _p == "/admin" or _p.startswith("/admin/") or _p.startswith("/api/view/")
+    _script_src = "script-src 'self' 'unsafe-inline'" if _inline_html else "script-src 'self'"
+    resp.headers.setdefault("Content-Security-Policy", (
+        "default-src 'self'; "
+        f"{_script_src}; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' https://*.supabase.co; "
+        "frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'"
+    ))
     return resp
 
 # Per-IP rate limiting
@@ -394,7 +426,10 @@ _RATE_WINDOW     = 60
 _RATE_MAX        = 5
 
 def _check_rate_limit(ip, scope="main", limit=_RATE_MAX):
-    if _is_private(ip):
+    # Exempt ONLY genuine loopback (local dev). A blanket _is_private() exemption
+    # let an attacker send CF-Connecting-IP: 10.0.0.1 to disable rate limiting
+    # entirely — private-but-not-loopback client IPs must still be limited.
+    if ip in ("127.0.0.1", "::1"):
         return True
     key = f"{scope}:{ip}"
     now = time.time()
@@ -442,13 +477,23 @@ def _safe_err(e):
     _log.error("internal error: %s\n%s", e, _tb.format_exc())
     return "Processing failed — please try again."
 
+def _via_cloudflare():
+    """True if we can trust this request's CF-Connecting-IP header. When
+    CF_ORIGIN_SECRET is configured, a Cloudflare Transform Rule stamps it as
+    X-Origin-Verify; a request that reaches the Render origin directly (bypassing
+    Cloudflare) won't have it, so its CF-Connecting-IP must NOT be trusted.
+    Without the secret configured we can't tell, so we trust it as before."""
+    if not CF_ORIGIN_SECRET:
+        return True
+    return secrets.compare_digest(request.headers.get("X-Origin-Verify", ""), CF_ORIGIN_SECRET)
+
 def _client_ip():
     ra = request.remote_addr or "unknown"
-    # Behind Cloudflare, CF-Connecting-IP is set by the edge and CANNOT be
-    # spoofed by the client (Cloudflare overwrites any client-supplied value).
-    # This is our trust anchor, so it takes priority over everything else.
+    # CF-Connecting-IP is set by Cloudflare's edge, but ONLY trustworthy for
+    # traffic that actually transited Cloudflare (see _via_cloudflare) — the
+    # Render origin is reachable directly, where the header is attacker-controlled.
     cf = (request.headers.get("CF-Connecting-IP") or "").strip()
-    if cf:
+    if cf and _via_cloudflare():
         return cf
     if not _is_private(ra):
         return ra
@@ -612,7 +657,7 @@ def admin_page():
         location  = _he(", ".join(loc_parts)) if loc_parts else "—"
         map_link  = ""
         if v.get("lat") and v.get("lon"):
-            map_link = f'<a href="https://maps.google.com/?q={_he(v["lat"])},{_he(v["lon"])}" target="_blank" style="color:#4f8ef7;font-size:11px">📍 map</a>'
+            map_link = f'<a href="https://maps.google.com/?q={_he(v["lat"])},{_he(v["lon"])}" target="_blank" rel="noopener noreferrer" style="color:#4f8ef7;font-size:11px">📍 map</a>'
         block_btn = (
             f'<button onclick="unblock(\'{ip_js}\')" '
             f'style="background:#16a34a;color:#fff;border:none;padding:3px 10px;border-radius:6px;cursor:pointer;font-size:12px">✓ Unblock</button>'
@@ -708,24 +753,26 @@ function toast(msg, color="#16a34a"){{
   t.textContent = msg; t.style.background = color; t.style.display = "block";
   setTimeout(()=>t.style.display="none", 2500);
 }}
+// Send the admin token in the X-Admin-Token HEADER, never the URL query string
+// (query strings are recorded in access logs; the header is not).
 async function blockIp(ip){{
   if(!confirm("Block " + ip + "?\\nThis will 403 all their requests immediately.")) return;
-  const r = await fetch("/admin/block?token=" + TOKEN, {{
-    method:"POST", headers:{{"Content-Type":"application/json"}},
+  const r = await fetch("/admin/block", {{
+    method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}},
     body: JSON.stringify({{ip}})
   }});
   if(r.ok){{ toast("⛔ Blocked: " + ip, "#dc2626"); setTimeout(()=>location.reload(),1200); }}
 }}
 async function unblock(ip){{
-  const r = await fetch("/admin/unblock?token=" + TOKEN, {{
-    method:"POST", headers:{{"Content-Type":"application/json"}},
+  const r = await fetch("/admin/unblock", {{
+    method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}},
     body: JSON.stringify({{ip}})
   }});
   if(r.ok){{ toast("✓ Unblocked: " + ip); setTimeout(()=>location.reload(),1200); }}
 }}
 async function clearLog(){{
   if(!confirm("Clear all visitor log entries?")) return;
-  const r = await fetch("/admin/clear?token=" + TOKEN, {{method:"POST"}});
+  const r = await fetch("/admin/clear", {{method:"POST", headers:{{"X-Admin-Token":TOKEN}}}});
   if(r.ok){{ toast("🗑 Log cleared"); setTimeout(()=>location.reload(),1200); }}
 }}
 </script>
@@ -741,7 +788,8 @@ def _valid_job(job_id):
     return bool(_JOB_ID_RE.match(str(job_id)))
 
 def _he(s):
-    return str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;').replace('"','&quot;')
+    return (str(s).replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
+            .replace('"','&quot;').replace("'","&#39;"))
 
 # ── Job store (memory ONLY — uploads and guides are never written to disk)
 _JOB_TTL   = 900  # 15 minutes
@@ -1132,10 +1180,13 @@ def pass2_section(title, section_slides, language, dcfg=None):
     """Get detailed bullets + optional comparison table for one section."""
     dcfg = dcfg or DETAIL["standard"]
     lang = "in Arabic" if language == "ar" else "in English"
+    # Cap per-slide and total content so a crafted file can't blow up the Groq
+    # token/cost bill (pass 1 caps slide count, but pass 2 sent full content).
+    _per = dcfg.get("slide_chars", 700) * 3
     content = "".join(
-        f"Slide {s['slide_num']}: {s['title']}\n{s['content']}\n\n"
+        f"Slide {s['slide_num']}: {s['title']}\n{s['content'][:_per]}\n\n"
         for s in section_slides
-    )
+    )[:60_000]
     result = _call_ollama(f"""Extract detailed exam study notes {lang} for the section "{title}".
 
 {content}
@@ -1422,6 +1473,8 @@ def _extract_pptx_raw(raw):
             raise ValueError("No readable content found in this file")
         return slides
 
+    if len(prs.slides) > _MAX_PAGES:
+        raise ValueError(f"Presentation has too many slides (max {_MAX_PAGES}).")
     slides = []
     for i, slide in enumerate(prs.slides, 1):
         ts    = slide.shapes.title
@@ -1489,6 +1542,8 @@ def _extract_pdf(raw):
         raise ValueError("pypdf not installed — run: pip install pypdf")
 
     reader = pypdf.PdfReader(io.BytesIO(raw))
+    if len(reader.pages) > _MAX_PAGES:
+        raise ValueError(f"PDF has too many pages (max {_MAX_PAGES}).")
     slides = []
     for i, page in enumerate(reader.pages, 1):
         text  = (page.extract_text() or "").strip()
@@ -1580,12 +1635,37 @@ def _extract_txt(raw):
     return slides
 
 
+# ── Upload-parsing DoS guards ──────────────────────────────────────────────────
+_MAX_UNCOMPRESSED = 300 * 1024 * 1024   # total decompressed bytes (zip-bomb guard)
+_MAX_ZIP_RATIO    = 200                 # per-entry compression-ratio ceiling
+_MAX_PAGES        = 1200                # hard cap on PDF pages / PPTX slides parsed
+
+def _check_zip_bomb(raw):
+    """Reject OOXML/zip inputs that would decompress to an unreasonable size.
+    MAX_CONTENT_LENGTH only bounds the COMPRESSED upload; a 50 MB zip bomb can
+    expand to many GB and OOM the instance."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            total = 0
+            for zi in z.infolist():
+                total += zi.file_size
+                if total > _MAX_UNCOMPRESSED:
+                    raise ValueError("File is too large when decompressed — refusing to process.")
+                if (zi.compress_size > 0 and zi.file_size > 1_000_000
+                        and (zi.file_size / zi.compress_size) > _MAX_ZIP_RATIO):
+                    raise ValueError("File has a suspicious compression ratio — refusing to process.")
+    except zipfile.BadZipFile:
+        pass  # not a real zip; the downstream parser will reject it
+
+
 def extract_slides(file_stream, filename=""):
     """Detect format from magic bytes (and filename for .txt) and dispatch."""
     raw = file_stream.read()
     fname = (filename or "").lower()
 
     if raw[:4] == b'PK\x03\x04':                         # ZIP-based (pptx or docx)
+        _check_zip_bomb(raw)
         import zipfile
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
@@ -1656,8 +1736,17 @@ def build_pdf(guide, language, out_filename="study_guide"):
     AFB   = _ARABIC_FONT if ar_ok else "Helvetica-Bold"
     ALIGN = TA_RIGHT if is_ar else TA_LEFT
 
+    def _xesc(s):
+        # reportlab Paragraph parses an intra-paragraph mini-markup (<b>, <font>,
+        # <img src=…>). Model/source text must be XML-escaped or an injected
+        # <img src="http://169.254.169.254/…"> would make the PDF builder itself
+        # perform a blind SSRF, and any literal "&" (e.g. "R&D") would break the
+        # whole build. All app-added markup is added OUTSIDE this function.
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     def T(text):
-        return _ar(str(text)) if ar_ok else str(text)
+        s = _ar(str(text)) if ar_ok else str(text)
+        return _xesc(s)
 
     L = {
         "objectives": T("الأهداف التعليمية") if is_ar else "◆  LEARNING OBJECTIVES",
@@ -1867,8 +1956,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
         else:
             lc, rc = W*0.27, W*0.73
             kw_rows = [[
-                Paragraph(k.get("term", ""),       ST["kw_term"]),
-                Paragraph(k.get("definition", ""), ST["kw_def"]),
+                Paragraph(_xesc(k.get("term", "")),       ST["kw_term"]),
+                Paragraph(_xesc(k.get("definition", "")), ST["kw_def"]),
             ] for k in keywords]
         kw_t = Table(kw_rows, colWidths=[lc, rc])
         kts = [
@@ -2807,14 +2896,17 @@ def _fetch_captions(video_id):
 
 
 def _transcribe_with_whisper(video_id):
-    """Download audio to /tmp, transcribe with Groq Whisper, delete immediately."""
-    import glob
+    """Download audio to a private temp dir, transcribe with Groq Whisper, delete
+    immediately. A per-request mkdtemp avoids predictable /tmp names and the race
+    where two concurrent requests for the same video clobber each other's files."""
+    import glob, tempfile, shutil
     try:
         import yt_dlp
     except ImportError:
         raise ValueError("yt-dlp not installed — cannot transcribe audio.")
 
-    prefix = os.path.join("/tmp", f"yt_{video_id}")
+    workdir = tempfile.mkdtemp(prefix="yt_")
+    prefix  = os.path.join(workdir, "audio")
     try:
         ydl_opts = {
             # Prefer smallest audio: opus<96k > m4a < 96k > any audio
@@ -2824,6 +2916,7 @@ def _transcribe_with_whisper(video_id):
             "no_warnings": True,
             "noplaylist": True,
             "socket_timeout": 30,
+            "max_filesize": 22 * 1024 * 1024,  # abort mid-download instead of filling disk
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
@@ -2854,11 +2947,7 @@ def _transcribe_with_whisper(video_id):
         return r.text.strip()
 
     finally:
-        for f in glob.glob(prefix + ".*"):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _fetch_youtube_transcript(video_id):
@@ -2898,7 +2987,8 @@ def _extract_video_id(url):
     """Extract YouTube video ID — only accepts youtube.com and youtu.be hostnames."""
     import urllib.parse
     parsed = urllib.parse.urlparse(url)
-    host = (parsed.hostname or "").lower().lstrip("www.")
+    host = (parsed.hostname or "").lower()
+    host = host[4:] if host.startswith("www.") else host  # strip prefix, not charset
     if host not in ("youtube.com", "youtu.be", "m.youtube.com"):
         return None
     patterns = [
@@ -2989,10 +3079,14 @@ def _yt_duration(video_id):
 
 @app.route("/api/youtube", methods=["POST"])
 def youtube_transcript():
+    # Rate-limit BEFORE the expensive yt-dlp scrape / Whisper path (this endpoint
+    # had none, so anon callers could force unbounded yt-dlp + paid transcription).
+    if not _check_rate_limit(_client_ip(), scope="youtube", limit=_RATE_MAX):
+        return jsonify({"error": "Too many requests — please wait a moment and try again."}), 429
     uid = _auth_optional(request)
     anon_ip = None
 
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
     lang_param = data.get("language", "auto")
     detail_level = data.get("detail", "standard")
@@ -3153,6 +3247,9 @@ def _fetch_url_text(url):
 
 @app.route("/api/summarize-text", methods=["POST"])
 def summarize_text():
+    # Rate-limit BEFORE the server-side URL fetch + multi-pass LLM run.
+    if not _check_rate_limit(_client_ip(), scope="text", limit=_RATE_MAX):
+        return jsonify({"error": "Too many requests — please wait a moment and try again."}), 429
     uid = _auth_optional(request)
     anon_ip = None
     if uid:
@@ -3197,6 +3294,9 @@ def summarize_text():
     if not text:
         _refund_credit(uid, anon_ip)
         return jsonify({"error": "No text or URL provided"}), 400
+
+    # Cap total input so a huge paste / large fetched page can't amplify Groq cost.
+    text = text[:500_000]
 
     language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
     gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz, uid=uid, anon_ip=anon_ip)

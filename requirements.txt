@@ -1,17 +1,22 @@
-flask
+# Security floors on the deps most exposed to hostile input (uploaded files,
+# fetched URLs, JWTs). These are minimums, not exact pins — for full
+# reproducibility, generate a lockfile with hashes (pip-compile) and pin ==.
+flask>=3.0.0
 flask-cors
+Werkzeug>=3.0.6           # safe_join / debugger hardening
 python-pptx
 python-docx
-requests
+lxml>=5.1.0               # XML parser behind python-pptx/docx
+requests>=2.32.0
 reportlab
 olefile
-pypdf
+pypdf>=4.2.0              # older versions had parsing-DoS CVEs
 gunicorn
-yt-dlp
+yt-dlp>=2025.1.1
 pycryptodome
 arabic-reshaper
 python-bidi
 supabase
 stripe
-PyJWT
-cryptography
+PyJWT>=2.8.0
+cryptography>=42.0.0
