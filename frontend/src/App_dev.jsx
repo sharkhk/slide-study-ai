@@ -289,12 +289,16 @@ function FlashCardModal({ jobId, onClose }) {
       .catch(() => setError('Failed to load flashcards'))
   }, [jobId])
 
+  // Key "known" by a stable card identity (the question text), NOT array index,
+  // so shuffling / review-mode filtering can't misalign the known map.
+  const cardKey = (c) => c && c.q
+
   const activeCards = cards ? (reviewMode
-    ? cards.filter((_, i) => !known[i])
+    ? cards.filter(c => !known[cardKey(c)])
     : cards) : []
 
   const currentCard = activeCards[idx]
-  const knownCount  = cards ? cards.filter((_, i) => known[i]).length : 0
+  const knownCount  = cards ? cards.filter(c => known[cardKey(c)]).length : 0
 
   const speak = (text) => {
     if (!window.speechSynthesis) return
@@ -306,16 +310,19 @@ function FlashCardModal({ jobId, onClose }) {
   }
 
   const mark = (isKnown) => {
-    if (!cards) return
-    const globalIdx = cards.indexOf(currentCard)
-    const newKnown = { ...known, [globalIdx]: isKnown }
+    if (!cards || !currentCard) return
+    const newKnown = { ...known, [cardKey(currentCard)]: isKnown }
     saveKnown(newKnown)
     window.speechSynthesis?.cancel()
     setSpeaking(false)
     setFlipped(false)
-    if (idx + 1 >= activeCards.length) {
+    // In review mode, marking a card "known" removes it from the active list,
+    // so the next card slides into the current index — don't advance past it.
+    const removed   = reviewMode && isKnown
+    const remaining = removed ? activeCards.length - 1 : activeCards.length
+    if (idx + (removed ? 0 : 1) >= remaining) {
       setRoundDone(true)
-    } else {
+    } else if (!removed) {
       setIdx(idx + 1)
     }
   }
@@ -807,7 +814,9 @@ function OverviewModal({ jobId, onClose }) {
                         {isOpen && bullets.length > 0 && (
                           <div style={{padding:'0.5rem 0.9rem 0.8rem',borderTop:'1px solid var(--glass-border)'}}>
                             {bullets.map((b,j) => {
-                              const text = typeof b === 'string' ? b : (b.text || b.fact || b.point || JSON.stringify(b))
+                              const text = typeof b === 'string' ? b
+                                : (b && typeof b === 'object') ? (b.text || b.fact || b.point || JSON.stringify(b))
+                                : String(b ?? '')
                               return (
                                 <div key={j} style={{
                                   fontSize:'0.82rem',color:'var(--text-secondary)',
@@ -835,8 +844,8 @@ function OverviewModal({ jobId, onClose }) {
                   </div>
                   <div style={{display:'flex',flexWrap:'wrap',gap:'0.4rem'}}>
                     {(guide.keywords||[]).slice(0,30).map((k,i) => {
-                      const term = typeof k === 'object' ? k.term : k
-                      const def  = typeof k === 'object' ? k.definition : ''
+                      const term = (k && typeof k === 'object') ? k.term : k
+                      const def  = (k && typeof k === 'object') ? k.definition : ''
                       return (
                         <span key={i} title={def||undefined} style={{
                           padding:'0.28rem 0.72rem',borderRadius:50,
@@ -1367,6 +1376,7 @@ export default function App() {
 
   // ── Supabase init + auth ────────────────────────────────────────────────────
   useEffect(() => {
+    let authSub = null
     fetch('/api/config')
       .then(r => r.json())
       .then(cfg => {
@@ -1406,9 +1416,10 @@ export default function App() {
             setRefStats(null)
           }
         })
-        return () => subscription.unsubscribe()
+        authSub = subscription
       })
       .catch(() => setAuthLoading(false))
+    return () => { if (authSub) authSub.unsubscribe() }
   }, [])
 
   const _fetchUserInfo = (token) => {
@@ -1544,6 +1555,8 @@ export default function App() {
               updateItem(item.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
               if (ev.tokens_remaining !== undefined && userInfo)
                 setUserInfo(u => ({ ...u, tokens_remaining: ev.tokens_remaining }))
+              else if (ev.tokens_remaining !== undefined && !session)
+                setAnonInfo(a => a ? { ...a, remaining: ev.tokens_remaining } : a)
               resolve()
             } else {
               updateItem(item.id, { step: ev.step, msg: ev.msg })
@@ -1643,7 +1656,7 @@ export default function App() {
     if (!item.jobId) return
     const a = document.createElement('a')
     a.href = `/api/download/${item.jobId}`
-    a.download = item.name.replace(/\.(pptx?|pdf)$/i, '') + '_study_guide.pdf'
+    a.download = item.name.replace(/\.(pptx?|pdf|docx?|txt)$/i, '') + '_study_guide.pdf'
     a.click()
     toast('PDF downloading…', 'info')
   }
@@ -1775,7 +1788,7 @@ export default function App() {
                 )}
 
                 <button className="ctrl-btn" onClick={() => setLang(p => p === 'en' ? 'ar' : p === 'ar' ? 'auto' : 'en')}>
-                  <Globe size={13} /><span className="ctrl-label">{lang === 'ar' ? ' EN' : lang === 'auto' ? ' عربي' : ' عربي'}</span>
+                  <Globe size={13} /><span className="ctrl-label">{lang === 'en' ? ' عربي' : lang === 'ar' ? ' Auto' : ' EN'}</span>
                 </button>
                 <button className="ctrl-btn" onClick={() => setTheme(p => p === 'dark' ? 'light' : 'dark')}>
                   {theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}

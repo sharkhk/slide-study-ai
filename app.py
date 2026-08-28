@@ -216,20 +216,49 @@ def _consume_token(user_id):
         print(f"consume_token error: {exc}", flush=True)
         return False, 0, "db_error"
 
+# Flips to False if the add_tokens RPC isn't installed yet (see migrations/).
+_add_tokens_rpc = True
+
+def _add_tokens(sb, user_id, delta):
+    """Atomically add (or subtract) `delta` tokens and return the new balance.
+    Uses the add_tokens SQL RPC when available — a plain read-modify-write here
+    races with the atomic consume_token RPC and loses concurrent decrements.
+    Falls back to read-modify-write if the RPC is not installed."""
+    global _add_tokens_rpc
+    if not sb or not user_id:
+        return None
+    if _add_tokens_rpc:
+        try:
+            r = sb.rpc("add_tokens", {"p_user_id": user_id, "p_delta": delta}).execute()
+            if isinstance(r.data, int):
+                return r.data
+            if isinstance(r.data, list) and r.data:
+                return r.data[0]
+            return r.data
+        except Exception as exc:
+            _add_tokens_rpc = False
+            _log.warning("add_tokens RPC unavailable — using read-modify-write: %s", exc)
+    try:
+        row = sb.table("users").select("tokens_remaining").eq("id", user_id).single().execute()
+        cur = (row.data or {}).get("tokens_remaining")
+        if cur is None:
+            return None
+        new_bal = cur + delta
+        sb.table("users").update({"tokens_remaining": new_bal}).eq("id", user_id).execute()
+        return new_bal
+    except Exception as exc:
+        _log.error("_add_tokens fallback error: %s", exc)
+        return None
+
 def _refund_token(user_id):
     """Best-effort: give a token back when a job fails after consuming it,
     so users are only charged for a study guide they actually receive."""
     sb = _get_sb()
     if not sb or not user_id:
         return
-    try:
-        row = sb.table("users").select("tokens_remaining").eq("id", user_id).single().execute()
-        cur = (row.data or {}).get("tokens_remaining")
-        if cur is not None:
-            sb.table("users").update({"tokens_remaining": cur + 1}).eq("id", user_id).execute()
-            _log.info("Refunded 1 token to %s (%s -> %s)", user_id, cur, cur + 1)
-    except Exception as exc:
-        print(f"refund_token error: {exc}", flush=True)
+    new_bal = _add_tokens(sb, user_id, 1)
+    if new_bal is not None:
+        _log.info("Refunded 1 token to %s (-> %s)", user_id, new_bal)
 
 def _get_user(user_id):
     """Fetch full user row from Supabase."""
@@ -269,11 +298,10 @@ def _award_referral(new_subscriber_id, sb):
         already_paid = r.data.get("referral_paid", False)
         if not referrer_id or already_paid:
             return
-        ref_row = sb.table("users").select("tokens_remaining").eq("id", referrer_id).single().execute()
-        if ref_row.data:
-            new_bal = (ref_row.data.get("tokens_remaining") or 0) + 10
-            sb.table("users").update({"tokens_remaining": new_bal}).eq("id", referrer_id).execute()
+        # Mark paid FIRST so a redelivered/duplicate event can't double-award,
+        # then grant atomically.
         sb.table("users").update({"referral_paid": True}).eq("id", new_subscriber_id).execute()
+        _add_tokens(sb, referrer_id, 10)
         _log.info(f"Referral reward: 10 tokens → {referrer_id} (subscriber={new_subscriber_id})")
     except Exception as exc:
         _log.error(f"_award_referral error: {exc}")
@@ -385,6 +413,15 @@ _visitors    = []
 _vis_lock    = threading.Lock()
 _blocked_ips = set()   # IPs that are blocked from using the app
 
+# Geo-enrichment cache + concurrency guard: without this, every non-asset
+# request spawns a thread doing a 5s HTTP call to ip-api.com (which caps at
+# 45/min), so a burst would exhaust threads and hammer the API.
+_geo_cache        = {}
+_geo_cache_order  = []
+_geo_inflight     = set()
+_geo_lock         = threading.Lock()
+_GEO_MAX_INFLIGHT = 6
+
 _PRIVATE_RANGES = (
     "127.", "::1", "10.", "192.168.", "172.16.", "172.17.", "172.18.",
     "172.19.", "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
@@ -407,22 +444,37 @@ def _safe_err(e):
 
 def _client_ip():
     ra = request.remote_addr or "unknown"
+    # Behind Cloudflare, CF-Connecting-IP is set by the edge and CANNOT be
+    # spoofed by the client (Cloudflare overwrites any client-supplied value).
+    # This is our trust anchor, so it takes priority over everything else.
+    cf = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if cf:
+        return cf
     if not _is_private(ra):
         return ra
-    fwd = (request.headers.get("CF-Connecting-IP") or
-           request.headers.get("X-Forwarded-For", "").split(",")[0].strip())
-    return fwd or ra
+    # No trusted CF header and remote_addr is a private proxy hop. Fall back to
+    # the LAST X-Forwarded-For entry (appended by the nearest trusted proxy) —
+    # NOT the first, which is client-supplied and trivially spoofable.
+    parts = [p.strip() for p in request.headers.get("X-Forwarded-For", "").split(",") if p.strip()]
+    return parts[-1] if parts else ra
+
+def _cache_geo(ip, geo):
+    with _geo_lock:
+        _geo_cache[ip] = geo
+        _geo_cache_order.append(ip)
+        if len(_geo_cache_order) > 2000:
+            _geo_cache.pop(_geo_cache_order.pop(0), None)
+        _geo_inflight.discard(ip)
 
 def _enrich_geo(entry, ip):
-    """Background thread: full geolocation via ip-api.com."""
+    """Background thread: full geolocation via ip-api.com. Result is cached so
+    repeat visitors don't re-spawn a thread / re-hit the API."""
     if _is_private(ip):
+        geo = {"country": "Local / LAN", "region": "", "city": "localhost",
+               "isp": "private network", "lat": "", "lon": ""}
         with _vis_lock:
-            entry["country"] = "Local / LAN"
-            entry["region"]  = ""
-            entry["city"]    = "localhost"
-            entry["isp"]     = "private network"
-            entry["lat"]     = ""
-            entry["lon"]     = ""
+            entry.update(geo)
+        _cache_geo(ip, geo)
         return
     try:
         r = http.get(
@@ -432,16 +484,23 @@ def _enrich_geo(entry, ip):
         )
         d = r.json()
         if d.get("status") != "success":
+            with _geo_lock:
+                _geo_inflight.discard(ip)
             return
+        geo = {
+            "country": d.get("country", ""),
+            "region":  d.get("regionName", ""),
+            "city":    d.get("city", ""),
+            "isp":     d.get("org") or d.get("isp", ""),
+            "lat":     d.get("lat", ""),
+            "lon":     d.get("lon", ""),
+        }
         with _vis_lock:
-            entry["country"] = d.get("country", "")
-            entry["region"]  = d.get("regionName", "")
-            entry["city"]    = d.get("city", "")
-            entry["isp"]     = d.get("org") or d.get("isp", "")
-            entry["lat"]     = d.get("lat", "")
-            entry["lon"]     = d.get("lon", "")
+            entry.update(geo)
+        _cache_geo(ip, geo)
     except Exception:
-        pass
+        with _geo_lock:
+            _geo_inflight.discard(ip)
 
 @app.before_request
 def track_visitor():
@@ -476,8 +535,19 @@ def track_visitor():
         _visitors.insert(0, entry)
         if len(_visitors) > 1000:
             _visitors.pop()
-    # Always enrich — CF headers don't give city/ISP/coords
-    threading.Thread(target=_enrich_geo, args=(entry, ip), daemon=True).start()
+    # Enrich geo (CF headers don't give city/ISP/coords), but reuse the cache,
+    # dedupe in-flight lookups per IP, and cap concurrent threads so a burst
+    # can't exhaust threads or exceed ip-api.com's rate limit.
+    do_enrich = False
+    with _geo_lock:
+        cached = _geo_cache.get(ip)
+        if cached is not None:
+            entry.update(cached)
+        elif ip not in _geo_inflight and len(_geo_inflight) < _GEO_MAX_INFLIGHT:
+            _geo_inflight.add(ip)
+            do_enrich = True
+    if do_enrich:
+        threading.Thread(target=_enrich_geo, args=(entry, ip), daemon=True).start()
 
 
 @app.route("/admin/block", methods=["POST"])
@@ -527,43 +597,49 @@ def admin_page():
             return ""
         return "".join(chr(0x1F1E6 + ord(c) - ord('A')) for c in cc.upper())
 
+    # JS-string-safe escaper for values dropped into an onclick='...(\'x\')'
+    def _js(s):
+        return _he(s).replace("\\", "\\\\").replace("'", "\\'")
+
     rows = ""
     for v in vis_copy:
         blocked = v["ip"] in blocked_copy
-        cc = ""
-        # Try to extract country code from country name via CF header stored separately
+        # All visitor fields below are attacker-controlled (UA/path/headers, or
+        # geo derived from a spoofable IP) — escape every one to prevent stored XSS.
+        ip_h    = _he(v.get("ip", ""))
+        ip_js   = _js(v.get("ip", ""))
         loc_parts = [p for p in [v.get("city",""), v.get("region",""), v.get("country","")] if p]
-        location  = ", ".join(loc_parts) if loc_parts else "—"
+        location  = _he(", ".join(loc_parts)) if loc_parts else "—"
         map_link  = ""
         if v.get("lat") and v.get("lon"):
-            map_link = f'<a href="https://maps.google.com/?q={v["lat"]},{v["lon"]}" target="_blank" style="color:#4f8ef7;font-size:11px">📍 map</a>'
+            map_link = f'<a href="https://maps.google.com/?q={_he(v["lat"])},{_he(v["lon"])}" target="_blank" style="color:#4f8ef7;font-size:11px">📍 map</a>'
         block_btn = (
-            f'<button onclick="unblock(\'{v["ip"]}\')" '
+            f'<button onclick="unblock(\'{ip_js}\')" '
             f'style="background:#16a34a;color:#fff;border:none;padding:3px 10px;border-radius:6px;cursor:pointer;font-size:12px">✓ Unblock</button>'
             if blocked else
-            f'<button onclick="blockIp(\'{v["ip"]}\')" '
+            f'<button onclick="blockIp(\'{ip_js}\')" '
             f'style="background:#dc2626;color:#fff;border:none;padding:3px 10px;border-radius:6px;cursor:pointer;font-size:12px">⛔ Block</button>'
         )
         row_style = "background:#1a0a0a" if blocked else ""
         rows += f"""
           <tr style="{row_style}">
-            <td style="color:#8aa0c8;white-space:nowrap">{v['time']}</td>
-            <td><b style="{'color:#f87171' if blocked else ''}">{v['ip']}</b>
+            <td style="color:#8aa0c8;white-space:nowrap">{_he(v.get('time',''))}</td>
+            <td><b style="{'color:#f87171' if blocked else ''}">{ip_h}</b>
                 {'<span style="background:#7f1d1d;color:#fca5a5;padding:1px 6px;border-radius:4px;font-size:10px;margin-left:4px">BLOCKED</span>' if blocked else ''}
             </td>
-            <td>{v.get('country','—')}</td>
+            <td>{_he(v.get('country','—'))}</td>
             <td>{location} {map_link}</td>
-            <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8aa0c8">{v.get('isp','—')}</td>
-            <td style="color:#6b7fa8">{v['path']}</td>
-            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#4a5f80">{v['ua']}</td>
+            <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8aa0c8">{_he(v.get('isp','—'))}</td>
+            <td style="color:#6b7fa8">{_he(v.get('path',''))}</td>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#4a5f80">{_he(v.get('ua',''))}</td>
             <td>{block_btn}</td>
           </tr>"""
 
     blocked_section = ""
     if blocked_copy:
         blocked_rows = "".join(
-            f'<tr><td style="color:#f87171;padding:6px 12px">{ip}</td>'
-            f'<td><button onclick="unblock(\'{ip}\')" style="background:#16a34a;color:#fff;border:none;padding:2px 10px;border-radius:6px;cursor:pointer;font-size:12px">Unblock</button></td></tr>'
+            f'<tr><td style="color:#f87171;padding:6px 12px">{_he(ip)}</td>'
+            f'<td><button onclick="unblock(\'{_js(ip)}\')" style="background:#16a34a;color:#fff;border:none;padding:2px 10px;border-radius:6px;cursor:pointer;font-size:12px">Unblock</button></td></tr>'
             for ip in sorted(blocked_copy)
         )
         blocked_section = f"""
@@ -626,7 +702,7 @@ def admin_page():
 </div>
 <div id="toast"></div>
 <script>
-const TOKEN = "{token}";
+const TOKEN = "{str(token).replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))}";
 function toast(msg, color="#16a34a"){{
   const t = document.getElementById("toast");
   t.textContent = msg; t.style.background = color; t.style.display = "block";
@@ -1679,7 +1755,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
     sections = guide.get("sections", [])
     if sections:
         toc_rows = [[Paragraph(L["contents"], ST["toc_title"])]]
-        all_items = [(T(s["title"]), "") for s in sections] + L["kw_append"]
+        all_items = [(T(s.get("title", "")), "") for s in sections] + L["kw_append"]
         for i, (name, _) in enumerate(all_items, 1):
             dot_row = Table(
                 [[Paragraph(f"{i}.  {name}", ST["toc_item"]), Paragraph("", ST["toc_item"])]],
@@ -2049,6 +2125,25 @@ def stripe_portal():
 
 
 # ── Stripe — webhook ───────────────────────────────────────────────────────────
+# Bounded in-memory idempotency guard: Stripe redelivers events (retries,
+# manual resends), and our handlers overwrite token balances — replaying a
+# checkout.completed would re-grant tokens the user already spent.
+_processed_events       = set()
+_processed_events_order = []
+_proc_events_lock       = threading.Lock()
+
+def _event_already_processed(eid):
+    if not eid:
+        return False
+    with _proc_events_lock:
+        if eid in _processed_events:
+            return True
+        _processed_events.add(eid)
+        _processed_events_order.append(eid)
+        if len(_processed_events_order) > 2000:
+            _processed_events.discard(_processed_events_order.pop(0))
+    return False
+
 @app.route("/api/stripe/webhook", methods=["POST"])
 def stripe_webhook():
     if not _stripe:
@@ -2062,6 +2157,10 @@ def stripe_webhook():
         return jsonify({"error": "Invalid payload"}), 400
     except _stripe.error.SignatureVerificationError:
         return jsonify({"error": "Invalid signature"}), 400
+
+    # Ack redelivered events without re-running side effects.
+    if _event_already_processed(event.get("id")):
+        return jsonify({"ok": True, "deduped": True})
 
     sb  = _get_sb()
     typ = event["type"]
@@ -2081,7 +2180,15 @@ def stripe_webhook():
         sub         = event["data"]["object"]
         cust_id     = sub.get("customer")
         status      = sub.get("status", "")
+        # current_period_end moved from the subscription top level onto its
+        # items in recent Stripe API versions — fall back to the first item.
         period_end  = sub.get("current_period_end")
+        if not period_end:
+            try:
+                _items = (sub.get("items") or {}).get("data") or []
+                period_end = _items[0].get("current_period_end") if _items else None
+            except Exception:
+                period_end = None
         if sb and cust_id:
             update = {"subscription_id": sub.get("id", "")}
             if status == "active":
@@ -2467,7 +2574,9 @@ def view_cards(job_id):
     if not cards:
         return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No flash cards available.</p>")
 
-    cards_json = json.dumps(cards)
+    # Escape "<" so model-derived content can't break out of the <script> block
+    # (json.dumps does NOT escape "</script>"). < is valid JSON and JS.
+    cards_json = json.dumps(cards).replace("<", "\\u003c")
     css = """
   .fc-counter{text-align:center;color:#8aa0c8;font-size:.88rem;margin-bottom:1.2rem}
   .card{perspective:900px;height:220px;cursor:pointer;margin-bottom:1.5rem}
@@ -2545,7 +2654,8 @@ def view_quiz(job_id):
     if not mcqs:
         return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No quiz questions available.</p>")
 
-    mcqs_json = json.dumps(mcqs)
+    # Escape "<" so model-derived content can't break out of the <script> block.
+    mcqs_json = json.dumps(mcqs).replace("<", "\\u003c")
     css = """
   .q-num{color:#8aa0c8;font-size:.82rem;margin-bottom:.4rem}
   .q-text{font-size:1rem;font-weight:600;color:#e8f0ff;margin-bottom:1rem;line-height:1.5}
@@ -2960,25 +3070,60 @@ def youtube_transcript():
 
 # ── URL / pasted text endpoint ─────────────────────────────────────────────────
 
+class _PinnedIPAdapter(http.adapters.HTTPAdapter):
+    """Pin the socket connection to a pre-validated IP so a DNS rebind can't
+    swap in an internal address between our SSRF check and the actual request,
+    while preserving TLS SNI + certificate hostname verification for the host."""
+    def __init__(self, host, pinned_ip, is_https, *args, **kwargs):
+        self._host      = host
+        self._pinned_ip = pinned_ip
+        self._is_https  = is_https
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        if self._is_https:
+            kwargs["server_hostname"] = self._host   # SNI = real host
+            kwargs["assert_hostname"] = self._host    # verify cert against real host
+        return super().init_poolmanager(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(request.url)
+        request.headers["Host"] = parsed.netloc      # keep the original Host header
+        ip = f"[{self._pinned_ip}]" if ":" in self._pinned_ip else self._pinned_ip
+        netloc = f"{ip}:{parsed.port}" if parsed.port else ip
+        request.url = urlunparse(parsed._replace(netloc=netloc))
+        return super().send(request, **kwargs)
+
+
 def _fetch_url_text(url):
     """Fetch a PUBLIC webpage and extract readable text. SSRF guard: public
-    http(s) only, no private/internal addresses, no redirects, 5 MB cap."""
+    http(s) only, no private/internal addresses, no redirects, 5 MB cap. The
+    connection is pinned to the vetted IP to defeat DNS-rebinding attacks."""
     from urllib.parse import urlparse
     import socket, ipaddress
     p = urlparse(url)
     if p.scheme not in ("http", "https") or not p.hostname:
         raise ValueError("Only public http(s) URLs are supported.")
+    port = p.port or (443 if p.scheme == "https" else 80)
     try:
-        infos = socket.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80))
+        infos = socket.getaddrinfo(p.hostname, port, proto=socket.IPPROTO_TCP)
     except OSError:
         raise ValueError("Could not resolve URL host.")
+    pinned_ip = None
     for info in infos:
         addr = ipaddress.ip_address(info[4][0])
         if (addr.is_private or addr.is_loopback or addr.is_link_local or
                 addr.is_reserved or addr.is_multicast or addr.is_unspecified):
             raise ValueError("URL points to a private/internal address — not allowed.")
+        if pinned_ip is None:
+            pinned_ip = str(addr)
+    if not pinned_ip:
+        raise ValueError("Could not resolve URL host.")
+    sess = http.Session()
+    sess.mount(f"{p.scheme}://", _PinnedIPAdapter(p.hostname, pinned_ip, p.scheme == "https"))
     try:
-        r = http.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"},
+        r = sess.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"},
                      allow_redirects=False, stream=True)
         if 300 <= r.status_code < 400:
             raise ValueError("URL redirects are not supported — paste the final URL.")
@@ -2990,6 +3135,8 @@ def _fetch_url_text(url):
         raise
     except Exception as e:
         raise ValueError(f"Could not fetch URL: {e}")
+    finally:
+        sess.close()
     html = content.decode(r.encoding or "utf-8", "replace")
     # Remove script/style blocks
     html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
@@ -3024,7 +3171,10 @@ def summarize_text():
                 "code": "signin_for_more", "tokens_remaining": 0
             }), 402
 
-    data = request.json or {}
+    # silent=True: a non-JSON body must not raise here (it would 415/500 AFTER
+    # the token was already consumed above, with no refund). Empty body → {} →
+    # falls through to the "No text or URL" refund path below.
+    data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
     url  = (data.get("url")  or "").strip()
     lang_param   = data.get("language", "auto")
@@ -3077,7 +3227,10 @@ def export_anki(job_id):
     writer.writerow(["front", "back"])
     def _csv_safe(v):
         v = str(v)
-        return "'" + v if v[:1] in ("=", "+", "-", "@", "\t") else v
+        # Excel/Sheets evaluate a formula even when it's preceded by leading
+        # whitespace or a carriage return, so test the first NON-blank char.
+        stripped = v.lstrip(" \t\r\n")
+        return "'" + v if stripped[:1] in ("=", "+", "-", "@") else v
     for fc in flashcards:
         writer.writerow([_csv_safe(fc.get("q", "")), _csv_safe(fc.get("a", ""))])
 
