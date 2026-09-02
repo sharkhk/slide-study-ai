@@ -626,11 +626,65 @@ def admin_clear_log():
     return jsonify({"ok": True})
 
 
+# Token gate for /admin. Lets you enter the admin token once; the browser then
+# remembers it (localStorage) and auto-opens the dashboard on later visits, so
+# you never retype it. The token value is only ever entered by you.
+ADMIN_GATE_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admin — Alimne</title>
+<style>
+ *{box-sizing:border-box;margin:0;padding:0}
+ body{font-family:'Segoe UI',system-ui,sans-serif;background:#050d1a;color:#e8f0ff;
+      min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
+ .card{background:#0a1628;border:1px solid #1a3a6e;border-radius:14px;padding:1.8rem;max-width:400px;width:100%}
+ h2{font-size:1.1rem;margin:0 0 .4rem;display:flex;gap:.5rem;align-items:center}
+ p{color:#8aa0c8;font-size:.88rem;margin:0 0 1.1rem;line-height:1.5}
+ input[type=password]{width:100%;padding:.7rem;border-radius:8px;border:1px solid #1a3a6e;
+      background:#050d1a;color:#e8f0ff;font-size:.9rem;margin-bottom:.75rem}
+ button{width:100%;padding:.72rem;border-radius:8px;border:none;background:#4f8ef7;color:#fff;
+      font-weight:600;font-size:.9rem;cursor:pointer}
+ button:hover{opacity:.9}
+ .err{color:#f87171;font-size:.85rem;margin-bottom:.75rem;display:none}
+ label{display:flex;gap:.5rem;align-items:center;color:#8aa0c8;font-size:.82rem;margin:0 0 1rem;cursor:pointer}
+</style></head><body>
+<div class="card">
+  <h2>🔒 Alimne Admin</h2>
+  <p>Enter your admin token once. This browser will remember it, so you won't be asked again.</p>
+  <div class="err" id="err">That token was rejected — check it and try again.</div>
+  <input id="tok" type="password" placeholder="Admin token" autocomplete="off" autofocus>
+  <label><input type="checkbox" id="remember" checked> Remember on this device</label>
+  <button id="go">Open dashboard</button>
+</div>
+<script>
+ var KEY = "alimne_admin_token";
+ var tried = new URLSearchParams(location.search).get("token");
+ if (tried) {
+   // A token was supplied but we still landed on this gate => it was invalid.
+   try { localStorage.removeItem(KEY); } catch (e) {}
+   document.getElementById("err").style.display = "block";
+ } else {
+   var saved = null; try { saved = localStorage.getItem(KEY); } catch (e) {}
+   if (saved) { location.replace("/admin?token=" + encodeURIComponent(saved)); }
+ }
+ function go() {
+   var v = document.getElementById("tok").value.trim();
+   if (!v) return;
+   try {
+     if (document.getElementById("remember").checked) localStorage.setItem(KEY, v);
+     else localStorage.removeItem(KEY);
+   } catch (e) {}
+   location.href = "/admin?token=" + encodeURIComponent(v);
+ }
+ document.getElementById("go").addEventListener("click", go);
+ document.getElementById("tok").addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
+</script>
+</body></html>"""
+
+
 @app.route("/admin")
 def admin_page():
     if not _admin_ok():
-        return ("<h2 style='font-family:sans-serif;margin:2rem'>🔒 Unauthorized — "
-                "add <code>?token=YOUR_TOKEN</code> to the URL</h2>"), 401
+        return ADMIN_GATE_HTML, 401
     token = ADMIN_TOKEN
     with _vis_lock:
         vis_copy     = list(_visitors)
@@ -693,6 +747,65 @@ def admin_page():
           <table style="border-collapse:collapse;font-size:13px"><tbody>{blocked_rows}</tbody></table>
         </div>"""
 
+    # ── Subscribers (from the Supabase `users` table) ────────────────────────────
+    subs_rows = ""
+    subs_total = 0
+    subs_active = 0
+    subs_error = ""
+    try:
+        _sb = _get_sb()
+        if _sb is None:
+            subs_error = "Supabase is not configured on this server (dev mode)."
+        else:
+            _res = _sb.table("users").select("*").limit(1000).execute()
+            _users = _res.data or []
+            _users.sort(key=lambda u: str(u.get("created_at") or ""), reverse=True)
+            subs_total = len(_users)
+            for u in _users:
+                status = str(u.get("subscription_status") or "free")
+                active = status == "active"
+                if active:
+                    subs_active += 1
+                renews = str(u.get("subscription_period_end") or "")[:10] or "—"
+                joined = str(u.get("created_at") or "")[:10] or "—"
+                if active:
+                    badge = '<span style="background:#065f46;color:#6ee7b7;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:600">● active</span>'
+                else:
+                    badge = f'<span style="background:#16233f;color:#8aa0c8;padding:2px 9px;border-radius:5px;font-size:11px">{_he(status)}</span>'
+                subs_rows += f"""
+                  <tr>
+                    <td><b>{_he(u.get('email') or '—')}</b></td>
+                    <td style="color:#b9c9e6">{_he(u.get('name') or '—')}</td>
+                    <td>{badge}</td>
+                    <td style="text-align:center;font-weight:600">{_he(u.get('tokens_remaining', 0))}</td>
+                    <td style="color:#8aa0c8;white-space:nowrap">{_he(renews)}</td>
+                    <td style="color:#8aa0c8;white-space:nowrap">{_he(joined)}</td>
+                  </tr>"""
+    except Exception as _e:
+        subs_error = str(_e)
+
+    subs_th = ("padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;"
+               "background:#0f2040;border-bottom:1px solid #1a3a6e")
+    subs_section = f"""
+    <div style="margin:1.5rem 2rem">
+      <h3 style="margin:0 0 .75rem;color:#e8f0ff;font-size:1rem;display:flex;align-items:center;gap:.5rem">
+        👥 Subscribers
+        <span style="background:#4f8ef7;color:#fff;padding:2px 10px;border-radius:20px;font-size:12px">{subs_total} users</span>
+        <span style="background:#065f46;color:#6ee7b7;padding:2px 10px;border-radius:20px;font-size:12px">{subs_active} active</span>
+      </h3>
+      {f'<p style="color:#f87171;font-size:.85rem;margin-bottom:.5rem">Could not load subscribers: {_he(subs_error)}</p>' if subs_error else ''}
+      <div style="overflow-x:auto;border:1px solid #16233f;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr>
+            <th style="{subs_th}">Email</th><th style="{subs_th}">Name</th>
+            <th style="{subs_th}">Status</th><th style="{subs_th};text-align:center">Tokens</th>
+            <th style="{subs_th}">Renews</th><th style="{subs_th}">Joined</th>
+          </tr></thead>
+          <tbody>{subs_rows if subs_rows else '<tr><td colspan="6" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>"""
+
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <title>Admin — Alimne</title>
@@ -733,7 +846,9 @@ def admin_page():
     <button class="btn btn-red" onclick="clearLog()">🗑 Clear Log</button>
   </div>
 </div>
+{subs_section}
 {blocked_section}
+<h3 style="margin:1.5rem 2rem .5rem;color:#8aa0c8;font-size:.95rem">🌐 Recent visitors</h3>
 <div class="wrap">
 <table>
   <thead><tr>
@@ -748,6 +863,9 @@ def admin_page():
 <div id="toast"></div>
 <script>
 const TOKEN = "{str(token).replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))}";
+// Remember the token on this device so /admin auto-opens next time, and strip
+// the token out of the address bar / history now that it's saved.
+try {{ localStorage.setItem("alimne_admin_token", TOKEN); if (location.search) history.replaceState(null, "", "/admin"); }} catch (e) {{}}
 function toast(msg, color="#16a34a"){{
   const t = document.getElementById("toast");
   t.textContent = msg; t.style.background = color; t.style.display = "block";
