@@ -632,6 +632,47 @@ def admin_clear_log():
     return jsonify({"ok": True})
 
 
+# Effective monthly price (USD) of the Pro plan, read from the live Stripe price
+# and cached for an hour so the admin dashboard doesn't hit Stripe on every load.
+# Any recurring interval (year/month/week/day + interval_count) is normalised to
+# a monthly figure. Falls back to PRO_MONTHLY_USD when Stripe is unavailable.
+_price_cache = {"amount": None, "ts": 0.0}
+_price_lock  = threading.Lock()
+
+def _monthly_price_usd():
+    now = time.time()
+    with _price_lock:
+        if _price_cache["amount"] is not None and now - _price_cache["ts"] < 3600:
+            return _price_cache["amount"]
+    amount = PRO_MONTHLY_USD  # fallback
+    if STRIPE_PRICE_ID and STRIPE_SECRET_KEY:
+        try:
+            import stripe as _stripe
+            _stripe.api_key = STRIPE_SECRET_KEY
+            p = _stripe.Price.retrieve(STRIPE_PRICE_ID)
+            cents = p.get("unit_amount")
+            if cents is not None:
+                val = cents / 100.0
+                rec = p.get("recurring") or {}
+                interval = rec.get("interval")
+                count = rec.get("interval_count", 1) or 1
+                if interval == "year":
+                    val = val / (12.0 * count)
+                elif interval == "week":
+                    val = val * (52.0 / 12.0) / count
+                elif interval == "day":
+                    val = val * (365.0 / 12.0) / count
+                elif interval == "month":
+                    val = val / count
+                amount = round(val, 2)
+        except Exception as exc:
+            _log.warning("Stripe price fetch failed, using fallback $%.2f: %s", amount, exc)
+    with _price_lock:
+        _price_cache["amount"] = amount
+        _price_cache["ts"] = now
+    return amount
+
+
 # Matches a canonical UUID (the Supabase user id). Used to validate admin
 # action targets so a caller can't inject arbitrary values.
 _UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
@@ -895,7 +936,8 @@ def admin_page():
     except Exception as _e:
         subs_error = str(_e)
 
-    mrr = subs_active * PRO_MONTHLY_USD   # estimated monthly recurring revenue
+    monthly_price = _monthly_price_usd()  # live Stripe price (cached ~1h), USD/month
+    mrr = subs_active * monthly_price
     arr = mrr * 12
 
     subs_th = ("padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;"
@@ -916,7 +958,7 @@ def admin_page():
         <div style="background:linear-gradient(135deg,#0a2f3f,#07213a);border:1px solid #16556b;border-radius:12px;padding:.75rem 1.1rem;min-width:190px">
           <div style="color:#6ee7b7;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">MRR (est.)</div>
           <div style="font-size:1.7rem;font-weight:800;color:#e8f0ff;line-height:1.2">${mrr:,.2f}</div>
-          <div style="color:#8aa0c8;font-size:11px">{subs_active} active × ${PRO_MONTHLY_USD:.2f}/mo · ARR ${arr:,.0f}</div>
+          <div style="color:#8aa0c8;font-size:11px">{subs_active} active × ${monthly_price:.2f}/mo · ARR ${arr:,.0f}</div>
         </div>
         <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:130px">
           <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Active</div>
