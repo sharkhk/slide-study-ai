@@ -784,7 +784,7 @@ def admin_page():
     except Exception as _e:
         subs_error = str(_e)
 
-    subs_th = ("padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;"
+    subs_th = ("position:static;padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;"
                "background:#0f2040;border-bottom:1px solid #1a3a6e")
     subs_section = f"""
     <div style="margin:1.5rem 2rem">
