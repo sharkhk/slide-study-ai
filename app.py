@@ -867,6 +867,7 @@ def admin_page():
     subs_rows = ""
     subs_total = 0
     subs_active = 0
+    new_this_week = 0
     subs_error = ""
     try:
         _sb = _get_sb()
@@ -877,6 +878,9 @@ def admin_page():
             _users = _res.data or []
             _users.sort(key=lambda u: str(u.get("created_at") or ""), reverse=True)
             subs_total = len(_users)
+            # Users created in the last 7 days (ISO date-prefix compare — TZ-safe enough).
+            _week_ago = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
+            new_this_week = sum(1 for u in _users if str(u.get("created_at") or "")[:10] >= _week_ago)
             # Referral tallies: how many people each user invited, and how many paid.
             _invited, _invited_paid = {}, {}
             _id_to_email = {}
@@ -964,6 +968,11 @@ def admin_page():
           <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Active</div>
           <div style="font-size:1.7rem;font-weight:800;color:#6ee7b7;line-height:1.2">{subs_active}</div>
           <div style="color:#8aa0c8;font-size:11px">of {subs_total} users</div>
+        </div>
+        <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:130px">
+          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">New this week</div>
+          <div style="font-size:1.7rem;font-weight:800;color:#7cc4ff;line-height:1.2">{new_this_week}</div>
+          <div style="color:#8aa0c8;font-size:11px">joined in last 7 days</div>
         </div>
       </div>
       <div style="display:flex;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap;align-items:center">
