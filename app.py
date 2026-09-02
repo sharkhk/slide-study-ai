@@ -649,7 +649,7 @@ def _monthly_price_usd():
         try:
             import stripe as _stripe
             _stripe.api_key = STRIPE_SECRET_KEY
-            p = _stripe.Price.retrieve(STRIPE_PRICE_ID)
+            p = _stripe.Price.retrieve(STRIPE_PRICE_ID).to_dict()
             cents = p.get("unit_amount")
             if cents is not None:
                 val = cents / 100.0
