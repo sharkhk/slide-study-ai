@@ -70,6 +70,12 @@ STRIPE_SECRET_KEY    = os.environ.get("STRIPE_SECRET_KEY", "")
 STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_ID      = os.environ.get("STRIPE_PRICE_ID", "")
+# Monthly Pro price in USD — used only to estimate MRR on the admin dashboard.
+# Override with the PRO_MONTHLY_USD env var if the price changes.
+try:
+    PRO_MONTHLY_USD = float(os.environ.get("PRO_MONTHLY_USD", "2.99"))
+except (TypeError, ValueError):
+    PRO_MONTHLY_USD = 2.99
 APP_URL              = os.environ.get("APP_URL", "https://slide-study-ai.onrender.com")
 # Shared secret Cloudflare injects (via a Transform Rule adding header
 # X-Origin-Verify) so the origin can tell real Cloudflare traffic from requests
@@ -832,7 +838,9 @@ def admin_page():
             subs_total = len(_users)
             # Referral tallies: how many people each user invited, and how many paid.
             _invited, _invited_paid = {}, {}
+            _id_to_email = {}
             for u in _users:
+                _id_to_email[str(u.get("id") or "")] = u.get("email") or ""
                 rb = u.get("referred_by")
                 if rb:
                     _invited[rb] = _invited.get(rb, 0) + 1
@@ -855,6 +863,7 @@ def admin_page():
                 code   = u.get("referral_code") or "—"
                 inv    = _invited.get(uid_u, 0)
                 inv_p  = _invited_paid.get(uid_u, 0)
+                refby  = _id_to_email.get(str(u.get("referred_by") or ""), "") or "—"
                 if active:
                     badge = '<span style="background:#065f46;color:#6ee7b7;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:600">● active</span>'
                 elif status == "canceling":
@@ -872,18 +881,22 @@ def admin_page():
                     actions += (f' <button onclick="cancelSub(\'{_js(uid_u)}\',\'{_js(str(email))}\')" '
                                 'style="background:#7f1d1d;color:#fecaca;border:none;padding:3px 9px;border-radius:6px;cursor:pointer;font-size:12px">Cancel</button>')
                 subs_rows += f"""
-                  <tr class="subrow" data-email="{_he(str(email).lower())}" data-name="{_he(str(name).lower())}" data-active="{1 if active else 0}" data-status="{_he(status)}" data-tokens="{toks_i}" data-renews="{_he(renews)}" data-joined="{_he(joined)}">
+                  <tr class="subrow" data-email="{_he(str(email).lower())}" data-name="{_he(str(name).lower())}" data-active="{1 if active else 0}" data-status="{_he(status)}" data-tokens="{toks_i}" data-refby="{_he(str(refby).lower())}" data-renews="{_he(renews)}" data-joined="{_he(joined)}">
                     <td><b>{_he(email)}</b></td>
                     <td style="color:#b9c9e6">{_he(name)}</td>
                     <td>{badge}</td>
                     <td style="text-align:center;font-weight:600">{toks_i}</td>
                     <td style="font-size:12px">{ref_html}</td>
+                    <td style="color:#8aa0c8;font-size:12px">{_he(refby)}</td>
                     <td style="color:#8aa0c8;white-space:nowrap">{_he(renews)}</td>
                     <td style="color:#8aa0c8;white-space:nowrap">{_he(joined)}</td>
                     <td style="white-space:nowrap">{actions}</td>
                   </tr>"""
     except Exception as _e:
         subs_error = str(_e)
+
+    mrr = subs_active * PRO_MONTHLY_USD   # estimated monthly recurring revenue
+    arr = mrr * 12
 
     subs_th = ("padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;"
                "background:#0f2040;border-bottom:1px solid #1a3a6e;white-space:nowrap")
@@ -899,6 +912,18 @@ def admin_page():
         <span style="background:#065f46;color:#6ee7b7;padding:2px 10px;border-radius:20px;font-size:12px">{subs_active} active</span>
       </h3>
       {f'<p style="color:#f87171;font-size:.85rem;margin-bottom:.5rem">Could not load subscribers: {_he(subs_error)}</p>' if subs_error else ''}
+      <div style="display:flex;gap:.75rem;margin-bottom:.85rem;flex-wrap:wrap">
+        <div style="background:linear-gradient(135deg,#0a2f3f,#07213a);border:1px solid #16556b;border-radius:12px;padding:.75rem 1.1rem;min-width:190px">
+          <div style="color:#6ee7b7;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">MRR (est.)</div>
+          <div style="font-size:1.7rem;font-weight:800;color:#e8f0ff;line-height:1.2">${mrr:,.2f}</div>
+          <div style="color:#8aa0c8;font-size:11px">{subs_active} active × ${PRO_MONTHLY_USD:.2f}/mo · ARR ${arr:,.0f}</div>
+        </div>
+        <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:130px">
+          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Active</div>
+          <div style="font-size:1.7rem;font-weight:800;color:#6ee7b7;line-height:1.2">{subs_active}</div>
+          <div style="color:#8aa0c8;font-size:11px">of {subs_total} users</div>
+        </div>
+      </div>
       <div style="display:flex;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap;align-items:center">
         <input id="subSearch" placeholder="🔎 Search email or name…" oninput="subFilter()"
                style="background:#050d1a;border:1px solid #1a3a6e;color:#e8f0ff;padding:.45rem .7rem;border-radius:8px;font-size:13px;min-width:220px">
@@ -911,10 +936,10 @@ def admin_page():
         <table id="subTable" style="width:100%;border-collapse:collapse;font-size:13px">
           <thead><tr>
             {_sth("Email", 0)}{_sth("Name", 1)}{_sth("Status", 2)}{_sth("Tokens", 3, True)}
-            <th style="{subs_th}">Referral</th>{_sth("Renews", 5)}{_sth("Joined", 6)}
+            <th style="{subs_th}">Referral</th>{_sth("Referred by", 5)}{_sth("Renews", 6)}{_sth("Joined", 7)}
             <th style="{subs_th}">Actions</th>
           </tr></thead>
-          <tbody id="subBody">{subs_rows if subs_rows else '<tr><td colspan="8" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
+          <tbody id="subBody">{subs_rows if subs_rows else '<tr><td colspan="9" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
         </table>
       </div>
     </div>"""
@@ -1013,7 +1038,7 @@ function subFilter(){{
   var rows = document.querySelectorAll("#subBody tr.subrow");
   var shown = 0;
   rows.forEach(function(r){{
-    var okQ = !q || r.dataset.email.indexOf(q) >= 0 || r.dataset.name.indexOf(q) >= 0;
+    var okQ = !q || r.dataset.email.indexOf(q) >= 0 || r.dataset.name.indexOf(q) >= 0 || (r.dataset.refby||"").indexOf(q) >= 0;
     var okP = !payingOnly || r.dataset.active === "1";
     var vis = okQ && okP;
     r.style.display = vis ? "" : "none";
@@ -1023,7 +1048,7 @@ function subFilter(){{
   if (el) el.textContent = shown + " shown";
 }}
 var _subSort = {{}};
-var _SUBCOLS = {{0:["email",0], 1:["name",0], 2:["status",0], 3:["tokens",1], 5:["renews",0], 6:["joined",0]}};
+var _SUBCOLS = {{0:["email",0], 1:["name",0], 2:["status",0], 3:["tokens",1], 5:["refby",0], 6:["renews",0], 7:["joined",0]}};
 function subSort(idx){{
   var spec = _SUBCOLS[idx]; if(!spec) return;
   var key = spec[0], numeric = spec[1];
@@ -1039,10 +1064,10 @@ function subSort(idx){{
 }}
 function subExportCSV(){{
   var rows = document.querySelectorAll("#subBody tr.subrow");
-  var out = [["Email","Name","Status","Tokens","Renews","Joined"]];
+  var out = [["Email","Name","Status","Tokens","Referred by","Renews","Joined"]];
   rows.forEach(function(r){{
     if (r.style.display === "none") return;
-    out.push([r.dataset.email, r.dataset.name, r.dataset.status, r.dataset.tokens, r.dataset.renews||"", r.dataset.joined||""]);
+    out.push([r.dataset.email, r.dataset.name, r.dataset.status, r.dataset.tokens, r.dataset.refby||"", r.dataset.renews||"", r.dataset.joined||""]);
   }});
   var csv = out.map(function(row){{ return row.map(function(c){{ return '"' + String(c).replace(/"/g,'""') + '"'; }}).join(","); }}).join("\\n");
   var blob = new Blob([csv], {{type:"text/csv"}});
