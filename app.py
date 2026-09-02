@@ -626,6 +626,75 @@ def admin_clear_log():
     return jsonify({"ok": True})
 
 
+# Matches a canonical UUID (the Supabase user id). Used to validate admin
+# action targets so a caller can't inject arbitrary values.
+_UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+
+
+@app.route("/admin/user/grant", methods=["POST"])
+def admin_user_grant():
+    """Grant (or deduct) tokens for one user. Admin-only, header-authenticated."""
+    if not _admin_ok():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    uid = str(data.get("user_id", "")).strip()
+    try:
+        amount = int(data.get("amount", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "amount must be an integer"}), 400
+    if not _UUID_RE.match(uid):
+        return jsonify({"error": "invalid user_id"}), 400
+    if amount == 0 or amount < -1000 or amount > 1000:
+        return jsonify({"error": "amount must be a non-zero integer in [-1000, 1000]"}), 400
+    sb = _get_sb()
+    if sb is None:
+        return jsonify({"error": "Supabase not configured"}), 500
+    new_bal = _add_tokens(sb, uid, amount)
+    if new_bal is None:
+        return jsonify({"error": "user not found or update failed"}), 404
+    _log.info("ADMIN grant %+d tokens -> user %s (new balance %s)", amount, uid, new_bal)
+    return jsonify({"ok": True, "tokens_remaining": new_bal})
+
+
+@app.route("/admin/user/cancel", methods=["POST"])
+def admin_user_cancel():
+    """Cancel a user's subscription. If they have a Stripe subscription it is set
+    to cancel at period end (they keep access until then; the webhook finalises
+    the status). Otherwise the local status is downgraded to free. Admin-only."""
+    if not _admin_ok():
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    uid = str(data.get("user_id", "")).strip()
+    if not _UUID_RE.match(uid):
+        return jsonify({"error": "invalid user_id"}), 400
+    sb = _get_sb()
+    if sb is None:
+        return jsonify({"error": "Supabase not configured"}), 500
+    try:
+        row = sb.table("users").select("subscription_id").eq("id", uid).single().execute()
+    except Exception as exc:
+        return jsonify({"error": f"lookup failed: {exc}"}), 500
+    sub_id = (row.data or {}).get("subscription_id") or ""
+    if sub_id and STRIPE_SECRET_KEY:
+        try:
+            import stripe as _stripe
+            _stripe.api_key = STRIPE_SECRET_KEY
+            _stripe.Subscription.modify(sub_id, cancel_at_period_end=True)
+        except Exception as exc:
+            _log.error("ADMIN cancel: Stripe error for %s: %s", uid, exc)
+            return jsonify({"error": f"Stripe cancel failed: {exc}"}), 502
+        _log.info("ADMIN cancel: Stripe sub %s set to cancel at period end (user %s)", sub_id, uid)
+        return jsonify({"ok": True, "canceled_at_period_end": True})
+    # No Stripe subscription on file — downgrade locally.
+    try:
+        sb.table("users").update({"subscription_status": "free",
+                                  "subscription_period_end": None}).eq("id", uid).execute()
+    except Exception as exc:
+        return jsonify({"error": f"update failed: {exc}"}), 500
+    _log.info("ADMIN cancel: user %s downgraded to free (no Stripe sub)", uid)
+    return jsonify({"ok": True, "canceled_at_period_end": False})
+
+
 # Token gate for /admin. Lets you enter the admin token once; the browser then
 # remembers it (localStorage) and auto-opens the dashboard on later visits, so
 # you never retype it. The token value is only ever entered by you.
@@ -757,51 +826,95 @@ def admin_page():
         if _sb is None:
             subs_error = "Supabase is not configured on this server (dev mode)."
         else:
-            _res = _sb.table("users").select("*").limit(1000).execute()
+            _res = _sb.table("users").select("*").limit(2000).execute()
             _users = _res.data or []
             _users.sort(key=lambda u: str(u.get("created_at") or ""), reverse=True)
             subs_total = len(_users)
+            # Referral tallies: how many people each user invited, and how many paid.
+            _invited, _invited_paid = {}, {}
             for u in _users:
-                status = str(u.get("subscription_status") or "free")
+                rb = u.get("referred_by")
+                if rb:
+                    _invited[rb] = _invited.get(rb, 0) + 1
+                    if u.get("referral_paid"):
+                        _invited_paid[rb] = _invited_paid.get(rb, 0) + 1
+            for u in _users:
+                uid_u  = str(u.get("id") or "")
+                status = str(u.get("subscription_status") or "free").lower()
                 active = status == "active"
                 if active:
                     subs_active += 1
+                email  = u.get("email") or "—"
+                name   = u.get("name") or "—"
+                try:
+                    toks_i = int(u.get("tokens_remaining", 0) or 0)
+                except (TypeError, ValueError):
+                    toks_i = 0
                 renews = str(u.get("subscription_period_end") or "")[:10] or "—"
                 joined = str(u.get("created_at") or "")[:10] or "—"
+                code   = u.get("referral_code") or "—"
+                inv    = _invited.get(uid_u, 0)
+                inv_p  = _invited_paid.get(uid_u, 0)
                 if active:
                     badge = '<span style="background:#065f46;color:#6ee7b7;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:600">● active</span>'
+                elif status == "canceling":
+                    badge = '<span style="background:#78350f;color:#fcd34d;padding:2px 9px;border-radius:5px;font-size:11px">● canceling</span>'
                 else:
                     badge = f'<span style="background:#16233f;color:#8aa0c8;padding:2px 9px;border-radius:5px;font-size:11px">{_he(status)}</span>'
+                ref_html = f'<code style="color:#7cc4ff">{_he(code)}</code>'
+                if inv:
+                    ref_html += f' · <span style="color:#6ee7b7">{inv} invited</span>'
+                    if inv_p:
+                        ref_html += f' <span style="color:#8aa0c8">({inv_p} paid)</span>'
+                actions = (f'<button onclick="grantTokens(\'{_js(uid_u)}\',\'{_js(str(email))}\')" '
+                           'style="background:#1e3a5f;color:#cfe0ff;border:none;padding:3px 9px;border-radius:6px;cursor:pointer;font-size:12px">＋ Tokens</button>')
+                if active or status == "canceling" or u.get("subscription_id"):
+                    actions += (f' <button onclick="cancelSub(\'{_js(uid_u)}\',\'{_js(str(email))}\')" '
+                                'style="background:#7f1d1d;color:#fecaca;border:none;padding:3px 9px;border-radius:6px;cursor:pointer;font-size:12px">Cancel</button>')
                 subs_rows += f"""
-                  <tr>
-                    <td><b>{_he(u.get('email') or '—')}</b></td>
-                    <td style="color:#b9c9e6">{_he(u.get('name') or '—')}</td>
+                  <tr class="subrow" data-email="{_he(str(email).lower())}" data-name="{_he(str(name).lower())}" data-active="{1 if active else 0}" data-status="{_he(status)}" data-tokens="{toks_i}" data-renews="{_he(renews)}" data-joined="{_he(joined)}">
+                    <td><b>{_he(email)}</b></td>
+                    <td style="color:#b9c9e6">{_he(name)}</td>
                     <td>{badge}</td>
-                    <td style="text-align:center;font-weight:600">{_he(u.get('tokens_remaining', 0))}</td>
+                    <td style="text-align:center;font-weight:600">{toks_i}</td>
+                    <td style="font-size:12px">{ref_html}</td>
                     <td style="color:#8aa0c8;white-space:nowrap">{_he(renews)}</td>
                     <td style="color:#8aa0c8;white-space:nowrap">{_he(joined)}</td>
+                    <td style="white-space:nowrap">{actions}</td>
                   </tr>"""
     except Exception as _e:
         subs_error = str(_e)
 
-    subs_th = ("position:static;padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;"
-               "background:#0f2040;border-bottom:1px solid #1a3a6e")
+    subs_th = ("padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;"
+               "background:#0f2040;border-bottom:1px solid #1a3a6e;white-space:nowrap")
+    def _sth(label, idx, center=False):
+        c = ";text-align:center" if center else ""
+        return (f'<th onclick="subSort({idx})" style="{subs_th};cursor:pointer;user-select:none{c}">'
+                f'{label} <span style="opacity:.35;font-size:10px">⇅</span></th>')
     subs_section = f"""
     <div style="margin:1.5rem 2rem">
-      <h3 style="margin:0 0 .75rem;color:#e8f0ff;font-size:1rem;display:flex;align-items:center;gap:.5rem">
+      <h3 style="margin:0 0 .6rem;color:#e8f0ff;font-size:1rem;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
         👥 Subscribers
         <span style="background:#4f8ef7;color:#fff;padding:2px 10px;border-radius:20px;font-size:12px">{subs_total} users</span>
         <span style="background:#065f46;color:#6ee7b7;padding:2px 10px;border-radius:20px;font-size:12px">{subs_active} active</span>
       </h3>
       {f'<p style="color:#f87171;font-size:.85rem;margin-bottom:.5rem">Could not load subscribers: {_he(subs_error)}</p>' if subs_error else ''}
+      <div style="display:flex;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap;align-items:center">
+        <input id="subSearch" placeholder="🔎 Search email or name…" oninput="subFilter()"
+               style="background:#050d1a;border:1px solid #1a3a6e;color:#e8f0ff;padding:.45rem .7rem;border-radius:8px;font-size:13px;min-width:220px">
+        <label style="display:flex;gap:.4rem;align-items:center;color:#8aa0c8;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="payingOnly" onchange="subFilter()"> Paying only</label>
+        <button class="btn btn-gray" onclick="subExportCSV()">⬇ Export CSV</button>
+        <span id="subShown" style="color:#4a5f80;font-size:12px"></span>
+      </div>
       <div style="overflow-x:auto;border:1px solid #16233f;border-radius:10px">
-        <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <table id="subTable" style="width:100%;border-collapse:collapse;font-size:13px">
           <thead><tr>
-            <th style="{subs_th}">Email</th><th style="{subs_th}">Name</th>
-            <th style="{subs_th}">Status</th><th style="{subs_th};text-align:center">Tokens</th>
-            <th style="{subs_th}">Renews</th><th style="{subs_th}">Joined</th>
+            {_sth("Email", 0)}{_sth("Name", 1)}{_sth("Status", 2)}{_sth("Tokens", 3, True)}
+            <th style="{subs_th}">Referral</th>{_sth("Renews", 5)}{_sth("Joined", 6)}
+            <th style="{subs_th}">Actions</th>
           </tr></thead>
-          <tbody>{subs_rows if subs_rows else '<tr><td colspan="6" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
+          <tbody id="subBody">{subs_rows if subs_rows else '<tr><td colspan="8" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
         </table>
       </div>
     </div>"""
@@ -809,7 +922,6 @@ def admin_page():
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <title>Admin — Alimne</title>
-<meta http-equiv="refresh" content="20">
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
   body{{font-family:'Segoe UI',system-ui,sans-serif;background:#050d1a;color:#e8f0ff;min-height:100vh}}
@@ -827,7 +939,7 @@ def admin_page():
   .wrap{{overflow-x:auto}}
   table{{width:100%;border-collapse:collapse;font-size:13px}}
   th{{background:#0f2040;padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;
-      border-bottom:1px solid #1a3a6e;position:sticky;top:57px;white-space:nowrap}}
+      border-bottom:1px solid #1a3a6e;white-space:nowrap}}
   td{{padding:9px 12px;border-bottom:1px solid #0d1e35;vertical-align:middle}}
   tr:hover td{{background:#0a1e38}}
   .empty{{padding:3rem;text-align:center;color:#4a5f80;font-size:0.9rem}}
@@ -841,9 +953,9 @@ def admin_page():
     {f'<span class="badge red">⛔ {len(blocked_copy)} blocked</span>' if blocked_copy else ''}
   </h1>
   <div class="actions">
-    <span style="font-size:12px;color:#4a5f80;align-self:center">Auto-refresh: 20s</span>
     <button class="btn btn-gray" onclick="location.reload()">↻ Refresh</button>
     <button class="btn btn-red" onclick="clearLog()">🗑 Clear Log</button>
+    <button class="btn btn-gray" onclick="forgetToken()" title="Forget the saved admin token on this device">⎋ Sign out</button>
   </div>
 </div>
 {subs_section}
@@ -893,6 +1005,74 @@ async function clearLog(){{
   const r = await fetch("/admin/clear", {{method:"POST", headers:{{"X-Admin-Token":TOKEN}}}});
   if(r.ok){{ toast("🗑 Log cleared"); setTimeout(()=>location.reload(),1200); }}
 }}
+
+// ── Subscribers: search / paying-only filter / sort / CSV / actions ──────────
+function subFilter(){{
+  var q = (document.getElementById("subSearch").value || "").toLowerCase().trim();
+  var payingOnly = document.getElementById("payingOnly").checked;
+  var rows = document.querySelectorAll("#subBody tr.subrow");
+  var shown = 0;
+  rows.forEach(function(r){{
+    var okQ = !q || r.dataset.email.indexOf(q) >= 0 || r.dataset.name.indexOf(q) >= 0;
+    var okP = !payingOnly || r.dataset.active === "1";
+    var vis = okQ && okP;
+    r.style.display = vis ? "" : "none";
+    if (vis) shown++;
+  }});
+  var el = document.getElementById("subShown");
+  if (el) el.textContent = shown + " shown";
+}}
+var _subSort = {{}};
+var _SUBCOLS = {{0:["email",0], 1:["name",0], 2:["status",0], 3:["tokens",1], 5:["renews",0], 6:["joined",0]}};
+function subSort(idx){{
+  var spec = _SUBCOLS[idx]; if(!spec) return;
+  var key = spec[0], numeric = spec[1];
+  var dir = _subSort[idx] === 1 ? -1 : 1; _subSort = {{}}; _subSort[idx] = dir;
+  var body = document.getElementById("subBody");
+  var rows = Array.prototype.slice.call(body.querySelectorAll("tr.subrow"));
+  rows.sort(function(a,b){{
+    var va = a.dataset[key] || "", vb = b.dataset[key] || "";
+    if (numeric) return ((parseFloat(va)||0) - (parseFloat(vb)||0)) * dir;
+    return (va < vb ? -1 : (va > vb ? 1 : 0)) * dir;
+  }});
+  rows.forEach(function(r){{ body.appendChild(r); }});
+}}
+function subExportCSV(){{
+  var rows = document.querySelectorAll("#subBody tr.subrow");
+  var out = [["Email","Name","Status","Tokens","Renews","Joined"]];
+  rows.forEach(function(r){{
+    if (r.style.display === "none") return;
+    out.push([r.dataset.email, r.dataset.name, r.dataset.status, r.dataset.tokens, r.dataset.renews||"", r.dataset.joined||""]);
+  }});
+  var csv = out.map(function(row){{ return row.map(function(c){{ return '"' + String(c).replace(/"/g,'""') + '"'; }}).join(","); }}).join("\\n");
+  var blob = new Blob([csv], {{type:"text/csv"}});
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "alimne-subscribers.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  toast("⬇ Exported " + (out.length - 1) + " rows");
+}}
+async function grantTokens(uid, email){{
+  var v = prompt("Grant tokens to " + email + "\\n(use a negative number to deduct):", "30");
+  if (v === null) return;
+  var amount = parseInt(v, 10);
+  if (!amount) {{ toast("Enter a non-zero number", "#dc2626"); return; }}
+  var r = await fetch("/admin/user/grant", {{method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}}, body: JSON.stringify({{user_id: uid, amount: amount}})}});
+  var d = await r.json().catch(function(){{ return {{}}; }});
+  if (r.ok) {{ toast("✓ " + email + ": " + d.tokens_remaining + " tokens"); setTimeout(function(){{ location.reload(); }}, 900); }}
+  else {{ toast("✗ " + (d.error || "failed"), "#dc2626"); }}
+}}
+async function cancelSub(uid, email){{
+  if (!confirm("Cancel subscription for " + email + "?\\nStripe subscriptions cancel at period end (they keep access until then).")) return;
+  var r = await fetch("/admin/user/cancel", {{method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}}, body: JSON.stringify({{user_id: uid}})}});
+  var d = await r.json().catch(function(){{ return {{}}; }});
+  if (r.ok) {{ toast(d.canceled_at_period_end ? "✓ Cancels at period end" : "✓ Set to free"); setTimeout(function(){{ location.reload(); }}, 900); }}
+  else {{ toast("✗ " + (d.error || "failed"), "#dc2626"); }}
+}}
+function forgetToken(){{
+  try {{ localStorage.removeItem("alimne_admin_token"); }} catch(e) {{}}
+  location.href = "/admin";
+}}
+subFilter();
 </script>
 </body></html>"""
 
