@@ -868,6 +868,8 @@ def admin_page():
     subs_total = 0
     subs_active = 0
     new_this_week = 0
+    used_count = 0
+    total_gens = 0
     subs_error = ""
     try:
         _sb = _get_sb()
@@ -881,6 +883,9 @@ def admin_page():
             # Users created in the last 7 days (ISO date-prefix compare — TZ-safe enough).
             _week_ago = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
             new_this_week = sum(1 for u in _users if str(u.get("created_at") or "")[:10] >= _week_ago)
+            # Usage: a user who consumed ≥1 token has actually processed a file.
+            used_count = sum(1 for u in _users if int(u.get("generations_count") or 0) > 0)
+            total_gens = sum(int(u.get("generations_count") or 0) for u in _users)
             # Referral tallies: how many people each user invited, and how many paid.
             _invited, _invited_paid = {}, {}
             _id_to_email = {}
@@ -909,6 +914,8 @@ def admin_page():
                 inv    = _invited.get(uid_u, 0)
                 inv_p  = _invited_paid.get(uid_u, 0)
                 refby  = _id_to_email.get(str(u.get("referred_by") or ""), "") or "—"
+                gens   = int(u.get("generations_count") or 0)
+                last_used = str(u.get("last_used_at") or "")[:10] or "—"
                 if active:
                     badge = '<span style="background:#065f46;color:#6ee7b7;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:600">● active</span>'
                 elif status == "canceling":
@@ -926,11 +933,12 @@ def admin_page():
                     actions += (f' <button onclick="cancelSub(\'{_js(uid_u)}\',\'{_js(str(email))}\')" '
                                 'style="background:#7f1d1d;color:#fecaca;border:none;padding:3px 9px;border-radius:6px;cursor:pointer;font-size:12px">Cancel</button>')
                 subs_rows += f"""
-                  <tr class="subrow" data-email="{_he(str(email).lower())}" data-name="{_he(str(name).lower())}" data-active="{1 if active else 0}" data-status="{_he(status)}" data-tokens="{toks_i}" data-refby="{_he(str(refby).lower())}" data-renews="{_he(renews)}" data-joined="{_he(joined)}">
+                  <tr class="subrow" data-email="{_he(str(email).lower())}" data-name="{_he(str(name).lower())}" data-active="{1 if active else 0}" data-status="{_he(status)}" data-tokens="{toks_i}" data-used="{gens}" data-lastused="{_he(last_used)}" data-refby="{_he(str(refby).lower())}" data-renews="{_he(renews)}" data-joined="{_he(joined)}">
                     <td><b>{_he(email)}</b></td>
                     <td style="color:#b9c9e6">{_he(name)}</td>
                     <td>{badge}</td>
                     <td style="text-align:center;font-weight:600">{toks_i}</td>
+                    <td style="text-align:center"><b style="color:{'#6ee7b7' if gens else '#4a5f80'}">{gens}</b>{f'<div style="color:#6b7fa8;font-size:11px">last {_he(last_used)}</div>' if last_used != '—' else ''}</td>
                     <td style="font-size:12px">{ref_html}</td>
                     <td style="color:#8aa0c8;font-size:12px">{_he(refby)}</td>
                     <td style="color:#8aa0c8;white-space:nowrap">{_he(renews)}</td>
@@ -974,6 +982,11 @@ def admin_page():
           <div style="font-size:1.7rem;font-weight:800;color:#7cc4ff;line-height:1.2">{new_this_week}</div>
           <div style="color:#8aa0c8;font-size:11px">joined in last 7 days</div>
         </div>
+        <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:150px">
+          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Used the app</div>
+          <div style="font-size:1.7rem;font-weight:800;color:#a78bfa;line-height:1.2">{used_count}</div>
+          <div style="color:#8aa0c8;font-size:11px">of {subs_total} · {total_gens:,} files processed</div>
+        </div>
       </div>
       <div style="display:flex;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap;align-items:center">
         <input id="subSearch" placeholder="🔎 Search email or name…" oninput="subFilter()"
@@ -986,11 +999,11 @@ def admin_page():
       <div style="overflow-x:auto;border:1px solid #16233f;border-radius:10px">
         <table id="subTable" style="width:100%;border-collapse:collapse;font-size:13px">
           <thead><tr>
-            {_sth("Email", 0)}{_sth("Name", 1)}{_sth("Status", 2)}{_sth("Tokens", 3, True)}
-            <th style="{subs_th}">Referral</th>{_sth("Referred by", 5)}{_sth("Renews", 6)}{_sth("Joined", 7)}
+            {_sth("Email", 0)}{_sth("Name", 1)}{_sth("Status", 2)}{_sth("Tokens", 3, True)}{_sth("Used", 4, True)}
+            <th style="{subs_th}">Referral</th>{_sth("Referred by", 6)}{_sth("Renews", 7)}{_sth("Joined", 8)}
             <th style="{subs_th}">Actions</th>
           </tr></thead>
-          <tbody id="subBody">{subs_rows if subs_rows else '<tr><td colspan="9" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
+          <tbody id="subBody">{subs_rows if subs_rows else '<tr><td colspan="10" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
         </table>
       </div>
     </div>"""
@@ -1099,7 +1112,7 @@ function subFilter(){{
   if (el) el.textContent = shown + " shown";
 }}
 var _subSort = {{}};
-var _SUBCOLS = {{0:["email",0], 1:["name",0], 2:["status",0], 3:["tokens",1], 5:["refby",0], 6:["renews",0], 7:["joined",0]}};
+var _SUBCOLS = {{0:["email",0], 1:["name",0], 2:["status",0], 3:["tokens",1], 4:["used",1], 6:["refby",0], 7:["renews",0], 8:["joined",0]}};
 function subSort(idx){{
   var spec = _SUBCOLS[idx]; if(!spec) return;
   var key = spec[0], numeric = spec[1];
@@ -1115,10 +1128,10 @@ function subSort(idx){{
 }}
 function subExportCSV(){{
   var rows = document.querySelectorAll("#subBody tr.subrow");
-  var out = [["Email","Name","Status","Tokens","Referred by","Renews","Joined"]];
+  var out = [["Email","Name","Status","Tokens","Used","Last used","Referred by","Renews","Joined"]];
   rows.forEach(function(r){{
     if (r.style.display === "none") return;
-    out.push([r.dataset.email, r.dataset.name, r.dataset.status, r.dataset.tokens, r.dataset.refby||"", r.dataset.renews||"", r.dataset.joined||""]);
+    out.push([r.dataset.email, r.dataset.name, r.dataset.status, r.dataset.tokens, r.dataset.used||"0", r.dataset.lastused||"", r.dataset.refby||"", r.dataset.renews||"", r.dataset.joined||""]);
   }});
   var csv = out.map(function(row){{ return row.map(function(c){{ return '"' + String(c).replace(/"/g,'""') + '"'; }}).join(","); }}).join("\\n");
   var blob = new Blob([csv], {{type:"text/csv"}});

@@ -60,6 +60,11 @@ ALTER TABLE public.users
   ADD COLUMN IF NOT EXISTS referred_by   UUID REFERENCES public.users(id),
   ADD COLUMN IF NOT EXISTS referral_paid BOOLEAN DEFAULT false;
 
+-- ── Usage tracking columns (see migration 003) ───────────────────
+ALTER TABLE public.users
+  ADD COLUMN IF NOT EXISTS generations_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS last_used_at      TIMESTAMPTZ;
+
 -- ── Atomic token consumption (avoids race conditions) ─────────
 -- Called by backend via sb.rpc("consume_token", {"p_user_id": "..."})
 CREATE OR REPLACE FUNCTION public.consume_token(p_user_id UUID)
@@ -105,9 +110,11 @@ BEGIN
                              'tokens_remaining', 0);
   END IF;
 
-  -- ── Consume one token ────────────────────────────────────────
+  -- ── Consume one token + record usage ─────────────────────────
   UPDATE public.users
-     SET tokens_remaining = tokens_remaining - 1
+     SET tokens_remaining  = tokens_remaining - 1,
+         generations_count = COALESCE(generations_count, 0) + 1,
+         last_used_at      = NOW()
    WHERE id = p_user_id;
 
   RETURN json_build_object(
