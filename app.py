@@ -948,6 +948,27 @@ def admin_page():
     except Exception as _e:
         subs_error = str(_e)
 
+    # ── Leads (emails captured at the paywall) ───────────────────────────────────
+    leads_rows = ""
+    leads_count = 0
+    try:
+        _sbl = _get_sb()
+        if _sbl is not None:
+            _lr = _sbl.table("leads").select("email,source,created_at") \
+                      .order("created_at", desc=True).limit(500).execute()
+            _leads = _lr.data or []
+            leads_count = len(_leads)
+            for L in _leads:
+                when = str(L.get("created_at") or "")[:16].replace("T", " ")
+                leads_rows += f"""
+                  <tr>
+                    <td><b>{_he(L.get('email') or '')}</b></td>
+                    <td style="color:#8aa0c8;font-size:12px">{_he(L.get('source') or '—')}</td>
+                    <td style="color:#8aa0c8;white-space:nowrap">{_he(when)}</td>
+                  </tr>"""
+    except Exception:
+        pass  # leads table may not exist yet (migration 005) — degrade quietly
+
     monthly_price = _monthly_price_usd()  # live Stripe price (cached ~1h), USD/month
     mrr = subs_active * monthly_price
     arr = mrr * 12
@@ -987,6 +1008,11 @@ def admin_page():
           <div style="font-size:1.7rem;font-weight:800;color:#a78bfa;line-height:1.2">{used_count}</div>
           <div style="color:#8aa0c8;font-size:11px">of {subs_total} · {total_gens:,} files processed</div>
         </div>
+        <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:130px">
+          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Leads</div>
+          <div style="font-size:1.7rem;font-weight:800;color:#f472b6;line-height:1.2">{leads_count}</div>
+          <div style="color:#8aa0c8;font-size:11px">emails captured</div>
+        </div>
       </div>
       <div style="display:flex;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap;align-items:center">
         <input id="subSearch" placeholder="🔎 Search email or name…" oninput="subFilter()"
@@ -1004,6 +1030,24 @@ def admin_page():
             <th style="{subs_th}">Actions</th>
           </tr></thead>
           <tbody id="subBody">{subs_rows if subs_rows else '<tr><td colspan="10" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>"""
+
+    leads_section = ""
+    if leads_count:
+        leads_section = f"""
+    <div style="margin:1.5rem 2rem">
+      <h3 style="margin:0 0 .6rem;color:#e8f0ff;font-size:1rem;display:flex;align-items:center;gap:.5rem">
+        ✉️ Leads
+        <span style="background:#831843;color:#fbcfe8;padding:2px 10px;border-radius:20px;font-size:12px">{leads_count} emails</span>
+      </h3>
+      <div style="overflow-x:auto;border:1px solid #16233f;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr>
+            <th style="{subs_th}">Email</th><th style="{subs_th}">Source</th><th style="{subs_th}">Captured (UTC)</th>
+          </tr></thead>
+          <tbody>{leads_rows}</tbody>
         </table>
       </div>
     </div>"""
@@ -1048,6 +1092,7 @@ def admin_page():
   </div>
 </div>
 {subs_section}
+{leads_section}
 {blocked_section}
 <h3 style="margin:1.5rem 2rem .5rem;color:#8aa0c8;font-size:.95rem">🌐 Recent visitors</h3>
 <div class="wrap">
@@ -2687,6 +2732,38 @@ def stripe_webhook():
                 "tokens_month":     time.strftime("%Y-%m"),
             }).eq("stripe_customer_id", cust_id).execute()
 
+    return jsonify({"ok": True})
+
+
+# ── Email lead capture (shown before the paywall) ─────────────────────────────
+_EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+@app.route("/api/lead", methods=["POST"])
+def capture_lead():
+    """Store an email captured at the paywall. No auth (it's a lead); validated
+    and rate-limited; written with the service role into the RLS-locked leads
+    table."""
+    if not _check_rate_limit(_client_ip(), scope="lead", limit=10):
+        return jsonify({"error": "Too many requests. Please wait a moment."}), 429
+    data   = request.get_json(silent=True) or {}
+    email  = str(data.get("email", "")).strip().lower()
+    source = str(data.get("source", "paywall"))[:40]
+    if not email or len(email) > 254 or not _EMAIL_RE.match(email):
+        return jsonify({"error": "Please enter a valid email address."}), 400
+    sb = _get_sb()
+    if sb is None:
+        return jsonify({"ok": True})  # dev mode — nothing to store
+    try:
+        sb.table("leads").upsert({
+            "email":      email,
+            "source":     source,
+            "ip":         _client_ip(),
+            "user_agent": (request.headers.get("User-Agent") or "")[:400],
+        }, on_conflict="email").execute()
+    except Exception as exc:
+        _log.error("lead capture failed: %s", exc)
+        return jsonify({"error": "Could not save right now — please try again."}), 500
+    _log.info("Lead captured: %s (source=%s)", email, source)
     return jsonify({"ok": True})
 
 

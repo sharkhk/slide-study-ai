@@ -6,7 +6,7 @@ import {
   Globe, X, Files, ChevronDown,
   Youtube, Type, Brain, BarChart2, Map, Printer,
   ThumbsUp, ThumbsDown, MessageSquare, History, ClipboardList, ShieldCheck, ScrollText,
-  LogIn, LogOut, User, Zap, Copy, Gift
+  LogIn, LogOut, User, Zap, Copy, Gift, Mail
 } from 'lucide-react'
 
 // Alimne brand mark — the "A + spark" glyph (white, for use inside a gradient tile)
@@ -81,6 +81,13 @@ const T = {
     freeLeft: (n) => `${n} free ${n === 1 ? 'preview' : 'previews'} left`,
     freeTry: 'Try free, no sign-up',
     signInForMore: 'Free trial used — sign in to subscribe.',
+    // Email capture (before paywall)
+    emailCaptureTitle: 'One step to continue',
+    emailCaptureSub: "You've used your free try. Enter your email to continue — we'll keep you posted and get you set up. No spam.",
+    emailPlaceholder: 'you@email.com',
+    emailCaptureBtn: 'Continue',
+    emailSkip: 'Skip for now',
+    emailInvalid: 'Please enter a valid email address.',
     // Referral
     referTitle: 'Refer & Earn',
     referSub: 'Share your link. Each person who subscribes earns you 10 free tokens — no limit.',
@@ -150,6 +157,12 @@ const T = {
     freeLeft: (n) => `${n} ${n === 1 ? 'معاينة' : 'معاينات'} مجانية متبقية`,
     freeTry: 'جرّب مجاناً، بدون تسجيل',
     signInForMore: 'انتهت تجربتك المجانية — سجّل الدخول للاشتراك.',
+    emailCaptureTitle: 'خطوة واحدة للمتابعة',
+    emailCaptureSub: 'لقد استخدمت تجربتك المجانية. أدخل بريدك الإلكتروني للمتابعة — سنبقيك على اطلاع ونساعدك على البدء. بدون إزعاج.',
+    emailPlaceholder: 'you@email.com',
+    emailCaptureBtn: 'متابعة',
+    emailSkip: 'تخطٍّ الآن',
+    emailInvalid: 'يرجى إدخال بريد إلكتروني صحيح.',
     // Referral
     referTitle: 'أحِل واكسب',
     referSub: 'شارك رابطك. كل شخص يشترك عبر رابطك يمنحك 10 رموز مجانية — بلا حدود.',
@@ -1316,6 +1329,59 @@ function UpgradeModal({ onClose, onUpgrade, onManage, isSubscribed, lang }) {
 }
 
 
+// ── Email Capture Modal (shown before the paywall) ──────────────────────────────
+function EmailCaptureModal({ onClose, onSubmit, onSkip, lang }) {
+  const t = T[lang] || T['en']
+  const isAr = lang === 'ar'
+  const [email, setEmail] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const submit = async (e) => {
+    e.preventDefault()
+    const v = email.trim()
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) { setErr(t.emailInvalid); return }
+    setBusy(true); setErr('')
+    try { await onSubmit(v) }
+    catch { setErr(t.emailInvalid) }
+    finally { setBusy(false) }
+  }
+  return (
+    <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}
+        style={{maxWidth:400, width:'92vw', direction: isAr ? 'rtl' : 'ltr'}}>
+        <div className="modal-header">
+          <span style={{fontWeight:700, color:'var(--text-primary)', display:'flex', alignItems:'center', gap:'0.4rem'}}>
+            <Mail size={15} color="var(--accent)" /> {t.emailCaptureTitle}
+          </span>
+          <button className="modal-close" onClick={onClose}><X size={16} /></button>
+        </div>
+        <form onSubmit={submit} style={{padding:'1.25rem'}}>
+          <div style={{fontSize:'0.86rem', color:'var(--text-muted)', marginBottom:'1rem', lineHeight:1.5}}>{t.emailCaptureSub}</div>
+          <input type="email" value={email} autoFocus required inputMode="email"
+            onChange={e => { setEmail(e.target.value); setErr('') }}
+            placeholder={t.emailPlaceholder}
+            style={{width:'100%', padding:'0.7rem 0.9rem', borderRadius:10,
+              border:'1px solid var(--border)', background:'rgba(255,255,255,0.03)',
+              color:'var(--text-primary)', fontSize:'0.9rem', marginBottom: err ? '0.4rem' : '1rem',
+              direction:'ltr', textAlign: isAr ? 'right' : 'left'}} />
+          {err && <div style={{color:'#f87171', fontSize:'0.78rem', marginBottom:'0.8rem'}}>{err}</div>}
+          <button type="submit" className="submit-btn" disabled={busy}
+            style={{width:'100%', justifyContent:'center', padding:'0.75rem'}}>
+            {busy ? '…' : (<><Sparkles size={15} /> {t.emailCaptureBtn}</>)}
+          </button>
+          <div style={{textAlign:'center', marginTop:'0.75rem'}}>
+            <button type="button" onClick={onSkip}
+              style={{background:'none', border:'none', color:'var(--text-muted)', fontSize:'0.75rem', cursor:'pointer', textDecoration:'underline'}}>
+              {t.emailSkip}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
+
 // ── Main App ───────────────────────────────────────────────────────────────────
 export default function App() {
   const [theme, setTheme]   = useState('dark')
@@ -1349,6 +1415,10 @@ export default function App() {
   const [showLogin, setShowLogin]     = useState(false)
   const [loginMode, setLoginMode]     = useState('signin')
   const [showUpgrade, setShowUpgrade] = useState(false)
+  const [showEmailCapture, setShowEmailCapture] = useState(false)
+  const [emailCaptured, setEmailCaptured] = useState(() => {
+    try { return !!localStorage.getItem('alimne_lead') } catch { return false }
+  })
   const [authLoading, setAuthLoading] = useState(true)
   const [anonInfo, setAnonInfo]       = useState(null)  // {limit, remaining} for signed-out users
 
@@ -1472,6 +1542,22 @@ export default function App() {
       .catch(e => toast(`Payment error — ${e.message || 'please try again'}`, 'error'))
   }
 
+  // Email capture at the paywall → store the lead, then send them to sign-up/subscribe.
+  const submitLead = async (email) => {
+    try {
+      await fetch('/api/lead', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, source: 'paywall' })
+      })
+      try { localStorage.setItem('alimne_lead', email) } catch {}
+    } catch { /* best-effort — never trap the visitor */ }
+    setEmailCaptured(true)
+    setShowEmailCapture(false)
+    openLogin('signup')
+  }
+  const skipLead = () => { setShowEmailCapture(false); openLogin('signup') }
+
   const handleManageBilling = () => {
     fetch('/api/stripe/portal', {
       method: 'POST',
@@ -1496,7 +1582,9 @@ export default function App() {
       // Anonymous visitor out of free previews → invite sign-up (free tokens).
       // Signed-in user out of tokens → show the upgrade / subscribe modal.
       if (code === 'signin_for_more') {
-        openLogin('signup')
+        // Capture the email before the paywall (once), then route to sign-up/subscribe.
+        if (emailCaptured) openLogin('signup')
+        else setShowEmailCapture(true)
         if (item) updateItem(item.id, { status: 'error', error: t.signInForMore })
       } else {
         setShowUpgrade(true)
@@ -2166,6 +2254,14 @@ export default function App() {
           onUpgrade={handleCheckout}
           onManage={handleManageBilling}
           isSubscribed={isSubscribed}
+          lang={lang}
+        />
+      )}
+      {showEmailCapture && (
+        <EmailCaptureModal
+          onClose={() => setShowEmailCapture(false)}
+          onSubmit={submitLead}
+          onSkip={skipLead}
           lang={lang}
         />
       )}
