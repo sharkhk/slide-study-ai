@@ -53,7 +53,7 @@ const T = {
     textBtn: 'Generate from Text',
     // Auth
     loginTitle: 'Sign in to continue',
-    loginSub: '3 free tokens per month — no credit card required',
+    loginSub: 'Sign in to your account',
     loginBtn: 'Continue with Google',
     emailPh: 'you@email.com',
     passwordPh: 'Password (min 6 characters)',
@@ -62,17 +62,17 @@ const T = {
     authWeak: 'Enter a valid email and a password of at least 6 characters.',
     authCheckEmail: 'Account created \u2014 check your email to confirm, then sign in.',
     authError: 'Sign-in failed \u2014 please try again.',
-    upgradeTitle: 'Out of tokens',
-    upgradeSub: "You've used all your free tokens for this month.",
+    upgradeTitle: 'Free trial used',
+    upgradeSub: "You've used your free try. Subscribe for unlimited study guides.",
     upgradeFeatures: ['30 tokens per month', 'Priority processing', 'All features included'],
-    upgradeBtn: 'Upgrade — $2.99 / month',
-    upgradeFree: 'Free plan: 3 tokens per month',
+    upgradeBtn: 'Subscribe — $2.99 / month',
+    upgradeFree: 'Free: 1 try, then subscribe',
     signIn: 'Sign in',
     signOut: 'Sign out',
     tokensLeft: 'tokens',
     manageBtn: 'Manage / cancel subscription',
-    loginTitleSignup: 'Create your free account',
-    loginSubSignup: '3 free tokens every month, no card required',
+    loginTitleSignup: 'Create your account',
+    loginSubSignup: 'Sign in to subscribe and unlock unlimited study guides',
     emailBtnSignup: 'Create free account',
     noAccount: 'New here? Create a free account',
     haveAccount: 'Already have an account? Sign in',
@@ -80,7 +80,7 @@ const T = {
     accountExists: 'An account already exists for this email. Sign in instead.',
     freeLeft: (n) => `${n} free ${n === 1 ? 'preview' : 'previews'} left`,
     freeTry: 'Try free, no sign-up',
-    signInForMore: 'Free previews used. Sign up free for more.',
+    signInForMore: 'Free trial used — sign in to subscribe.',
     // Referral
     referTitle: 'Refer & Earn',
     referSub: 'Share your link. Each person who subscribes earns you 10 free tokens — no limit.',
@@ -122,7 +122,7 @@ const T = {
     textBtn: 'توليد من النص',
     // Auth
     loginTitle: 'سجّل الدخول للمتابعة',
-    loginSub: '3 رموز مجانية شهرياً — بدون بطاقة ائتمانية',
+    loginSub: 'سجّل الدخول إلى حسابك',
     loginBtn: 'المتابعة عبر Google',
     emailPh: 'you@email.com',
     passwordPh: 'كلمة المرور (6 أحرف على الأقل)',
@@ -131,17 +131,17 @@ const T = {
     authWeak: 'أدخل بريداً صحيحاً وكلمة مرور من 6 أحرف على الأقل.',
     authCheckEmail: 'تم إنشاء الحساب — تحقق من بريدك للتأكيد ثم سجّل الدخول.',
     authError: 'فشل تسجيل الدخول — حاول مجدداً.',
-    upgradeTitle: 'نفدت رموزك',
-    upgradeSub: 'لقد استخدمت رموزك المجانية لهذا الشهر.',
+    upgradeTitle: 'انتهت تجربتك المجانية',
+    upgradeSub: 'لقد استخدمت تجربتك المجانية. اشترك للحصول على أدلة دراسة غير محدودة.',
     upgradeFeatures: ['30 رمزاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
-    upgradeBtn: 'ترقية — 2.99$ / شهر',
-    upgradeFree: 'الخطة المجانية: 3 رموز شهرياً',
+    upgradeBtn: 'اشترك — 2.99$ / شهر',
+    upgradeFree: 'مجاناً: محاولة واحدة، ثم اشترك',
     signIn: 'تسجيل الدخول',
     signOut: 'تسجيل الخروج',
     tokensLeft: 'رموز متبقية',
     manageBtn: 'إدارة / إلغاء الاشتراك',
-    loginTitleSignup: 'أنشئ حسابك المجاني',
-    loginSubSignup: '3 رموز مجانية شهرياً، بدون بطاقة',
+    loginTitleSignup: 'أنشئ حسابك',
+    loginSubSignup: 'سجّل الدخول للاشتراك وفتح أدلة دراسة غير محدودة',
     emailBtnSignup: 'إنشاء حساب مجاني',
     noAccount: 'جديد هنا؟ أنشئ حساباً مجانياً',
     haveAccount: 'لديك حساب بالفعل؟ سجّل الدخول',
@@ -149,7 +149,7 @@ const T = {
     accountExists: 'يوجد حساب بهذا البريد بالفعل. سجّل الدخول بدلاً من ذلك.',
     freeLeft: (n) => `${n} ${n === 1 ? 'معاينة' : 'معاينات'} مجانية متبقية`,
     freeTry: 'جرّب مجاناً، بدون تسجيل',
-    signInForMore: 'انتهت المعاينات المجانية. سجّل مجاناً للمزيد.',
+    signInForMore: 'انتهت تجربتك المجانية — سجّل الدخول للاشتراك.',
     // Referral
     referTitle: 'أحِل واكسب',
     referSub: 'شارك رابطك. كل شخص يشترك عبر رابطك يمنحك 10 رموز مجانية — بلا حدود.',
@@ -1012,9 +1012,9 @@ Effective: May 2026
 Alimne is an AI-powered study tool registered under the souc.ai platform. It converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided for educational and personal use on a freemium subscription model.
 
 2. SUBSCRIPTION & BILLING
-• Free plan: 3 processing tokens per month. No credit card required.
+• Free: one trial generation (plus one anonymous preview, no account needed).
 • Pro plan: $2.99/month (billed via Stripe). Includes 30 tokens per month.
-• Tokens reset at the start of each calendar month.
+• Pro tokens reset at the start of each calendar month.
 • Subscriptions can be cancelled anytime via the billing portal. No refunds for partial months.
 • Payments are processed by Stripe, Inc. and are subject to Stripe's Terms of Service.
 
@@ -1068,9 +1068,9 @@ Alimne (علّمني) — منتج souc.ai
 Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصطناعي مسجّلة تحت منصة souc.ai. تحوّل ملفات PowerPoint وPDF ومقاطع YouTube والنصوص إلى أدلة دراسة منظمة للاختبارات. تُقدَّم الخدمة للاستخدام التعليمي والشخصي وفق نموذج اشتراك مجاني مدفوع.
 
 ٢. الاشتراك والفوترة
-• الخطة المجانية: 3 رموز معالجة شهرياً. لا تحتاج إلى بطاقة ائتمانية.
+• مجاناً: محاولة تجريبية واحدة (بالإضافة إلى معاينة واحدة بدون حساب).
 • الخطة الاحترافية: 2.99$ شهرياً (عبر Stripe). تشمل 30 رمزاً شهرياً.
-• تُعاد الرموز في بداية كل شهر.
+• تُعاد رموز الخطة الاحترافية في بداية كل شهر.
 • يمكن إلغاء الاشتراك في أي وقت عبر بوابة الفوترة. لا يوجد استرداد للأشهر الجزئية.
 • تُعالَج المدفوعات بواسطة Stripe وتخضع لشروط خدمة Stripe.
 
@@ -1500,7 +1500,7 @@ export default function App() {
         if (item) updateItem(item.id, { status: 'error', error: t.signInForMore })
       } else {
         setShowUpgrade(true)
-        if (item) updateItem(item.id, { status: 'error', error: 'No tokens remaining. Upgrade to continue.' })
+        if (item) updateItem(item.id, { status: 'error', error: 'Free trial used — subscribe to continue.' })
       }
       if (resolve) resolve()
       return true
@@ -2137,8 +2137,8 @@ export default function App() {
             </a>
             &nbsp;·&nbsp;
             {lang === 'ar'
-              ? '3 رموز مجانية شهرياً · لا يُحفظ أي شيء'
-              : '3 free tokens/month · No data stored'}
+              ? 'جرّب مجاناً · لا يُحفظ أي شيء'
+              : 'Free to try · No data stored'}
           </div>
           <a
             href="https://souc.ai"
