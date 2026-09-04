@@ -94,6 +94,32 @@ const T = {
     referCopy: 'Copy link',
     referCopied: 'Copied!',
     referStats: (paid) => paid > 0 ? `${paid} subscriber${paid > 1 ? 's' : ''} · ${paid * 10} tokens earned` : 'No referrals yet',
+    // Landing proof / sample output
+    sampleTitle: 'See what you get',
+    sampleSub: "Every upload becomes a clean study guide — key points, flashcards, and a quiz you can actually revise from. Here's a real example.",
+    steps: [
+      { t: 'Upload a lecture', s: 'PowerPoint, PDF, or a YouTube link' },
+      { t: 'AI reads & organizes', s: 'Pulls out what actually matters' },
+      { t: 'Study smarter', s: 'Notes, flashcards & a quiz — download as PDF' },
+    ],
+    sampleTag: 'EXAMPLE OUTPUT',
+    sampleGuideTitle: 'The Cell Cycle',
+    sampleKeyLabel: 'Key points',
+    sampleKey: [
+      'Two main phases: interphase (growth) and the mitotic (M) phase (division).',
+      'Interphase order: G1 (growth) → S (DNA replication) → G2 (prep for mitosis).',
+      'Checkpoints (G1, G2, M) halt the cycle if something is wrong — preventing errors like cancer.',
+    ],
+    sampleFlashLabel: 'Flashcards',
+    sampleFlash: [
+      { q: 'In which phase is DNA copied?', a: 'S phase' },
+      { q: 'What do checkpoints do?', a: 'Halt the cycle to catch and fix errors before the cell divides' },
+    ],
+    sampleQuizLabel: 'Quiz',
+    sampleQuizQ: 'What is the correct order of interphase?',
+    sampleQuizOpts: ['G1 → S → G2', 'S → G1 → G2', 'G2 → S → G1'],
+    sampleQuizAnswer: 0,
+    trust: ['No sign-up to try', 'Files wiped in 15 min', 'English & العربية'],
   },
   ar: {
     brand: 'علّمني',
@@ -169,6 +195,32 @@ const T = {
     referCopy: 'نسخ الرابط',
     referCopied: 'تم النسخ!',
     referStats: (paid) => paid > 0 ? `${paid} مشترك · ${paid * 10} رمز مكتسب` : 'لا إحالات بعد',
+    // Landing proof / sample output
+    sampleTitle: 'شاهد ما ستحصل عليه',
+    sampleSub: 'كل ملف يتحوّل إلى دليل مذاكرة منظّم — نقاط رئيسية وبطاقات وأسئلة تراجع منها فعلاً. إليك مثال حقيقي.',
+    steps: [
+      { t: 'ارفع محاضرة', s: 'عرض تقديمي أو PDF أو رابط YouTube' },
+      { t: 'الذكاء الاصطناعي ينظّمها', s: 'يستخرج ما يهم فعلاً' },
+      { t: 'ذاكِر بذكاء', s: 'ملخص وبطاقات واختبار — حمّلها PDF' },
+    ],
+    sampleTag: 'مثال على الإخراج',
+    sampleGuideTitle: 'دورة الخلية',
+    sampleKeyLabel: 'النقاط الرئيسية',
+    sampleKey: [
+      'طوران رئيسيان: الطور البيني (النمو) وطور الانقسام (M).',
+      'ترتيب الطور البيني: G1 (نمو) ← S (تضاعف الحمض النووي) ← G2 (تحضير للانقسام).',
+      'نقاط التفتيش (G1، G2، M) توقف الدورة عند وجود خطأ — لمنع أخطاء مثل السرطان.',
+    ],
+    sampleFlashLabel: 'بطاقات تعليمية',
+    sampleFlash: [
+      { q: 'في أي طور يُنسخ الحمض النووي؟', a: 'طور S' },
+      { q: 'ما وظيفة نقاط التفتيش؟', a: 'إيقاف الدورة لاكتشاف الأخطاء وإصلاحها قبل انقسام الخلية' },
+    ],
+    sampleQuizLabel: 'اختبار',
+    sampleQuizQ: 'ما الترتيب الصحيح للطور البيني؟',
+    sampleQuizOpts: ['G1 ← S ← G2', 'S ← G1 ← G2', 'G2 ← S ← G1'],
+    sampleQuizAnswer: 0,
+    trust: ['بدون تسجيل للتجربة', 'تُمسح الملفات خلال 15 دقيقة', 'الإنجليزية والعربية'],
   }
 }
 
@@ -2053,6 +2105,89 @@ export default function App() {
                 <span>{t.privacy}</span>
               </div>
             </div>
+
+            {/* Proof / sample output — first-visit only, builds trust before upload */}
+            {!hasQueue && (
+              <div style={{ marginTop:'2.2rem', direction: lang === 'ar' ? 'rtl' : 'ltr' }}>
+                <div style={{textAlign:'center', marginBottom:'1.2rem'}}>
+                  <h2 style={{fontSize:'1.35rem', fontWeight:800, color:'var(--text-primary)', margin:'0 0 0.35rem'}}>{t.sampleTitle}</h2>
+                  <p style={{fontSize:'0.9rem', color:'var(--text-muted)', maxWidth:'620px', margin:'0 auto', lineHeight:1.55}}>{t.sampleSub}</p>
+                </div>
+
+                {/* How it works — 3 steps */}
+                <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(180px, 1fr))', gap:'0.7rem', marginBottom:'1.1rem'}}>
+                  {t.steps.map((st, i) => (
+                    <div key={i} className="glass" style={{padding:'0.9rem 1rem', display:'flex', gap:'0.7rem', alignItems:'flex-start'}}>
+                      <div style={{flexShrink:0, width:26, height:26, borderRadius:8, display:'grid', placeItems:'center',
+                        background:'rgba(79,142,247,0.14)', color:'#4f8ef7', fontWeight:800, fontSize:'0.82rem'}}>{i + 1}</div>
+                      <div>
+                        <div style={{fontWeight:700, fontSize:'0.86rem', color:'var(--text-primary)'}}>{st.t}</div>
+                        <div style={{fontSize:'0.76rem', color:'var(--text-muted)', marginTop:'0.15rem', lineHeight:1.4}}>{st.s}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Sample guide card */}
+                <div className="glass" style={{padding:'1.15rem 1.3rem'}}>
+                  <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:'0.5rem', marginBottom:'0.8rem', flexWrap:'wrap'}}>
+                    <span style={{fontWeight:800, fontSize:'1.02rem', color:'var(--text-primary)'}}>{t.sampleGuideTitle}</span>
+                    <span style={{fontSize:'0.62rem', fontWeight:800, letterSpacing:'0.06em', padding:'0.2rem 0.5rem', borderRadius:6,
+                      background:'rgba(139,92,246,0.14)', color:'#8b5cf6'}}>{t.sampleTag}</span>
+                  </div>
+
+                  {/* Key points */}
+                  <div style={{fontSize:'0.72rem', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.05em', color:'var(--text-muted)', marginBottom:'0.4rem'}}>{t.sampleKeyLabel}</div>
+                  <ul style={{margin:'0 0 1rem', paddingInlineStart:'1.1rem', display:'flex', flexDirection:'column', gap:'0.3rem'}}>
+                    {t.sampleKey.map((k, i) => (
+                      <li key={i} style={{fontSize:'0.83rem', color:'var(--text-secondary)', lineHeight:1.5}}>{k}</li>
+                    ))}
+                  </ul>
+
+                  {/* Flashcards + Quiz two-column on wide screens */}
+                  <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(230px, 1fr))', gap:'0.8rem'}}>
+                    <div>
+                      <div style={{fontSize:'0.72rem', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.05em', color:'var(--text-muted)', marginBottom:'0.4rem'}}>{t.sampleFlashLabel}</div>
+                      <div style={{display:'flex', flexDirection:'column', gap:'0.45rem'}}>
+                        {t.sampleFlash.map((f, i) => (
+                          <div key={i} style={{padding:'0.55rem 0.7rem', borderRadius:9, background:'var(--glass-light)', border:'1px solid var(--glass-border)'}}>
+                            <div style={{fontSize:'0.8rem', fontWeight:700, color:'var(--text-primary)'}}>{f.q}</div>
+                            <div style={{fontSize:'0.78rem', color:'#22c55e', marginTop:'0.2rem'}}>{f.a}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{fontSize:'0.72rem', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.05em', color:'var(--text-muted)', marginBottom:'0.4rem'}}>{t.sampleQuizLabel}</div>
+                      <div style={{padding:'0.55rem 0.7rem', borderRadius:9, background:'var(--glass-light)', border:'1px solid var(--glass-border)'}}>
+                        <div style={{fontSize:'0.8rem', fontWeight:700, color:'var(--text-primary)', marginBottom:'0.45rem'}}>{t.sampleQuizQ}</div>
+                        <div style={{display:'flex', flexDirection:'column', gap:'0.3rem'}}>
+                          {t.sampleQuizOpts.map((opt, i) => {
+                            const correct = i === t.sampleQuizAnswer
+                            return (
+                              <div key={i} style={{display:'flex', alignItems:'center', gap:'0.45rem', fontSize:'0.78rem',
+                                color: correct ? '#22c55e' : 'var(--text-secondary)', fontWeight: correct ? 700 : 500}}>
+                                {correct ? <CheckCircle2 size={14} /> : <span style={{width:14, height:14, borderRadius:'50%', border:'1.5px solid var(--glass-border)', flexShrink:0}} />}
+                                <span>{opt}</span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Honest trust strip */}
+                <div style={{display:'flex', flexWrap:'wrap', justifyContent:'center', gap:'0.4rem 1.2rem', marginTop:'1rem'}}>
+                  {t.trust.map((tr, i) => (
+                    <span key={i} style={{display:'inline-flex', alignItems:'center', gap:'0.35rem', fontSize:'0.78rem', color:'var(--text-muted)'}}>
+                      <ShieldCheck size={13} style={{color:'#22c55e'}} />{tr}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Referral card — visible only when signed in */}
             {session && userInfo?.referral_code && (

@@ -2151,6 +2151,8 @@ def _page_num(canvas, doc):
     n = canvas.getPageNumber()
     canvas.drawRightString(doc.width + doc.leftMargin, 0.55*cm, f"{n}")
     canvas.drawString(doc.leftMargin, 0.55*cm, doc.title_str if hasattr(doc, 'title_str') else '')
+    # Brand mark on every page — a free viral loop when guides get shared.
+    canvas.drawCentredString(doc.width/2 + doc.leftMargin, 0.55*cm, "Made with alimne.app")
     canvas.restoreState()
 
 
@@ -2455,7 +2457,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
     elems.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
     elems.append(Spacer(1, 0.1*cm))
     elems.append(Paragraph(
-        f"{T(guide.get('title',''))}  ·  {L['guide']}  ·  {OLLAMA_MODEL}  ·  {L['luck']}",
+        f"{T(guide.get('title',''))}  ·  {L['guide']}  ·  {L['luck']}<br/>"
+        f"Made with <b>alimne.app</b> — turn any lecture into a study guide",
         ST["footer"]
     ))
 
