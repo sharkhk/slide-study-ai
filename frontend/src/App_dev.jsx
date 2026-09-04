@@ -22,9 +22,9 @@ const T = {
   en: {
     brand: 'Alimne',
     badge: 'AI-Powered · Smart Study',
-    h1a: 'Turn Slides into',
+    h1a: 'Turn any lecture into',
     h1b: 'Study Guides',
-    sub: 'Upload slides, paste text, or enter a YouTube URL to get exam-ready study guides.',
+    sub: 'Drop a PowerPoint, PDF, or YouTube lecture — get an exam-ready guide with notes, flashcards, and a practice quiz in seconds. Free to start, no card needed.',
     dropTitle: 'Drop your PowerPoint or PDF files here',
     dropSub: 'or click to browse — .pptx / .ppt / .pdf / .docx / .doc / .txt, multiple files supported',
     langAuto: 'Auto-detect language',
@@ -62,11 +62,11 @@ const T = {
     authWeak: 'Enter a valid email and a password of at least 6 characters.',
     authCheckEmail: 'Account created \u2014 check your email to confirm, then sign in.',
     authError: 'Sign-in failed \u2014 please try again.',
-    upgradeTitle: 'Free trial used',
-    upgradeSub: "You've used your free try. Subscribe for unlimited study guides.",
-    upgradeFeatures: ['30 tokens per month', 'Priority processing', 'All features included'],
-    upgradeBtn: 'Subscribe — $2.99 / month',
-    upgradeFree: 'Free: 1 try, then subscribe',
+    upgradeTitle: "You're out of free guides",
+    upgradeSub: "You've used your free guides for now. Go Pro for 30 a month plus priority processing.",
+    upgradeFeatures: ['30 guides per month', 'Priority processing', 'All features included'],
+    upgradeBtn: 'Go Pro — $2.99 / month',
+    upgradeFree: 'Free: 5 guides on signup, then 3 every month',
     signIn: 'Sign in',
     signOut: 'Sign out',
     tokensLeft: 'tokens',
@@ -80,10 +80,10 @@ const T = {
     accountExists: 'An account already exists for this email. Sign in instead.',
     freeLeft: (n) => `${n} free ${n === 1 ? 'preview' : 'previews'} left`,
     freeTry: 'Try free, no sign-up',
-    signInForMore: 'Free trial used — sign in to subscribe.',
-    // Email capture (before paywall)
-    emailCaptureTitle: 'One step to continue',
-    emailCaptureSub: "You've used your free try. Enter your email to continue — we'll keep you posted and get you set up. No spam.",
+    signInForMore: 'Loved it? Sign up free — 5 more guides on us.',
+    // Email capture (before signup invite)
+    emailCaptureTitle: 'Get 5 free study guides',
+    emailCaptureSub: "Drop your email and we'll set you up with 5 free guides — then 3 free every month. No spam.",
     emailPlaceholder: 'you@email.com',
     emailCaptureBtn: 'Continue',
     emailSkip: 'Skip for now',
@@ -98,9 +98,9 @@ const T = {
   ar: {
     brand: 'علّمني',
     badge: 'ذكاء اصطناعي · دراسة ذكية',
-    h1a: 'حوّل الشرائح إلى',
+    h1a: 'حوّل أي محاضرة إلى',
     h1b: 'أدلة دراسة',
-    sub: 'ارفع شرائح أو الصق نصاً أو أدخل رابط YouTube للحصول على أدلة دراسة.',
+    sub: 'ارفع عرضاً تقديمياً أو PDF أو رابط محاضرة من YouTube — واحصل على دليل جاهز للامتحان مع ملخص وبطاقات وأسئلة مراجعة خلال ثوانٍ. ابدأ مجاناً، بدون بطاقة.',
     dropTitle: 'أسقط ملفات PowerPoint أو PDF هنا',
     dropSub: 'أو انقر للتصفح — .pptx / .ppt / .pdf / .docx / .doc / .txt، يدعم ملفات متعددة',
     langAuto: 'اكتشاف اللغة تلقائياً',
@@ -138,11 +138,11 @@ const T = {
     authWeak: 'أدخل بريداً صحيحاً وكلمة مرور من 6 أحرف على الأقل.',
     authCheckEmail: 'تم إنشاء الحساب — تحقق من بريدك للتأكيد ثم سجّل الدخول.',
     authError: 'فشل تسجيل الدخول — حاول مجدداً.',
-    upgradeTitle: 'انتهت تجربتك المجانية',
-    upgradeSub: 'لقد استخدمت تجربتك المجانية. اشترك للحصول على أدلة دراسة غير محدودة.',
-    upgradeFeatures: ['30 رمزاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
+    upgradeTitle: 'انتهت أدلتك المجانية',
+    upgradeSub: 'استخدمت أدلتك المجانية الآن. اشترك للحصول على 30 دليلاً شهرياً ومعالجة ذات أولوية.',
+    upgradeFeatures: ['30 دليلاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
     upgradeBtn: 'اشترك — 2.99$ / شهر',
-    upgradeFree: 'مجاناً: محاولة واحدة، ثم اشترك',
+    upgradeFree: 'مجاناً: 5 أدلة عند التسجيل، ثم 3 كل شهر',
     signIn: 'تسجيل الدخول',
     signOut: 'تسجيل الخروج',
     tokensLeft: 'رموز متبقية',
@@ -156,9 +156,9 @@ const T = {
     accountExists: 'يوجد حساب بهذا البريد بالفعل. سجّل الدخول بدلاً من ذلك.',
     freeLeft: (n) => `${n} ${n === 1 ? 'معاينة' : 'معاينات'} مجانية متبقية`,
     freeTry: 'جرّب مجاناً، بدون تسجيل',
-    signInForMore: 'انتهت تجربتك المجانية — سجّل الدخول للاشتراك.',
-    emailCaptureTitle: 'خطوة واحدة للمتابعة',
-    emailCaptureSub: 'لقد استخدمت تجربتك المجانية. أدخل بريدك الإلكتروني للمتابعة — سنبقيك على اطلاع ونساعدك على البدء. بدون إزعاج.',
+    signInForMore: 'أعجبك؟ سجّل مجاناً — 5 أدلة إضافية هدية لك.',
+    emailCaptureTitle: 'احصل على 5 أدلة دراسة مجانية',
+    emailCaptureSub: 'أدخل بريدك ونجهّز لك 5 أدلة مجانية — ثم 3 مجاناً كل شهر. بدون إزعاج.',
     emailPlaceholder: 'you@email.com',
     emailCaptureBtn: 'متابعة',
     emailSkip: 'تخطٍّ الآن',
@@ -1025,9 +1025,9 @@ Effective: May 2026
 Alimne is an AI-powered study tool registered under the souc.ai platform. It converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided for educational and personal use on a freemium subscription model.
 
 2. SUBSCRIPTION & BILLING
-• Free: one trial generation (plus one anonymous preview, no account needed).
-• Pro plan: $2.99/month (billed via Stripe). Includes 30 tokens per month.
-• Pro tokens reset at the start of each calendar month.
+• Free: 2 anonymous previews (no account needed), then 5 free guides on sign-up, then 3 free guides every month.
+• Pro plan: $2.99/month (billed via Stripe). Includes 30 guides per month plus priority processing.
+• Free and Pro monthly allowances reset at the start of each calendar month.
 • Subscriptions can be cancelled anytime via the billing portal. No refunds for partial months.
 • Payments are processed by Stripe, Inc. and are subject to Stripe's Terms of Service.
 

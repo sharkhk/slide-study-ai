@@ -353,7 +353,7 @@ def _auth_optional(req):
 # ── Anonymous (no-login) free credits ──────────────────────────────────────────
 # Let visitors try the product a few times without an account. Tracked per-IP in
 # memory over a rolling window; tune with ANON_FREE_LIMIT (0 disables anon use).
-ANON_FREE_LIMIT = int(os.environ.get("ANON_FREE_LIMIT", "1"))
+ANON_FREE_LIMIT = int(os.environ.get("ANON_FREE_LIMIT", "2"))
 _ANON_WINDOW    = int(os.environ.get("ANON_WINDOW_SEC", str(24 * 3600)))
 _anon_lock      = threading.Lock()
 _anon_usage     = {}  # ip -> [timestamps]

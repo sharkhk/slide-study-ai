@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS public.users (
   subscription_status     TEXT DEFAULT 'free',      -- 'free' | 'active' | 'canceled' | 'past_due'
   subscription_period_end TIMESTAMPTZ,
 
-  -- Tokens (free accounts start at 0 — one anonymous try, then subscribe)
-  tokens_remaining        INTEGER DEFAULT 0,
+  -- Tokens (free accounts start with 5 guides; free plan then 3/month — see 006)
+  tokens_remaining        INTEGER DEFAULT 5,
   tokens_month            TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM')
 );
 
@@ -91,9 +91,9 @@ BEGIN
     IF v_user.subscription_status = 'active'
        AND (v_user.subscription_period_end IS NULL
             OR v_user.subscription_period_end > NOW()) THEN
-      v_new_tokens := 20;
+      v_new_tokens := 30;
     ELSE
-      v_new_tokens := 0;   -- free accounts no longer get monthly tokens
+      v_new_tokens := 3;   -- free plan: small recurring monthly allowance
     END IF;
 
     UPDATE public.users
