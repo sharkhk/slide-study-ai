@@ -412,7 +412,7 @@ def _security_headers(resp):
     # a strict script-src; the server-rendered pages (/admin, /api/view/*) use
     # inline <script>/onclick, so only those routes relax script-src.
     _p = request.path
-    _inline_html = _p == "/admin" or _p.startswith("/admin/") or _p.startswith("/api/view/")
+    _inline_html = _p == "/admin" or _p.startswith("/admin/") or _p.startswith("/api/view/") or _p.startswith("/s/")
     _script_src = "script-src 'self' 'unsafe-inline'" if _inline_html else "script-src 'self'"
     resp.headers.setdefault("Content-Security-Policy", (
         "default-src 'self'; "
@@ -2946,6 +2946,258 @@ def get_guide(job_id):
         "objectives": guide.get("objectives", []),
         "language":   guide.get("language", "en"),
     })
+
+
+# ── Shareable public guides ────────────────────────────────────────────────────
+# A guide is ephemeral by default (in-memory, wiped on the job TTL). When a user
+# explicitly clicks "Share", that ONE guide's *content* (never the source file) is
+# persisted to public.shared_guides and gets a public, mobile-first /s/<slug> page
+# — a viral + SEO surface. See migration 007.
+import secrets as _secrets
+_SLUG_CHARS = "abcdefghijkmnpqrstuvwxyz23456789"   # no ambiguous 0/1/l/o
+_SLUG_RE    = re.compile(r"^[a-z0-9]{6,16}$")
+
+def _new_slug(n=8):
+    return "".join(_secrets.choice(_SLUG_CHARS) for _ in range(n))
+
+@app.route("/api/share/<job_id>", methods=["POST"])
+def share_guide(job_id):
+    if not _check_rate_limit(_client_ip(), scope="share", limit=20):
+        return jsonify({"error": "Too many requests. Please wait a moment."}), 429
+    if not _valid_job(job_id):
+        return jsonify({"error": "Invalid job ID"}), 400
+    with _jobs_lock:
+        job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "Session expired — re-generate the guide to share it."}), 404
+    sb = _get_sb()
+    if sb is None:
+        return jsonify({"error": "Sharing is temporarily unavailable."}), 503
+    guide = job.get("guide") or {}
+    uid   = _auth_optional(request)
+    lang  = "ar" if guide.get("language") == "ar" else "en"
+    payload = {
+        "title":      guide.get("title", ""),      "subtitle":   guide.get("subtitle", ""),
+        "sections":   guide.get("sections",   []), "flashcards": guide.get("flashcards", []),
+        "mcqs":       guide.get("mcqs",       []), "keywords":   guide.get("keywords",   []),
+        "objectives": guide.get("objectives", []), "language":   lang,
+    }
+    base = {"guide": payload, "title": (guide.get("title") or "Study Guide")[:200],
+            "language": lang, "created_by": uid}
+    for _ in range(6):
+        slug = _new_slug()
+        try:
+            sb.table("shared_guides").insert({**base, "slug": slug}).execute()
+            _log.info("Guide shared: /s/%s (by=%s)", slug, uid or "anon")
+            return jsonify({"ok": True, "slug": slug, "url": f"{APP_URL}/s/{slug}"})
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "duplicate" in msg or "unique" in msg or "23505" in msg:
+                continue
+            _log.error("share failed: %s", exc)
+            return jsonify({"error": "Could not create a share link right now."}), 500
+    return jsonify({"error": "Could not create a share link right now."}), 500
+
+
+def _sg_bullet(b):
+    if isinstance(b, str):  return b
+    if isinstance(b, dict): return b.get("text") or b.get("fact") or ""
+    return str(b)
+
+def _sg_desc(g):
+    parts = [o for o in (g.get("objectives") or []) if isinstance(o, str) and o.strip()]
+    if not parts:
+        for sec in (g.get("sections") or []):
+            for b in (sec.get("bullets") or []):
+                t = _sg_bullet(b).strip()
+                if t:
+                    parts.append(t); break
+            if parts: break
+    d = " · ".join(parts) if parts else "A free study guide with key points, flashcards and a quiz."
+    return d[:180]
+
+def _mcq_correct(opt, ans):
+    o, a = str(opt).strip(), str(ans).strip()
+    if not a: return False
+    if len(a) == 1 and o[:1].upper() == a.upper(): return True
+    body = re.sub(r'^[A-Za-z][\).\-]\s*', '', o).strip().lower()
+    return body == a.lower() or o.lower() == a.lower()
+
+_SHARED_CSS = """
+*{box-sizing:border-box}
+:root{--bg:#f4f7fc;--card:#fff;--bd:#e2e8f2;--ink:#15202e;--soft:#495a70;--mut:#7b8798;
+  --accent:#3b6fe0;--accent2:#7c5cff;--good:#12a35f;--good-bg:#e7f7ef}
+@media(prefers-color-scheme:dark){:root{--bg:#0c1017;--card:#141b26;--bd:#28323f;--ink:#e9eef6;
+  --soft:#aeb9c9;--mut:#7c899c;--accent:#6f9dff;--accent2:#9d80ff;--good:#33d191;--good-bg:rgba(51,209,145,.13)}}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);line-height:1.62;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif}
+a{color:var(--accent)}
+img{max-width:100%}
+.bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:1rem;
+  padding:.7rem clamp(1rem,4vw,2rem);background:color-mix(in srgb,var(--bg) 90%,transparent);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--bd)}
+.brand{font-weight:800;font-size:1.05rem;letter-spacing:-.01em;text-decoration:none;color:var(--ink)}
+.cta-btn{white-space:nowrap;font-weight:700;font-size:.85rem;text-decoration:none;color:#fff;
+  background:linear-gradient(100deg,var(--accent),var(--accent2));padding:.5rem .95rem;border-radius:9px}
+.wrap{max-width:760px;margin:0 auto;padding:clamp(1.2rem,4vw,2.4rem) clamp(1rem,4vw,1.6rem) 3rem}
+.tag{font-size:.72rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--accent)}
+h1{font-size:clamp(1.6rem,5.5vw,2.3rem);line-height:1.12;letter-spacing:-.02em;margin:.5rem 0 .35rem;text-wrap:balance}
+.sub{font-size:1.06rem;color:var(--soft);margin:0 0 .55rem}
+.meta{font-size:.82rem;color:var(--mut);margin:0 0 1.7rem}
+.sec{margin:1.9rem 0}
+.sec h2{font-size:1.2rem;letter-spacing:-.01em;margin:0 0 .6rem;padding-left:.6rem;border-left:3px solid var(--accent)}
+.sec ul{margin:0;padding-left:1.2rem;display:flex;flex-direction:column;gap:.35rem}
+.sec li{color:var(--soft)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:.7rem}
+.fc{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:.85rem 1rem}
+.fc-q{font-weight:700}.fc-a{color:var(--good);margin-top:.3rem;font-size:.95rem}
+.qz{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:.9rem 1.05rem;margin-bottom:.7rem}
+.qz-q{font-weight:700;margin-bottom:.55rem}
+.opts{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:.35rem}
+.opts .opt{font-size:.92rem;color:var(--soft);padding:.4rem .65rem;border-radius:8px;border:1px solid transparent}
+.opts .opt.correct{color:var(--good);background:var(--good-bg);font-weight:600;border-color:color-mix(in srgb,var(--good) 32%,transparent)}
+.expl{font-size:.85rem;color:var(--mut);margin-top:.55rem;padding-top:.5rem;border-top:1px solid var(--bd)}
+.kw{padding:.5rem 0;border-bottom:1px solid var(--bd)}
+.kw dt{font-weight:700}.kw dd{margin:.1rem 0 0;color:var(--soft);font-size:.93rem}
+.promo{margin-top:2.4rem;background:linear-gradient(120deg,var(--accent),var(--accent2));color:#fff;
+  border-radius:16px;padding:clamp(1.3rem,4vw,2rem);text-align:center}
+.promo h3{margin:0 0 .4rem;font-size:clamp(1.2rem,4vw,1.5rem)}
+.promo p{margin:0 0 1.1rem;opacity:.92}
+.promo a{display:inline-block;background:#fff;color:var(--accent);font-weight:800;text-decoration:none;padding:.72rem 1.6rem;border-radius:10px}
+.foot{margin-top:1.6rem;text-align:center;font-size:.8rem;color:var(--mut)}
+[dir="rtl"] .sec h2{border-left:0;border-right:3px solid var(--accent);padding-left:0;padding-right:.6rem}
+[dir="rtl"] .sec ul{padding-left:0;padding-right:1.2rem}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+"""
+
+def _shared_shell(title_tag, head_extra, body_html, lang="en"):
+    d = "rtl" if lang == "ar" else "ltr"
+    return ("<!DOCTYPE html><html lang=\"%s\" dir=\"%s\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>%s</title>%s<style>%s</style></head><body>%s</body></html>"
+            ) % (lang, d, title_tag, head_extra, _SHARED_CSS, body_html)
+
+def _shared_404():
+    body = ("<div class=\"bar\"><a class=\"brand\" href=\"%s/\">📖 Alimne</a>"
+            "<a class=\"cta-btn\" href=\"%s/\">Try it free</a></div>"
+            "<div class=\"wrap\" style=\"text-align:center;padding-top:3rem\">"
+            "<h1>This guide isn't here</h1><p class=\"sub\">The link may be wrong, or the guide was never published.</p>"
+            "<div class=\"promo\"><h3>Make your own study guide — free</h3>"
+            "<p>Turn any lecture into notes, flashcards &amp; a quiz.</p>"
+            "<a href=\"%s/?utm_source=shared_guide&utm_medium=share&utm_campaign=notfound\">Start free</a></div></div>"
+            ) % (APP_URL, APP_URL, APP_URL)
+    return _shared_shell("Guide not found · Alimne", "", body)
+
+def _render_shared_guide(row):
+    g      = row.get("guide") or {}
+    is_ar  = (row.get("language") or g.get("language")) == "ar"
+    L = {
+        "tag":   "دليل دراسة" if is_ar else "Study guide",
+        "try":   "جرّب مجاناً" if is_ar else "Try it free",
+        "learn": "ماذا ستتعلّم" if is_ar else "What you'll learn",
+        "keys":  "مصطلحات أساسية" if is_ar else "Key terms",
+        "cards": "بطاقات تعليمية" if is_ar else "Flashcards",
+        "quiz":  "اختبار" if is_ar else "Quiz",
+        "ptitle":"أنشئ دليل دراستك مجاناً" if is_ar else "Make your own study guide — free",
+        "psub":  "ارفع محاضرة — PowerPoint أو PDF أو رابط YouTube — واحصل على ملخص وبطاقات واختبار خلال ثوانٍ."
+                 if is_ar else "Upload a lecture — PowerPoint, PDF, or a YouTube link — and get notes, flashcards and a quiz in seconds.",
+        "pbtn":  "ابدأ مجاناً" if is_ar else "Start free",
+    }
+    title_raw = g.get("title") or "Study Guide"
+    title = _he(title_raw)
+    desc  = _sg_desc(g)
+    sub   = ("<p class=\"sub\">%s</p>" % _he(g.get("subtitle"))) if g.get("subtitle") else ""
+
+    flashcards = [f for f in (g.get("flashcards") or []) if isinstance(f, dict)]
+    mcqs       = [m for m in (g.get("mcqs") or []) if isinstance(m, dict)]
+    meta_bits = []
+    if flashcards: meta_bits.append(("%d بطاقة" % len(flashcards)) if is_ar else "%d flashcards" % len(flashcards))
+    if mcqs:       meta_bits.append(("%d سؤال" % len(mcqs)) if is_ar else "%d quiz questions" % len(mcqs))
+    meta_bits.append("مجاناً عبر Alimne" if is_ar else "free · via Alimne")
+    meta = "<div class=\"meta\">%s</div>" % _he(" · ".join(meta_bits))
+
+    parts = []
+    objs = [o for o in (g.get("objectives") or []) if isinstance(o, str) and o.strip()]
+    if objs:
+        parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (
+            _he(L["learn"]), "".join("<li>%s</li>" % _he(o) for o in objs)))
+    for sec in (g.get("sections") or []):
+        if not isinstance(sec, dict): continue
+        lis = "".join("<li>%s</li>" % _he(_sg_bullet(b).strip())
+                      for b in (sec.get("bullets") or []) if _sg_bullet(b).strip())
+        if lis:
+            parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (_he(sec.get("title", "")), lis))
+    kws = [k for k in (g.get("keywords") or []) if isinstance(k, dict) and k.get("term")]
+    if kws:
+        dl = "".join("<div class=\"kw\"><dt>%s</dt><dd>%s</dd></div>" % (_he(k.get("term", "")), _he(k.get("definition", ""))) for k in kws)
+        parts.append("<section class=\"sec\"><h2>%s</h2>%s</section>" % (_he(L["keys"]), dl))
+    if flashcards:
+        cards = "".join("<div class=\"fc\"><div class=\"fc-q\">%s</div><div class=\"fc-a\">%s</div></div>" % (
+            _he(f.get("q") or f.get("question") or ""), _he(f.get("a") or f.get("answer") or "")) for f in flashcards)
+        parts.append("<section class=\"sec\"><h2>%s</h2><div class=\"grid\">%s</div></section>" % (_he(L["cards"]), cards))
+    if mcqs:
+        qz = []
+        for m in mcqs:
+            qt = _he(m.get("q") or m.get("question") or "")
+            ans = m.get("answer", m.get("correct", ""))
+            opts = "".join("<li class=\"opt%s\">%s%s</li>" % (
+                " correct" if _mcq_correct(o, ans) else "",
+                "✓ " if _mcq_correct(o, ans) else "",
+                _he(o if isinstance(o, str) else str(o))) for o in (m.get("options") or []))
+            expl = m.get("explanation") or m.get("rationale") or ""
+            ex = ("<div class=\"expl\">%s</div>" % _he(expl)) if expl else ""
+            qz.append("<div class=\"qz\"><div class=\"qz-q\">%s</div><ul class=\"opts\">%s</ul>%s</div>" % (qt, opts, ex))
+        parts.append("<section class=\"sec\"><h2>%s</h2>%s</section>" % (_he(L["quiz"]), "".join(qz)))
+
+    slug = row.get("slug", "")
+    cta_q = "?utm_source=shared_guide&utm_medium=share&utm_campaign="
+    body = (
+        "<div class=\"bar\"><a class=\"brand\" href=\"%s/\">📖 Alimne</a>"
+        "<a class=\"cta-btn\" href=\"%s/%sshare_bar\">%s</a></div>"
+        "<div class=\"wrap\"><div class=\"tag\">%s</div><h1>%s</h1>%s%s%s"
+        "<div class=\"promo\"><h3>%s</h3><p>%s</p>"
+        "<a href=\"%s/%sshare_cta\">%s</a></div>"
+        "<div class=\"foot\">Made with alimne.app — turn any lecture into a study guide.</div></div>"
+    ) % (APP_URL, APP_URL, cta_q, _he(L["try"]), _he(L["tag"]), title, sub, meta,
+         "".join(parts), _he(L["ptitle"]), _he(L["psub"]), APP_URL, cta_q, _he(L["pbtn"]))
+
+    ld = {"@context": "https://schema.org", "@type": "LearningResource",
+          "name": title_raw, "description": desc, "inLanguage": row.get("language", "en"),
+          "url": f"{APP_URL}/s/{slug}", "isAccessibleForFree": True,
+          "learningResourceType": "Study guide",
+          "provider": {"@type": "Organization", "name": "Alimne", "url": APP_URL}}
+    head = (
+        "<meta name=\"description\" content=\"%s\">"
+        "<link rel=\"canonical\" href=\"%s/s/%s\">"
+        "<meta property=\"og:type\" content=\"article\"><meta property=\"og:site_name\" content=\"Alimne\">"
+        "<meta property=\"og:title\" content=\"%s\"><meta property=\"og:description\" content=\"%s\">"
+        "<meta property=\"og:url\" content=\"%s/s/%s\"><meta name=\"twitter:card\" content=\"summary\">"
+        "<script type=\"application/ld+json\">%s</script>"
+    ) % (_he(desc), APP_URL, _he(slug), title, _he(desc), APP_URL, _he(slug),
+         json.dumps(ld).replace("<", "\\u003c"))
+    page_title = "%s — %s · Alimne" % (title, _he(L["tag"]))
+    return _shared_shell(page_title, head, body, "ar" if is_ar else "en")
+
+@app.route("/s/<slug>")
+def shared_guide_page(slug):
+    if not _SLUG_RE.match(slug or ""):
+        return _shared_404(), 404
+    sb = _get_sb()
+    if sb is None:
+        return _shared_404(), 404
+    try:
+        res = sb.table("shared_guides").select("slug,guide,title,language").eq("slug", slug).single().execute()
+        row = res.data
+    except Exception:
+        row = None
+    if not row:
+        return _shared_404(), 404
+    try:
+        sb.rpc("bump_shared_views", {"p_slug": slug}).execute()
+    except Exception:
+        pass
+    return _render_shared_guide(row)
 
 
 @app.route("/api/chat/<job_id>", methods=["POST"])
