@@ -3964,8 +3964,52 @@ def _fetch_url_text(url):
     return ' '.join(parts) if parts else ' '.join(re.sub(r'<[^>]+>', ' ', html).split())
 
 
+# Fixed sample lecture for the zero-friction "Try a sample" demo (no credit spent).
+_DEMO_TEXT_EN = (
+    "Photosynthesis is the process by which green plants, algae, and some bacteria convert "
+    "light energy into chemical energy stored in glucose. It takes place mainly in the leaves, "
+    "inside organelles called chloroplasts, which contain the green pigment chlorophyll. The "
+    "overall equation is: six carbon dioxide molecules plus six water molecules, using light "
+    "energy, produce one glucose molecule and six oxygen molecules. Photosynthesis has two main "
+    "stages. The light-dependent reactions occur in the thylakoid membranes: chlorophyll absorbs "
+    "sunlight, water is split to release oxygen, and the energy carriers ATP and NADPH are "
+    "produced. The light-independent reactions, also called the Calvin cycle, take place in the "
+    "stroma: ATP and NADPH are used to fix carbon dioxide into glucose. Several factors affect "
+    "the rate of photosynthesis, including light intensity, carbon dioxide concentration, and "
+    "temperature. Photosynthesis is essential to life on Earth because it releases oxygen and "
+    "forms the base of most food chains."
+)
+_DEMO_TEXT_AR = (
+    "البناء الضوئي هو العملية التي تحوّل بها النباتات الخضراء والطحالب وبعض البكتيريا طاقة الضوء "
+    "إلى طاقة كيميائية مخزّنة في الجلوكوز. تحدث هذه العملية بشكل رئيسي في الأوراق داخل عُضيّات "
+    "تُسمى البلاستيدات الخضراء التي تحتوي على صبغة الكلوروفيل الخضراء. المعادلة الإجمالية: ستة "
+    "جزيئات من ثاني أكسيد الكربون مع ستة جزيئات ماء، وباستخدام طاقة الضوء، تنتج جزيء جلوكوز واحد "
+    "وستة جزيئات أكسجين. للبناء الضوئي مرحلتان: التفاعلات المعتمدة على الضوء تحدث في أغشية "
+    "الثايلاكويد حيث يمتص الكلوروفيل ضوء الشمس ويُشطر الماء لإطلاق الأكسجين وتُنتَج حاملات الطاقة "
+    "ATP وNADPH؛ والتفاعلات غير المعتمدة على الضوء (دورة كالفن) تحدث في الحشوة حيث تُستخدَم ATP "
+    "وNADPH لتثبيت ثاني أكسيد الكربون في الجلوكوز. تؤثر عدة عوامل في معدله منها شدة الضوء وتركيز "
+    "ثاني أكسيد الكربون ودرجة الحرارة. وهو ضروري للحياة لأنه ينتج الأكسجين ويشكّل أساس السلاسل الغذائية."
+)
+
 @app.route("/api/summarize-text", methods=["POST"])
 def summarize_text():
+    # Zero-friction demo: a curious visitor (esp. on mobile, with no file to hand)
+    # taps "Try a sample" → a real guide on a FIXED server-side lecture. No credit
+    # consumed; separate tighter rate limit; fixed text can't be abused as a free
+    # generator. This is the activation unlock — the point is that they SEE it work.
+    _peek = request.get_json(silent=True) or {}
+    if _peek.get("demo"):
+        if not _check_rate_limit(_client_ip(), scope="demo", limit=8):
+            return jsonify({"error": "Too many demo runs — please wait a moment."}), 429
+        if not ollama_running():
+            return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
+        d_lang = "ar" if _peek.get("language") == "ar" else "en"
+        d_text = _DEMO_TEXT_AR if d_lang == "ar" else _DEMO_TEXT_EN
+        gen = _stream_text_as_sse(d_text, d_lang, "sample_lecture", "text",
+                                  DETAIL["standard"], 0, True, uid=None, anon_ip=None)
+        return Response(stream_with_context(gen()), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     # Rate-limit BEFORE the server-side URL fetch + multi-pass LLM run.
     if not _check_rate_limit(_client_ip(), scope="text", limit=_RATE_MAX):
         return jsonify({"error": "Too many requests — please wait a moment and try again."}), 429

@@ -101,6 +101,12 @@ const T = {
     shareCopied: 'Public link copied — anyone can open it',
     shareFailed: 'Could not create a share link. Try again.',
     shareNote: 'public link',
+    // Instant demo
+    sampleCta: 'See it work — try a sample lecture',
+    sampleCtaSub: 'No file needed. Watch a real study guide build in seconds.',
+    sampleName: 'Sample lecture: Photosynthesis',
+    sampleMsg: 'Building your sample guide…',
+    sampleOr: 'or use your own below',
     // Landing proof / sample output
     sampleTitle: 'See what you get',
     sampleSub: "Every upload becomes a clean study guide — key points, flashcards, and a quiz you can actually revise from. Here's a real example.",
@@ -209,6 +215,12 @@ const T = {
     shareCopied: 'تم نسخ الرابط العام — يمكن لأي شخص فتحه',
     shareFailed: 'تعذّر إنشاء رابط المشاركة. حاول مرة أخرى.',
     shareNote: 'رابط عام',
+    // Instant demo
+    sampleCta: 'شاهدها تعمل — جرّب محاضرة نموذجية',
+    sampleCtaSub: 'بدون ملف. شاهد إنشاء دليل دراسة حقيقي خلال ثوانٍ.',
+    sampleName: 'محاضرة نموذجية: البناء الضوئي',
+    sampleMsg: 'جارٍ إنشاء دليلك النموذجي…',
+    sampleOr: 'أو استخدم ملفك بالأسفل',
     // Landing proof / sample output
     sampleTitle: 'شاهد ما ستحصل عليه',
     sampleSub: 'كل ملف يتحوّل إلى دليل مذاكرة منظّم — نقاط رئيسية وبطاقات وأسئلة تراجع منها فعلاً. إليك مثال حقيقي.',
@@ -1807,6 +1819,30 @@ export default function App() {
     setPasteUrl('')
   }
 
+  // ── Zero-friction demo: one tap → a real guide on a sample lecture (no file,
+  //    no credit). The activation unlock for visitors with nothing to upload. ──
+  const runSample = () => {
+    if (running) return
+    setRunning(true)
+    setInputTab('upload')
+    const qitem = { id: uid(), file: null, name: t.sampleName, status: 'processing', jobId: null, error: null, step: 'extract', msg: t.sampleMsg, demo: true }
+    setQueue(prev => [...prev, qitem])
+    streamSSE(
+      '/api/summarize-text',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ demo: true, language: lang === 'ar' ? 'ar' : 'en' }) },
+      (ev) => {
+        if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); setRunning(false); return }
+        if (ev.step === 'done') {
+          updateItem(qitem.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
+          setRunning(false)   // demo spends no preview — don't touch anon/user token state
+        } else {
+          updateItem(qitem.id, { step: ev.step, msg: ev.msg })
+        }
+      },
+      (err) => { setRunning(false); updateItem(qitem.id, { status: 'error', error: err }) }
+    )
+  }
+
   const downloadPDF = (item) => {
     if (!item.jobId) return
     const a = document.createElement('a')
@@ -1985,6 +2021,27 @@ export default function App() {
               <h1>{t.h1a} <span>{t.h1b}</span></h1>
               <p>{t.sub}</p>
             </div>
+
+            {/* Instant demo — zero-friction activation CTA (first screen only).
+                Most real visitors are on phones with no file to upload; this lets
+                them see a real guide build in one tap. */}
+            {!hasQueue && (
+              <div style={{textAlign:'center', margin:'0 auto 1.2rem', maxWidth:'440px'}}>
+                <button onClick={runSample} disabled={running}
+                  style={{
+                    display:'inline-flex', alignItems:'center', justifyContent:'center', gap:'0.5rem',
+                    width:'100%', padding:'0.95rem 1.4rem', borderRadius:'13px', border:'none',
+                    cursor: running ? 'default' : 'pointer', opacity: running ? 0.65 : 1,
+                    background:'linear-gradient(100deg, var(--accent), #8b5cf6)', color:'#fff',
+                    fontWeight:800, fontSize:'1rem', fontFamily:'inherit',
+                    boxShadow:'0 12px 26px -12px rgba(79,142,247,0.65)',
+                  }}>
+                  <Sparkles size={17} /> {t.sampleCta}
+                </button>
+                <div style={{fontSize:'0.82rem', color:'var(--text-muted)', marginTop:'0.55rem', lineHeight:1.4}}>{t.sampleCtaSub}</div>
+                <div style={{fontSize:'0.72rem', color:'var(--text-muted)', marginTop:'0.7rem', opacity:0.7, textTransform:'uppercase', letterSpacing:'0.06em'}}>{t.sampleOr}</div>
+              </div>
+            )}
 
             {/* Input mode tabs + card */}
             <div className="glass upload-card">
