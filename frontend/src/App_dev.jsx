@@ -295,6 +295,22 @@ function useEscapeKey(fn) {
   }, [fn])
 }
 
+// Persistent per-device id — lets the backend keep the anonymous free-preview
+// quota tied to this device (durable across restarts + network changes) without
+// any login. Best-effort: if storage is blocked, we send nothing and the backend
+// falls back to its per-IP check.
+function getDeviceId() {
+  try {
+    let d = localStorage.getItem('alimne_device_id')
+    if (!d) {
+      d = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+            : (Date.now().toString(36) + Math.random().toString(36).slice(2, 14))
+      localStorage.setItem('alimne_device_id', d)
+    }
+    return d
+  } catch { return '' }
+}
+
 // ── SSE stream helper ─────────────────────────────────────────────────────────
 // onError receives (message, httpStatus, rawData)
 function streamSSE(url, options, onEvent, onError) {
@@ -1526,7 +1542,7 @@ export default function App() {
   // ── Supabase init + auth ────────────────────────────────────────────────────
   useEffect(() => {
     let authSub = null
-    fetch('/api/config')
+    fetch('/api/config', { headers: { 'X-Device-Id': getDeviceId() } })
       .then(r => r.json())
       .then(cfg => {
         setAuthEnabled(!!cfg.auth_enabled)
@@ -1593,8 +1609,11 @@ export default function App() {
     }).catch(() => {})
   }
 
-  const getAuthHeaders = () =>
-    session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}
+  const getAuthHeaders = () => {
+    const h = { 'X-Device-Id': getDeviceId() }
+    if (session?.access_token) h.Authorization = `Bearer ${session.access_token}`
+    return h
+  }
 
   const signIn = () => {
     if (!sbClient) return

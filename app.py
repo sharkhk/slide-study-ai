@@ -384,6 +384,51 @@ def _anon_refund(ip):
             times.pop()
             _anon_usage[ip] = times
 
+# ── Durable per-device anonymous quota (survives restart + IP change) ───────────
+# A persistent browser device id (X-Device-Id, from localStorage) is counted in
+# Supabase, so the same device can't reset its free previews by restarting the
+# server or hopping networks. Everything here FAILS OPEN: no device id, Supabase
+# down, or the migration not yet run → returns None so the caller falls back to
+# the in-memory per-IP check. A DB hiccup must never block a real student.
+_DEV_ID_RE          = re.compile(r'^[A-Za-z0-9_-]{8,64}$')
+_ANON_WINDOW_HOURS  = int(os.environ.get("ANON_WINDOW_HOURS", str(24 * 3650)))  # ~permanent
+
+def _device_id(req):
+    d = (req.headers.get("X-Device-Id") or "").strip()
+    return d if _DEV_ID_RE.match(d) else None
+
+def _anon_durable_consume(dev):
+    """Durable device-keyed consume → (ok, remaining), or None to fall back."""
+    if not dev:
+        return None
+    sb = _get_sb()
+    if sb is None:
+        return None
+    try:
+        res = sb.rpc("anon_consume", {"p_key": f"dev:{dev}", "p_limit": ANON_FREE_LIMIT,
+                                      "p_window_hours": _ANON_WINDOW_HOURS}).execute()
+        d = res.data if isinstance(res.data, dict) else {}
+        if "ok" not in d:
+            return None
+        return bool(d.get("ok")), int(d.get("remaining", 0))
+    except Exception as exc:
+        _log.error("anon durable consume failed: %s", exc)
+        return None  # fail open
+
+def _anon_durable_remaining(dev):
+    """Durable remaining for the badge → int, or None to fall back."""
+    if not dev:
+        return None
+    sb = _get_sb()
+    if sb is None:
+        return None
+    try:
+        res = sb.rpc("anon_remaining", {"p_key": f"dev:{dev}", "p_limit": ANON_FREE_LIMIT,
+                                        "p_window_hours": _ANON_WINDOW_HOURS}).execute()
+        return int(res.data) if res.data is not None else None
+    except Exception:
+        return None
+
 def _refund_credit(uid, ip):
     """Refund one credit to whoever was charged — signed-in user or anon IP."""
     if uid:
@@ -2562,7 +2607,8 @@ def api_config():
         "stripe_publishable_key": STRIPE_PUBLISHABLE_KEY,
         "auth_enabled":          _AUTH_ENABLED,
         "anon_free_limit":       ANON_FREE_LIMIT,
-        "anon_remaining":        _anon_remaining(_client_ip()),
+        "anon_remaining":        (lambda d: d if d is not None else _anon_remaining(_client_ip()))(
+                                     _anon_durable_remaining(_device_id(request))),
     })
 
 
@@ -2880,7 +2926,8 @@ def summarize_stream():
             }), 402
     else:
         anon_ip = _client_ip()
-        ok, tok_left = _anon_consume(anon_ip)
+        _dur = _anon_durable_consume(_device_id(request))
+        ok, tok_left = _dur if _dur is not None else _anon_consume(anon_ip)
         if not ok:
             return jsonify({
                 "error": "You've used your free previews. Sign up free to get more.",
@@ -3920,7 +3967,8 @@ def youtube_transcript():
             }), 402
     else:
         anon_ip = _client_ip()
-        ok, tok_left = _anon_consume(anon_ip)
+        _dur = _anon_durable_consume(_device_id(request))
+        ok, tok_left = _dur if _dur is not None else _anon_consume(anon_ip)
         if not ok:
             return jsonify({
                 "error": "You've used your free previews. Sign up free to get more.",
@@ -4112,7 +4160,8 @@ def summarize_text():
             }), 402
     else:
         anon_ip = _client_ip()
-        ok, tok_left = _anon_consume(anon_ip)
+        _dur = _anon_durable_consume(_device_id(request))
+        ok, tok_left = _dur if _dur is not None else _anon_consume(anon_ip)
         if not ok:
             return jsonify({
                 "error": "You've used your free previews. Sign up free to get more.",
