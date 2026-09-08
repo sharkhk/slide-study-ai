@@ -1770,7 +1770,7 @@ Return JSON:
 }}
 
 Rules:
-- bullets: {dcfg['bullets']} specific, exam-worthy facts taken directly from the content above, focused ONLY on "{title}". Do NOT restate the whole overview or repeat generic intro facts that belong to other sections — cover only what is specific to THIS section.
+- bullets: {dcfg['bullets']} specific, exam-worthy facts taken directly from the content above, focused ONLY on "{title}". Do NOT restate the whole overview or repeat generic intro facts that belong to other sections — cover only what is specific to THIS section. Start directly with facts specific to "{title}"; do NOT open with the overall time period or a one-line summary of the whole topic.
 - table: include ONLY if content has roles/comparisons/structured lists; otherwise omit the table field entirely
 {_lang_rules(language)}
 - Output JSON only""", num_predict=dcfg["num_predict"])
