@@ -2299,7 +2299,9 @@ def _page_num(canvas, doc):
     canvas.setFillColor(TEXT_LIGHT)
     n = canvas.getPageNumber()
     canvas.drawRightString(doc.width + doc.leftMargin, 0.55*cm, f"{n}")
-    canvas.drawString(doc.leftMargin, 0.55*cm, doc.title_str if hasattr(doc, 'title_str') else '')
+    # NB: the running footer uses Helvetica (no Arabic glyphs), so we do NOT draw
+    # the guide title here — an Arabic title rendered as ▯▯▯ tofu. The title is
+    # already on the cover. Keep only the page number + the Latin brand mark.
     # Brand mark on every page — a free viral loop when guides get shared.
     canvas.drawCentredString(doc.width/2 + doc.leftMargin, 0.55*cm, "Made with alimne.app")
     canvas.restoreState()
