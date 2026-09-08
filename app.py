@@ -1657,13 +1657,21 @@ def _lang_rules(language):
                      "Use correct, natural Arabic grammar and spelling.")
     else:
         lang_line = "Write every text value in clear English."
+    keep_lang = (
+        "- Keep every word in the SAME script/language the source uses. If the source writes a "
+        "name or place in Arabic, keep it in Arabic — never switch it to English (e.g. keep "
+        "«فرنسا»، «بريطانيا»، «روسيا»، «ألمانيا»; do NOT write France/Britain/Russia/Germany). Only "
+        "genuinely Latin-script terms in the source (acronyms/formulas like ATP, CO2, DNA) stay Latin.\n"
+        if language == "ar" else ""
+    )
     return (
         "- " + lang_line + " Keep all JSON keys in English exactly as shown.\n"
         "- ACCURACY IS CRITICAL: use ONLY facts that appear in the source above. "
         "Do NOT invent, assume, or add anything that is not stated in the source.\n"
         "- Copy every name, person, place, acronym, symbol (e.g. ATP, CO2, DNA) and number "
         "EXACTLY as written in the source. Never rename, translate, transliterate, or alter a "
-        "proper noun, technical term, or formula — even when writing in Arabic.\n"
+        "proper noun, technical term, or formula.\n"
+        + keep_lang +
         "- If the source does not cover something, leave it out rather than making it up."
     )
 
@@ -1726,7 +1734,7 @@ Return JSON:
 }}
 
 Rules:
-- Group related slides into 3-7 logical sections
+- Group related slides into logical sections SIZED TO THE MATERIAL: use as few as 1 section for short material, up to 7 for long material, and NEVER more sections than there are slides. Each slide belongs to exactly ONE section (non-overlapping slide_nums) — never place the same slide, or the same content, in more than one section.
 - objectives: take from a learning-objectives section if present, otherwise summarise the actual content (do not invent goals)
 - keywords: {dcfg['keywords']} terms — only concepts, acronyms, roles and processes that actually appear in the source
 {_lang_rules(language)}
@@ -1762,7 +1770,7 @@ Return JSON:
 }}
 
 Rules:
-- bullets: {dcfg['bullets']} specific, exam-worthy facts taken directly from the content above
+- bullets: {dcfg['bullets']} specific, exam-worthy facts taken directly from the content above, focused ONLY on "{title}". Do NOT restate the whole overview or repeat generic intro facts that belong to other sections — cover only what is specific to THIS section.
 - table: include ONLY if content has roles/comparisons/structured lists; otherwise omit the table field entirely
 {_lang_rules(language)}
 - Output JSON only""", num_predict=dcfg["num_predict"])
@@ -1874,6 +1882,21 @@ def _sections_parallel(sections, content_slides, language, dcfg):
             _log.error("pass2 [%s] error:\n%s", sec.get("title", "?"), _tb.format_exc())
             sec["bullets"] = []
         yield {"step": "section", "msg": f"Sections: {i+1}/{n} done…"}
+
+    # Safety net: on short inputs the model sometimes repeats the same bullets in
+    # every section. Drop any section whose bullets duplicate an earlier one, so a
+    # guide never shows 2-3 identical sections. Mutates in place (same list object
+    # as overview["sections"]). Keep at least one section.
+    seen, keep = set(), []
+    for sec in sections:
+        sig = tuple(str(b).strip() for b in sec.get("bullets", []) if str(b).strip())
+        if sig and sig in seen:
+            continue
+        if sig:
+            seen.add(sig)
+        keep.append(sec)
+    if keep and len(keep) != len(sections):
+        sections[:] = keep
 
 
 def _flashcards_mcq_parallel(overview, language, dcfg, include_quiz=True):
