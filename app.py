@@ -40,7 +40,7 @@ from reportlab.platypus import (
     Paragraph, Spacer, Table, TableStyle,
     HRFlowable, KeepTogether
 )
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 from reportlab.pdfbase import pdfmetrics as _pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont as _TTFont
 
@@ -553,6 +553,29 @@ def _enrich_geo(entry, ip):
         with _geo_lock:
             _geo_inflight.discard(ip)
 
+def _log_usage_async(kind, source, title=""):
+    """Record one generation event (signed-in / anon / demo) so the admin reflects
+    REAL usage that survives restarts. Best-effort, non-blocking: geo is read from
+    the already-warm cache (populated by track_visitor on earlier requests) and the
+    insert runs on a daemon thread so it never delays the stream."""
+    ip = _client_ip()
+    with _geo_lock:
+        geo = dict(_geo_cache.get(ip) or {})
+    country, city = geo.get("country", ""), geo.get("city", "")
+    def _do():
+        sb = _get_sb()
+        if sb is None:
+            return
+        try:
+            sb.table("usage_events").insert({
+                "kind": kind, "source": source,
+                "country": (country or "")[:80], "city": (city or "")[:80],
+                "title": (title or "")[:200],
+            }).execute()
+        except Exception as exc:
+            _log.error("usage log failed: %s", exc)
+    threading.Thread(target=_do, daemon=True).start()
+
 @app.before_request
 def track_visitor():
     skip = ("/assets/", "/favicon", "/admin")
@@ -969,6 +992,39 @@ def admin_page():
     except Exception:
         pass  # leads table may not exist yet (migration 005) — degrade quietly
 
+    # ── Generations (durable usage events — counts anon + demo, survives restarts) ─
+    gens_rows = ""
+    gens_total = gens_today = gens_anon = gens_user = gens_demo = 0
+    try:
+        _sbg = _get_sb()
+        if _sbg is not None:
+            _today = time.strftime("%Y-%m-%d", time.gmtime())
+            _gr = _sbg.table("usage_events").select("kind,source,country,city,created_at", count="exact") \
+                      .order("created_at", desc=True).limit(1000).execute()
+            _gens = _gr.data or []
+            gens_total = _gr.count if getattr(_gr, "count", None) is not None else len(_gens)
+            for G in _gens:
+                k = G.get("kind") or ""
+                if k == "anon":   gens_anon += 1
+                elif k == "demo": gens_demo += 1
+                else:             gens_user += 1
+                if str(G.get("created_at") or "")[:10] == _today:
+                    gens_today += 1
+            for G in _gens[:200]:
+                when   = str(G.get("created_at") or "")[:16].replace("T", " ")
+                k      = G.get("kind") or ""
+                loc    = ", ".join([x for x in [G.get("city"), G.get("country")] if x]) or "—"
+                kcolor = {"user": "#6ee7b7", "anon": "#7cc4ff", "demo": "#a78bfa"}.get(k, "#8aa0c8")
+                gens_rows += f"""
+                  <tr>
+                    <td style="color:#8aa0c8;white-space:nowrap">{_he(when)}</td>
+                    <td><span style="color:{kcolor};font-weight:700">{_he(k or '—')}</span></td>
+                    <td style="color:#8aa0c8;font-size:12px">{_he(G.get('source') or '—')}</td>
+                    <td>{_he(loc)}</td>
+                  </tr>"""
+    except Exception:
+        pass  # usage_events table may not exist yet (migration 008) — degrade quietly
+
     monthly_price = _monthly_price_usd()  # live Stripe price (cached ~1h), USD/month
     mrr = subs_active * monthly_price
     arr = mrr * 12
@@ -1003,10 +1059,15 @@ def admin_page():
           <div style="font-size:1.7rem;font-weight:800;color:#7cc4ff;line-height:1.2">{new_this_week}</div>
           <div style="color:#8aa0c8;font-size:11px">joined in last 7 days</div>
         </div>
+        <div style="background:linear-gradient(135deg,#1a1035,#0f0a28);border:1px solid #6d28d9;border-radius:12px;padding:.75rem 1.1rem;min-width:230px">
+          <div style="color:#c4b5fd;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Generations (all)</div>
+          <div style="font-size:1.7rem;font-weight:800;color:#e8f0ff;line-height:1.2">{gens_total:,}</div>
+          <div style="color:#8aa0c8;font-size:11px">{gens_today} today · {gens_anon} anon · {gens_demo} demo · {gens_user} signed-in</div>
+        </div>
         <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:150px">
-          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Used the app</div>
+          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Signed-in activation</div>
           <div style="font-size:1.7rem;font-weight:800;color:#a78bfa;line-height:1.2">{used_count}</div>
-          <div style="color:#8aa0c8;font-size:11px">of {subs_total} · {total_gens:,} files processed</div>
+          <div style="color:#8aa0c8;font-size:11px">of {subs_total} accounts · {total_gens:,} gens</div>
         </div>
         <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:130px">
           <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Leads</div>
@@ -1030,6 +1091,25 @@ def admin_page():
             <th style="{subs_th}">Actions</th>
           </tr></thead>
           <tbody id="subBody">{subs_rows if subs_rows else '<tr><td colspan="10" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>"""
+
+    gens_section = ""
+    if gens_rows:
+        gens_section = f"""
+    <div style="margin:1.5rem 2rem">
+      <h3 style="margin:0 0 .6rem;color:#e8f0ff;font-size:1rem;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
+        ⚡ Recent generations
+        <span style="background:#4c1d95;color:#ddd6fe;padding:2px 10px;border-radius:20px;font-size:12px">{gens_total:,} total</span>
+        <span style="background:#0a1628;color:#8aa0c8;padding:2px 10px;border-radius:20px;font-size:12px">{gens_today} today</span>
+      </h3>
+      <div style="overflow-x:auto;border:1px solid #16233f;border-radius:10px">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr>
+            <th style="{subs_th}">Time (UTC)</th><th style="{subs_th}">Who</th><th style="{subs_th}">Source</th><th style="{subs_th}">Location</th>
+          </tr></thead>
+          <tbody>{gens_rows}</tbody>
         </table>
       </div>
     </div>"""
@@ -1092,6 +1172,7 @@ def admin_page():
   </div>
 </div>
 {subs_section}
+{gens_section}
 {leads_section}
 {blocked_section}
 <h3 style="margin:1.5rem 2rem .5rem;color:#8aa0c8;font-size:.95rem">🌐 Recent visitors</h3>
@@ -2222,6 +2303,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
         "toc_item": _st("TOI", base, fontSize=9.5,fontName=AF,  textColor=TEXT,         leftIndent=0 if is_ar else 10, rightIndent=10 if is_ar else 0, spaceAfter=2, alignment=ALIGN),
         "sec_title":_st("SCT", base, fontSize=11, fontName=AFB, textColor=WHITE,        alignment=ALIGN),
         "bullet":   _st("BL",  base, fontSize=9.5,fontName=AF,  textColor=TEXT,         leftIndent=0 if is_ar else 12, rightIndent=12 if is_ar else 0, spaceAfter=3, leading=16, alignment=ALIGN),
+        "para":     _st("PARA",base, fontSize=9.5,fontName=AF,  textColor=TEXT,         spaceAfter=7, leading=16.5, alignment=(ALIGN if is_ar else TA_JUSTIFY)),
         "tbl_hdr":  _st("TH",  base, fontSize=9,  fontName=AFB, textColor=WHITE,        alignment=ALIGN),
         "tbl_cell": _st("TC",  base, fontSize=9,  fontName=AF,  textColor=TEXT,         leading=14, alignment=ALIGN),
         "kw_term":  _st("KT",  base, fontSize=9,  fontName=AFB, textColor=NAVY_MID,     alignment=ALIGN),
@@ -2326,15 +2408,18 @@ def build_pdf(guide, language, out_filename="study_guide"):
 
         bullets = sec.get("bullets", [])
         if bullets:
-            bdata = [[Paragraph(f"{L['bul_bullet']}{T(b)}", ST["bullet"])] for b in bullets]
+            # Clear prose paragraphs — no bullet glyphs, no separator lines between
+            # points. Each point is a justified paragraph inside one soft panel.
+            bdata = [[Paragraph(T(b), ST["para"])] for b in bullets]
             bt = Table(bdata, colWidths=[W])
             bt.setStyle(TableStyle([
-                ("TOPPADDING",    (0,0), (-1,-1), 5),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-                ("LEFTPADDING",   (0,0), (-1,-1), 10),
-                ("RIGHTPADDING",  (0,0), (-1,-1), 10),
-                ("LINEBELOW",     (0,0), (-1,-2), 0.3, colors.HexColor("#dde8ff")),
-                ("BOX",           (0,0), (-1,-1), 0.5, BORDER),
+                ("TOPPADDING",    (0,0),  (0,0),   7),
+                ("BOTTOMPADDING", (0,-1), (0,-1),  7),
+                ("TOPPADDING",    (0,1),  (-1,-1), 1),
+                ("BOTTOMPADDING", (0,0),  (-1,-2), 1),
+                ("LEFTPADDING",   (0,0),  (-1,-1), 12),
+                ("RIGHTPADDING",  (0,0),  (-1,-1), 12),
+                ("BOX",           (0,0),  (-1,-1), 0.5, BORDER),
             ]))
             block.append(bt)
 
@@ -2802,6 +2887,7 @@ def summarize_stream():
                 "code": "signin_for_more", "tokens_remaining": 0
             }), 402
 
+    _log_usage_async("user" if uid else "anon", "file")
     f            = request.files["file"]
     lang_param   = request.form.get("language", "auto")
     out_name     = _safe_name(request.form.get("filename", f.filename.rsplit(".", 1)[0]))
@@ -3841,6 +3927,7 @@ def youtube_transcript():
                 "code": "signin_for_more", "tokens_remaining": 0
             }), 402
 
+    _log_usage_async("user" if uid else "anon", "youtube")
     out_name = _safe_name(f"youtube_{video_id}")
 
     def generate():
@@ -4005,6 +4092,7 @@ def summarize_text():
             return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
         d_lang = "ar" if _peek.get("language") == "ar" else "en"
         d_text = _DEMO_TEXT_AR if d_lang == "ar" else _DEMO_TEXT_EN
+        _log_usage_async("demo", "demo")
         gen = _stream_text_as_sse(d_text, d_lang, "sample_lecture", "text",
                                   DETAIL["standard"], 0, True, uid=None, anon_ip=None)
         return Response(stream_with_context(gen()), mimetype="text/event-stream",
@@ -4031,6 +4119,7 @@ def summarize_text():
                 "code": "signin_for_more", "tokens_remaining": 0
             }), 402
 
+    _log_usage_async("user" if uid else "anon", "text")
     # silent=True: a non-JSON body must not raise here (it would 415/500 AFTER
     # the token was already consumed above, with no refund). Empty body → {} →
     # falls through to the "No text or URL" refund path below.
