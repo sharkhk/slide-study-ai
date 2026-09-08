@@ -66,7 +66,7 @@ const T = {
     upgradeSub: "You've used your free guides for now. Go Pro for 30 a month plus priority processing.",
     upgradeFeatures: ['30 guides per month', 'Priority processing', 'All features included'],
     upgradeBtn: 'Go Pro — $2.99 / month',
-    upgradeFree: 'Free: 5 guides on signup, then 3 every month',
+    upgradeFree: 'Free: 3 study guides a month',
     signIn: 'Sign in',
     signOut: 'Sign out',
     tokensLeft: 'tokens',
@@ -80,10 +80,10 @@ const T = {
     accountExists: 'An account already exists for this email. Sign in instead.',
     freeLeft: (n) => `${n} free ${n === 1 ? 'preview' : 'previews'} left`,
     freeTry: 'Try free, no sign-up',
-    signInForMore: 'Loved it? Sign up free — 5 more guides on us.',
+    signInForMore: 'Loved it? Sign up free — 3 more guides on us.',
     // Email capture (before signup invite)
-    emailCaptureTitle: 'Get 5 free study guides',
-    emailCaptureSub: "Drop your email and we'll set you up with 5 free guides — then 3 free every month. No spam.",
+    emailCaptureTitle: 'Get 3 free study guides',
+    emailCaptureSub: "Drop your email and we'll set you up with 3 free study guides a month. No spam.",
     emailPlaceholder: 'you@email.com',
     emailCaptureBtn: 'Continue',
     emailSkip: 'Skip for now',
@@ -181,7 +181,7 @@ const T = {
     upgradeSub: 'استخدمت أدلتك المجانية الآن. اشترك للحصول على 30 دليلاً شهرياً ومعالجة ذات أولوية.',
     upgradeFeatures: ['30 دليلاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
     upgradeBtn: 'اشترك — 2.99$ / شهر',
-    upgradeFree: 'مجاناً: 5 أدلة عند التسجيل، ثم 3 كل شهر',
+    upgradeFree: 'مجاناً: 3 أدلة دراسة شهرياً',
     signIn: 'تسجيل الدخول',
     signOut: 'تسجيل الخروج',
     tokensLeft: 'رموز متبقية',
@@ -195,9 +195,9 @@ const T = {
     accountExists: 'يوجد حساب بهذا البريد بالفعل. سجّل الدخول بدلاً من ذلك.',
     freeLeft: (n) => `${n} ${n === 1 ? 'معاينة' : 'معاينات'} مجانية متبقية`,
     freeTry: 'جرّب مجاناً، بدون تسجيل',
-    signInForMore: 'أعجبك؟ سجّل مجاناً — 5 أدلة إضافية هدية لك.',
-    emailCaptureTitle: 'احصل على 5 أدلة دراسة مجانية',
-    emailCaptureSub: 'أدخل بريدك ونجهّز لك 5 أدلة مجانية — ثم 3 مجاناً كل شهر. بدون إزعاج.',
+    signInForMore: 'أعجبك؟ سجّل مجاناً — 3 أدلة إضافية هدية لك.',
+    emailCaptureTitle: 'احصل على 3 أدلة دراسة مجانية',
+    emailCaptureSub: 'أدخل بريدك ونجهّز لك 3 أدلة دراسة مجانية شهرياً. بدون إزعاج.',
     emailPlaceholder: 'you@email.com',
     emailCaptureBtn: 'متابعة',
     emailSkip: 'تخطٍّ الآن',
@@ -1119,7 +1119,7 @@ Effective: May 2026
 Alimne is an AI-powered study tool registered under the souc.ai platform. It converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided for educational and personal use on a freemium subscription model.
 
 2. SUBSCRIPTION & BILLING
-• Free: 2 anonymous previews (no account needed), then 5 free guides on sign-up, then 3 free guides every month.
+• Free: 2 anonymous previews (no account needed), then 3 free guides on sign-up and 3 free guides every month.
 • Pro plan: $2.99/month (billed via Stripe). Includes 30 guides per month plus priority processing.
 • Free and Pro monthly allowances reset at the start of each calendar month.
 • Subscriptions can be cancelled anytime via the billing portal. No refunds for partial months.

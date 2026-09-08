@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS public.users (
   subscription_status     TEXT DEFAULT 'free',      -- 'free' | 'active' | 'canceled' | 'past_due'
   subscription_period_end TIMESTAMPTZ,
 
-  -- Tokens (free accounts start with 5 guides; free plan then 3/month — see 006)
-  tokens_remaining        INTEGER DEFAULT 5,
+  -- Tokens (free accounts start with 3 guides; free plan then 3/month — see 006/010)
+  tokens_remaining        INTEGER DEFAULT 3,
   tokens_month            TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM')
 );
 
