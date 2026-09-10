@@ -136,7 +136,12 @@ def _ar(text):
     try:
         import arabic_reshaper
         from bidi.algorithm import get_display
-        return get_display(arabic_reshaper.reshape(str(text)))
+        s = str(text)
+        # A hyphen directly between two Arabic letters gets swallowed by the
+        # reshaper and merges the words (e.g. النمسا-المجر → النمساالمجر). Pad it
+        # with spaces so the two words stay separate and the dash stays visible.
+        s = re.sub(r'(?<=[؀-ۿ])\s*-\s*(?=[؀-ۿ])', ' - ', s)
+        return get_display(arabic_reshaper.reshape(s))
     except ImportError:
         return str(text)
 
@@ -2334,16 +2339,16 @@ def build_pdf(guide, language, out_filename="study_guide"):
         return _xesc(s)
 
     L = {
-        "objectives": T("الأهداف التعليمية") if is_ar else "◆  LEARNING OBJECTIVES",
-        "obj_bullet": "• " if is_ar else "◆  ",
+        "objectives": T("الأهداف التعليمية") if is_ar else "LEARNING OBJECTIVES",
+        "obj_bullet": "",
         "contents":   T("المحتويات") if is_ar else "CONTENTS",
-        "kw_head":    T("قاموس المصطلحات") if is_ar else "■  KEYWORDS CHEATSHEET",
+        "kw_head":    T("قاموس المصطلحات") if is_ar else "KEY TERMS",
         "kw_append":  [(T("قاموس المصطلحات"), ""), (T("بطاقات المراجعة"), "")] if is_ar
-                      else [("KEYWORDS CHEATSHEET", ""), ("FLASH CARDS", "")],
-        "fc_head":    T("بطاقات المراجعة") if is_ar else "■  FLASH CARDS",
-        "sec_bullet": "" if is_ar else "■  ",
-        "bul_bullet": "• " if is_ar else "▸  ",
-        "q_pre":      T("سؤال: ") if is_ar else "Q:  ",
+                      else [("KEY TERMS", ""), ("FLASH CARDS", "")],
+        "fc_head":    T("بطاقات المراجعة") if is_ar else "FLASH CARDS",
+        "sec_bullet": "",
+        "bul_bullet": "",
+        "q_pre":      T("سؤال: ") if is_ar else "Q. ",
         "guide":      T("دليل الدراسة بالذكاء الاصطناعي") if is_ar else "AI Exam Study Guide",
         "luck":       T("حظ سعيد!") if is_ar else "Good luck!",
     }
@@ -2393,7 +2398,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
     subtitle = T(guide.get("subtitle", "Exam Study Guide"))
     hdr = Table([
         [Paragraph(title, ST["h_title"])],
-        [Paragraph(f"{subtitle}  ·  {OLLAMA_MODEL}", ST["h_sub"])],
+        [Paragraph(subtitle, ST["h_sub"])],
     ], colWidths=[W])
     hdr.setStyle(TableStyle([
         ("BACKGROUND",    (0,0), (-1,-1), NAVY),
@@ -2581,32 +2586,29 @@ def build_pdf(guide, language, out_filename="study_guide"):
         elems.append(fc_hdr)
         elems.append(Spacer(1, 0.2*cm))
 
-        cw = (W - 0.3*cm) / 2
-        pairs = [flashcards[i:i+2] for i in range(0, len(flashcards), 2)]
-        for pair in pairs:
-            row_cells = []
-            for fc in pair:
-                card = Table([
-                    [Paragraph(f"{L['q_pre']}{T(fc.get('q',''))}", ST["fc_q"])],
-                    [Paragraph(T(fc.get('a','')), ST["fc_a"])],
-                ], colWidths=[cw])
-                card.setStyle(TableStyle([
-                    ("BACKGROUND",    (0,0), (-1,0),  CARD_Q),
-                    ("BACKGROUND",    (0,1), (-1,1),  CARD_A),
-                    ("TOPPADDING",    (0,0), (-1,-1), 7),
-                    ("BOTTOMPADDING", (0,0), (-1,-1), 7),
-                    ("LEFTPADDING",   (0,0), (-1,-1), 9),
-                    ("RIGHTPADDING",  (0,0), (-1,-1), 9),
-                    ("BOX",           (0,0), (-1,-1), 0.8, BORDER),
-                    ("LINEBELOW",     (0,0), (-1,0),  0.5, BORDER),
-                ]))
-                row_cells.append(card)
-            if len(row_cells) == 1:
-                row_cells.append(Spacer(cw, 1))
-            grid_row = Table([row_cells], colWidths=[cw, cw], hAlign='LEFT')
-            grid_row.setStyle(TableStyle([("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),0)]))
-            elems.append(grid_row)
-            elems.append(Spacer(1, 0.2*cm))
+        # Full-width cards — one per row: a coloured question header over the
+        # answer. Cleaner and far more readable than the old cramped 2-up grid
+        # (mismatched heights + awkward mid-word wraps).
+        for fc in flashcards:
+            q = T(fc.get('q', '')); a = T(fc.get('a', ''))
+            if not q and not a:
+                continue
+            card = Table([
+                [Paragraph(f"{L['q_pre']}{q}", ST["fc_q"])],
+                [Paragraph(a, ST["fc_a"])],
+            ], colWidths=[W])
+            card.setStyle(TableStyle([
+                ("BACKGROUND",    (0,0), (-1,0),  CARD_Q),
+                ("BACKGROUND",    (0,1), (-1,1),  CARD_A),
+                ("TOPPADDING",    (0,0), (-1,-1), 8),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 8),
+                ("LEFTPADDING",   (0,0), (-1,-1), 12),
+                ("RIGHTPADDING",  (0,0), (-1,-1), 12),
+                ("BOX",           (0,0), (-1,-1), 0.6, BORDER),
+                ("LINEBELOW",     (0,0), (-1,0),  0.5, BORDER),
+            ]))
+            elems.append(card)
+            elems.append(Spacer(1, 0.18*cm))
 
     # ── Footer ────────────────────────────────────────────────────────────────
     elems.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
