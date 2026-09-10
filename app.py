@@ -2348,7 +2348,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
         "fc_head":    T("بطاقات المراجعة") if is_ar else "FLASH CARDS",
         "sec_bullet": "",
         "bul_bullet": "",
-        "q_pre":      T("سؤال: ") if is_ar else "Q. ",
+        "q_pre":      "" if is_ar else "Q. ",
         "guide":      T("دليل الدراسة بالذكاء الاصطناعي") if is_ar else "AI Exam Study Guide",
         "luck":       T("حظ سعيد!") if is_ar else "Good luck!",
     }
