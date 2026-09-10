@@ -626,6 +626,20 @@ def _log_usage_async(kind, source, title=""):
             _log.error("usage log failed: %s", exc)
     threading.Thread(target=_do, daemon=True).start()
 
+def _bump_visit_async():
+    """Increment today's durable page-view counter (best-effort, non-blocking).
+    Uncapped and survives restarts — unlike the in-memory _visitors buffer."""
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    def _do():
+        sb = _get_sb()
+        if sb is None:
+            return
+        try:
+            sb.rpc("bump_visit", {"p_day": day}).execute()
+        except Exception as exc:
+            _log.error("visit bump failed: %s", exc)
+    threading.Thread(target=_do, daemon=True).start()
+
 @app.before_request
 def track_visitor():
     skip = ("/assets/", "/favicon", "/admin")
@@ -659,6 +673,10 @@ def track_visitor():
         _visitors.insert(0, entry)
         if len(_visitors) > 1000:
             _visitors.pop()
+    # Durable, uncapped visit counter — count only real page loads (the app root
+    # or a shared /s/ guide), not API calls, assets, or admin.
+    if request.method == "GET" and (request.path == "/" or request.path.startswith("/s/")):
+        _bump_visit_async()
     # Enrich geo (CF headers don't give city/ISP/coords), but reuse the cache,
     # dedupe in-flight lookups per IP, and cap concurrent threads so a burst
     # can't exhaust threads or exceed ip-api.com's rate limit.
@@ -1075,6 +1093,26 @@ def admin_page():
     except Exception:
         pass  # usage_events table may not exist yet (migration 008) — degrade quietly
 
+    # ── Durable visits (per-day page-view counts — survive restarts, uncapped) ────
+    visits_total = visits_today = visits_week = 0
+    visits_durable = False
+    try:
+        _sbv = _get_sb()
+        if _sbv is not None:
+            _vr = _sbv.table("visit_stats").select("day,count").order("day", desc=True).limit(400).execute()
+            _vd = _vr.data or []
+            visits_durable = True
+            _today = time.strftime("%Y-%m-%d", time.gmtime())
+            _wk    = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
+            for row in _vd:
+                c = int(row.get("count") or 0)
+                d = str(row.get("day") or "")
+                visits_total += c
+                if d == _today: visits_today += c
+                if d >= _wk:    visits_week  += c
+    except Exception:
+        pass  # visit_stats table may not exist yet (migration 011) — degrade quietly
+
     monthly_price = _monthly_price_usd()  # live Stripe price (cached ~1h), USD/month
     mrr = subs_active * monthly_price
     arr = mrr * 12
@@ -1108,6 +1146,11 @@ def admin_page():
           <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">New this week</div>
           <div style="font-size:1.7rem;font-weight:800;color:#7cc4ff;line-height:1.2">{new_this_week}</div>
           <div style="color:#8aa0c8;font-size:11px">joined in last 7 days</div>
+        </div>
+        <div style="background:linear-gradient(135deg,#04283a,#062033);border:1px solid #0e7490;border-radius:12px;padding:.75rem 1.1rem;min-width:200px">
+          <div style="color:#67e8f9;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Visits (all-time)</div>
+          <div style="font-size:1.7rem;font-weight:800;color:#e8f0ff;line-height:1.2">{visits_total:,}</div>
+          <div style="color:#8aa0c8;font-size:11px">{'' if visits_durable else 'run migration 011 · '}{visits_today} today · {visits_week} this week</div>
         </div>
         <div style="background:linear-gradient(135deg,#1a1035,#0f0a28);border:1px solid #6d28d9;border-radius:12px;padding:.75rem 1.1rem;min-width:230px">
           <div style="color:#c4b5fd;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Generations (all)</div>
@@ -1212,7 +1255,7 @@ def admin_page():
 <body>
 <div class="topbar">
   <h1>📊 Alimne — Admin
-    <span class="badge">{len(vis_copy)} visits</span>
+    <span class="badge">{(f"{visits_total:,}" if visits_durable else len(vis_copy))} visits</span>
     {f'<span class="badge red">⛔ {len(blocked_copy)} blocked</span>' if blocked_copy else ''}
   </h1>
   <div class="actions">
@@ -1225,7 +1268,7 @@ def admin_page():
 {gens_section}
 {leads_section}
 {blocked_section}
-<h3 style="margin:1.5rem 2rem .5rem;color:#8aa0c8;font-size:.95rem">🌐 Recent visitors</h3>
+<h3 style="margin:1.5rem 2rem .5rem;color:#8aa0c8;font-size:.95rem">🌐 Recent visitors <span style="font-weight:400;color:#4a5f80;font-size:.8rem">(last 1000, in-memory — resets on restart; totals above are durable)</span></h3>
 <div class="wrap">
 <table>
   <thead><tr>
