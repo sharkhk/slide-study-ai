@@ -1493,6 +1493,7 @@ export default function App() {
   // Modals
   const [detail, setDetail] = useState('standard')
   const [summaryOnly, setSummaryOnly] = useState(false)
+  const [includeQuiz, setIncludeQuiz] = useState(true)
 
   // Modals
   const [flashModal, setFlashModal] = useState(null)
@@ -1731,6 +1732,7 @@ export default function App() {
         fd.append('language', lang)
         fd.append('detail', detail)
         fd.append('mode', summaryOnly ? 'summary' : 'full')
+        fd.append('quiz', includeQuiz ? 'true' : 'false')
         streamSSE(
           '/api/summarize-stream',
           { method: 'POST', body: fd, headers: getAuthHeaders() },
@@ -1772,7 +1774,7 @@ export default function App() {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ url, language: lang, detail, mode: summaryOnly ? 'summary' : 'full' })
+        body: JSON.stringify({ url, language: lang, detail, mode: summaryOnly ? 'summary' : 'full', quiz: includeQuiz })
       },
       (ev) => {
         if (ev.language && lang === 'auto') setLang(ev.language)
@@ -1813,7 +1815,7 @@ export default function App() {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ text, url, language: lang, filename: name, detail, mode: summaryOnly ? 'summary' : 'full' })
+        body: JSON.stringify({ text, url, language: lang, filename: name, detail, mode: summaryOnly ? 'summary' : 'full', quiz: includeQuiz })
       },
       (ev) => {
         if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); setRunning(false); return }
@@ -2166,14 +2168,14 @@ export default function App() {
                 </span>
               </div>
 
-              {/* Output mode: full (with quiz) or summary only */}
+              {/* Output mode: full guide (flashcards, optional quiz) or summary only */}
               <div style={{display:'flex',alignItems:'center',gap:'0.55rem',marginTop:'0.6rem',flexWrap:'wrap'}}>
                 <span style={{fontSize:'0.73rem',color:'var(--text-muted)',fontWeight:500,flexShrink:0}}>Output:</span>
                 <button
                   className={`detail-tab${!summaryOnly ? ' active' : ''}`}
                   style={{fontSize:'0.73rem',padding:'0.28rem 0.6rem'}}
                   onClick={() => setSummaryOnly(false)}>
-                  {lang === 'ar' ? 'دليل كامل + اختبار' : 'Full guide + quiz'}
+                  {lang === 'ar' ? 'دليل كامل' : 'Full guide'}
                 </button>
                 <button
                   className={`detail-tab${summaryOnly ? ' active' : ''}`}
@@ -2181,6 +2183,12 @@ export default function App() {
                   onClick={() => setSummaryOnly(true)}>
                   {lang === 'ar' ? 'ملخّص فقط' : 'Summary only'}
                 </button>
+                {!summaryOnly && (
+                  <label style={{display:'flex',alignItems:'center',gap:'0.35rem',fontSize:'0.73rem',color:'var(--text-muted)',cursor:'pointer',marginInlineStart:'0.25rem'}}>
+                    <input type="checkbox" checked={includeQuiz} onChange={e => setIncludeQuiz(e.target.checked)} />
+                    {lang === 'ar' ? 'اختبار تدريبي' : 'Practice quiz'}
+                  </label>
+                )}
               </div>
 
               {/* Language + Generate All row (only for upload tab) */}

@@ -1947,9 +1947,10 @@ def _sections_parallel(sections, content_slides, language, dcfg):
         sections[:] = keep
 
 
-def _flashcards_mcq_parallel(overview, language, dcfg, include_quiz=True):
+def _flashcards_mcq_parallel(overview, language, dcfg, include_quiz=True, include_mcq=True):
     """Run pass3 then pass4 sequentially (Groq free tier rate limits concurrent calls).
-    Yields plain dicts. When include_quiz is False, skip flashcards + quiz (summary-only)."""
+    Yields plain dicts. include_quiz=False → summary-only (no flashcards, no quiz).
+    Otherwise flashcards are generated; the practice quiz (mcq) only if include_mcq."""
     if not include_quiz:
         overview["flashcards"] = []
         overview["mcqs"] = []
@@ -1963,6 +1964,10 @@ def _flashcards_mcq_parallel(overview, language, dcfg, include_quiz=True):
         overview["flashcards"] = []
     yield {"step": "flashcards", "msg": "Flash cards ready…"}
 
+    if not include_mcq:
+        overview["mcqs"] = []
+        yield {"step": "mcq", "msg": "Quiz skipped…"}
+        return
     yield {"step": "mcq", "msg": "Generating quiz…"}
     try:
         overview["mcqs"] = pass4_mcq(overview, language, dcfg).get("mcqs", [])
@@ -2794,8 +2799,18 @@ def stripe_checkout():
         return jsonify({"error": "User not found"}), 404
 
     try:
-        # Reuse existing Stripe customer or create a new one
+        # Reuse existing Stripe customer or create a new one. IMPORTANT: validate a
+        # stored id still exists in THIS Stripe account — if the account or API keys
+        # were swapped, the old id is orphaned and checkout fails with
+        # "No such customer". Verify (and recreate on miss) instead of blindly reusing.
         customer_id = user.get("stripe_customer_id")
+        if customer_id:
+            try:
+                c = _stripe.Customer.retrieve(customer_id)
+                if getattr(c, "deleted", False):
+                    customer_id = None
+            except Exception:
+                customer_id = None          # stale/invalid id → recreate below
         if not customer_id:
             cust = _stripe.Customer.create(
                 email=user["email"],
@@ -3011,6 +3026,7 @@ def summarize_stream():
     detail_level = request.form.get("detail", "standard")
     dcfg         = DETAIL.get(detail_level, DETAIL["standard"])
     include_quiz = request.form.get("mode", "full") != "summary"
+    include_mcq  = str(request.form.get("quiz", "true")).lower() != "false"
 
     _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
     if not f.filename.lower().endswith(_ALLOWED_EXT):
@@ -3071,7 +3087,7 @@ def summarize_stream():
             for evt in _sections_parallel(sections, content_slides, language, dcfg):
                 yield _sse(evt)
 
-            for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz):
+            for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz, include_mcq):
                 yield _sse(evt)
 
             # Build PDF + Markdown
@@ -3923,7 +3939,7 @@ def _extract_video_id(url):
     return None
 
 
-def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True, uid=None, anon_ip=None):
+def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True, include_mcq=True, uid=None, anon_ip=None):
     """Shared SSE generator for YouTube/text endpoints."""
     _dcfg = dcfg or DETAIL["standard"]
     def generate():
@@ -3960,7 +3976,7 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             for evt in _sections_parallel(sections, slides, language, dcfg):
                 yield _sse(evt)
 
-            for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz):
+            for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz, include_mcq):
                 yield _sse(evt)
 
             overview["language"] = language   # so exports + the in-app viewer localise
@@ -4014,6 +4030,7 @@ def youtube_transcript():
     detail_level = data.get("detail", "standard")
     yt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
     include_quiz = data.get("mode", "full") != "summary"
+    include_mcq  = str(data.get("quiz", True)).lower() != "false"
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not ollama_running():
@@ -4072,7 +4089,7 @@ def youtube_transcript():
             language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
             lang_label = "Arabic" if language == "ar" else "English"
             yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language})
-            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left, include_quiz, uid=uid, anon_ip=anon_ip)():
+            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left, include_quiz, include_mcq=include_mcq, uid=uid, anon_ip=anon_ip)():
                 yield event
         except Exception as ex:
             _log.error("youtube SSE error: %s", ex)
@@ -4250,6 +4267,7 @@ def summarize_text():
     detail_level = data.get("detail", "standard")
     txt_dcfg     = DETAIL.get(detail_level, DETAIL["standard"])
     include_quiz = data.get("mode", "full") != "summary"
+    include_mcq  = str(data.get("quiz", True)).lower() != "false"
 
     if not ollama_running():
         _refund_credit(uid, anon_ip)
@@ -4270,7 +4288,7 @@ def summarize_text():
     text = text[:500_000]
 
     language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
-    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz, uid=uid, anon_ip=anon_ip)
+    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz, include_mcq=include_mcq, uid=uid, anon_ip=anon_ip)
     return Response(
         stream_with_context(gen()),
         mimetype="text/event-stream",
