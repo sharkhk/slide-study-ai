@@ -2412,7 +2412,12 @@ def build_pdf(guide, language, out_filename="study_guide"):
         return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     def T(text):
-        s = _ar(str(text)) if ar_ok else str(text)
+        # Scrub any bullet glyph the model embedded in the text (leading or inline)
+        # BEFORE Arabic reshaping/escaping, so no •/▪/■/… ever reaches the PDF from
+        # any field — objectives, section titles, keywords, flashcards or quiz.
+        # _debullet preserves hyphens, ranges and formula middle-dots (CuSO4·5H2O).
+        s = _debullet(str(text))
+        s = _ar(s) if ar_ok else s
         return _xesc(s)
 
     L = {
