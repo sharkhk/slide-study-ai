@@ -1739,6 +1739,33 @@ def _as_dict(result, list_key=None):
     return {}
 
 
+# Unambiguous list-bullet glyphs the model sometimes embeds inside a fact string.
+# Deliberately EXCLUDES the middle dot "·" (U+00B7) and hyphen "-" — those are real
+# characters in chemistry formulas (CuSO4·5H2O), ranges (1990-2000) and words
+# (well-known), which must be preserved verbatim.
+_BULLET_GLYPHS = "•◦▪▫‣⁃●○◉◆◇■□∙"
+
+def _debullet(text):
+    """Return a fact string as clean prose: no leading '- '/'• ' marker and no
+    bullet glyph used as an INLINE separator (which is why bullets were showing up
+    in the middle of PDF paragraphs). Inline glyphs become '; ' so the two facts
+    stay readable; a leading marker is dropped outright. Runs on every renderer
+    (PDF, markdown, web guide) so the output is consistent."""
+    s = str(text).replace("\r", "\n")
+    # Sub-lists the model split across lines → one flowing line
+    s = re.sub(r"\s*\n+\s*", " ", s).strip()
+    # Drop a leading list marker: bullet glyph, dash/asterisk, or "1." / "1)"
+    s = re.sub(r"^\s*(?:[" + _BULLET_GLYPHS + r"\-–—*]+|\d+[.)])\s*", "", s)
+    # Any bullet glyph still inside the text is an inline separator → "; "
+    s = re.sub(r"\s*[" + _BULLET_GLYPHS + r"]+\s*", "; ", s)
+    # Tidy: collapse spaces, drop a "; " that lands right before punctuation, and
+    # never emit doubled separators or a trailing one.
+    s = re.sub(r"\s{2,}", " ", s)
+    s = re.sub(r"\s*;\s*(?=[.!?,;:])", "", s)
+    s = re.sub(r"(?:;\s*){2,}", "; ", s)
+    return s.strip(" ;")
+
+
 def _detect_language(content):
     """Detect 'ar' or 'en' from slides list or plain text. Based on Arabic char ratio."""
     if isinstance(content, list):
@@ -1824,8 +1851,10 @@ Rules:
 - Output JSON only""", num_predict=dcfg["num_predict"])
     result = _as_dict(result, list_key="bullets")
     # If model returned a flat list of strings under "bullets", normalise each element
+    # and strip any bullet glyphs the model embedded (leading OR inline) so facts
+    # render as clean prose everywhere downstream.
     bullets = result.get("bullets", [])
-    result["bullets"] = [str(b) for b in bullets if b]
+    result["bullets"] = [c for b in bullets if b for c in (_debullet(b),) if c]
     return result
 
 
@@ -2000,7 +2029,7 @@ def build_markdown(guide):
     for sec in guide.get("sections", []):
         if not isinstance(sec, dict): continue
         lines += [f"## {sec.get('title', '')}", ""]
-        for b in sec.get("bullets", []): lines.append(f"- {b}")
+        for b in sec.get("bullets", []): lines.append(f"- {_debullet(b)}")
         tbl = sec.get("table")
         if isinstance(tbl, dict) and tbl.get("headers") and tbl.get("rows"):
             lines.append("")
@@ -2533,7 +2562,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
         if bullets:
             # Clear prose paragraphs — no bullet glyphs, no separator lines between
             # points. Each point is a justified paragraph inside one soft panel.
-            bdata = [[Paragraph(T(b), ST["para"])] for b in bullets]
+            bdata = [[Paragraph(T(_debullet(b)), ST["para"])] for b in bullets]
             bt = Table(bdata, colWidths=[W])
             bt.setStyle(TableStyle([
                 ("TOPPADDING",    (0,0),  (0,0),   7),
@@ -3219,9 +3248,9 @@ def share_guide(job_id):
 
 
 def _sg_bullet(b):
-    if isinstance(b, str):  return b
-    if isinstance(b, dict): return b.get("text") or b.get("fact") or ""
-    return str(b)
+    if isinstance(b, str):  return _debullet(b)
+    if isinstance(b, dict): return _debullet(b.get("text") or b.get("fact") or "")
+    return _debullet(b)
 
 def _sg_desc(g):
     parts = [o for o in (g.get("objectives") or []) if isinstance(o, str) and o.strip()]
