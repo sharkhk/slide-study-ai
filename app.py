@@ -76,7 +76,7 @@ try:
     PRO_MONTHLY_USD = float(os.environ.get("PRO_MONTHLY_USD", "2.99"))
 except (TypeError, ValueError):
     PRO_MONTHLY_USD = 2.99
-APP_URL              = os.environ.get("APP_URL", "https://slide-study-ai.onrender.com")
+APP_URL              = os.environ.get("APP_URL", "https://alimne.app")
 # Shared secret Cloudflare injects (via a Transform Rule adding header
 # X-Origin-Verify) so the origin can tell real Cloudflare traffic from requests
 # sent straight to the Render origin. When set, CF-Connecting-IP is only trusted

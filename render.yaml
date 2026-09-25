@@ -33,6 +33,6 @@ services:
 
       # App
       - key: APP_URL
-        value: https://alimne.onrender.com
+        value: https://alimne.app
       - key: ADMIN_TOKEN
         generateValue: true
