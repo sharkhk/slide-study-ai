@@ -69,6 +69,18 @@ const T = {
     upgradeFree: 'Free: 3 study guides a month',
     signIn: 'Sign in',
     signOut: 'Sign out',
+    accountTitle: 'Your account',
+    accountPlan: 'Plan',
+    planPro: 'Alimne Pro',
+    planFree: 'Free',
+    accountStatus: 'Status',
+    statusActive: 'Active',
+    statusCanceled: 'Canceled',
+    statusPastDue: 'Payment issue',
+    renewsOn: 'Renews on',
+    guidesLeft: 'Guides left this month',
+    manageNote: "Update your card, see invoices, or cancel your subscription on Stripe's secure billing page.",
+    subSuccess: 'Payment received — activating Alimne Pro…',
     tokensLeft: 'tokens',
     manageBtn: 'Manage / cancel subscription',
     loginTitleSignup: 'Create your account',
@@ -184,6 +196,18 @@ const T = {
     upgradeFree: 'مجاناً: 3 أدلة دراسة شهرياً',
     signIn: 'تسجيل الدخول',
     signOut: 'تسجيل الخروج',
+    accountTitle: 'حسابك',
+    accountPlan: 'الباقة',
+    planPro: 'Alimne Pro',
+    planFree: 'مجانية',
+    accountStatus: 'الحالة',
+    statusActive: 'فعّال',
+    statusCanceled: 'ملغى',
+    statusPastDue: 'مشكلة في الدفع',
+    renewsOn: 'يتجدد في',
+    guidesLeft: 'الأدلة المتبقية هذا الشهر',
+    manageNote: 'حدّث بطاقتك، أو اطّلع على الفواتير، أو ألغِ اشتراكك من صفحة الفوترة الآمنة في Stripe.',
+    subSuccess: 'تم استلام الدفع — جارٍ تفعيل Alimne Pro…',
     tokensLeft: 'رموز متبقية',
     manageBtn: 'إدارة / إلغاء الاشتراك',
     loginTitleSignup: 'أنشئ حسابك',
@@ -1423,6 +1447,76 @@ function UpgradeModal({ onClose, onUpgrade, onManage, isSubscribed, lang }) {
   )
 }
 
+// ── Account Modal ──────────────────────────────────────────────────────────────
+function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSubscribed, lang }) {
+  const t = T[lang] || T['en']
+  const isAr = lang === 'ar'
+  const status = String(userInfo?.subscription_status || 'free').toLowerCase()
+  const statusLabel = isSubscribed ? t.statusActive
+    : status === 'canceled' ? t.statusCanceled
+    : (status === 'past_due' || status === 'unpaid') ? t.statusPastDue
+    : t.planFree
+  const periodEnd = userInfo?.subscription_period_end ? String(userInfo.subscription_period_end).slice(0, 10) : ''
+  const canManage = isSubscribed || !!userInfo?.has_billing
+  const row = (label, value) => (
+    <div style={{
+      display:'flex', justifyContent:'space-between', gap:'1rem', padding:'0.55rem 0',
+      borderBottom:'1px solid rgba(255,255,255,0.08)', fontSize:'0.86rem'
+    }}>
+      <span style={{color:'var(--text-muted)'}}>{label}</span>
+      <span style={{color:'var(--text-primary)', fontWeight:600}}>{value}</span>
+    </div>
+  )
+  return (
+    <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}
+        style={{maxWidth:420, width:'92vw', direction: isAr ? 'rtl' : 'ltr'}}>
+        <div className="modal-header">
+          <span style={{fontWeight:700, color:'var(--text-primary)', display:'flex', alignItems:'center', gap:'0.4rem'}}>
+            <User size={15} /> {t.accountTitle}
+          </span>
+          <button className="modal-close" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div style={{padding:'1.25rem'}}>
+          <div style={{display:'flex', alignItems:'center', gap:'0.75rem', marginBottom:'1rem'}}>
+            {userInfo?.avatar_url
+              ? <img src={userInfo.avatar_url} alt="" style={{width:40, height:40, borderRadius:'50%', objectFit:'cover'}} />
+              : <div style={{width:40, height:40, borderRadius:'50%', display:'grid', placeItems:'center', background:'rgba(79,142,247,0.12)'}}><User size={18} /></div>}
+            <div style={{minWidth:0}}>
+              {userInfo?.name && <div style={{fontWeight:700, color:'var(--text-primary)'}}>{userInfo.name}</div>}
+              <div dir="ltr" style={{fontSize:'0.82rem', color:'var(--text-muted)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                {userInfo?.email}
+              </div>
+            </div>
+          </div>
+          {row(t.accountPlan, isSubscribed ? t.planPro : t.planFree)}
+          {row(t.accountStatus, statusLabel)}
+          {isSubscribed && periodEnd && row(t.renewsOn, periodEnd)}
+          {row(t.guidesLeft, userInfo?.tokens_remaining ?? '…')}
+          <div style={{marginTop:'1.25rem', display:'flex', flexDirection:'column', gap:'0.6rem'}}>
+            {canManage && (
+              <button className="submit-btn" style={{width:'100%', justifyContent:'center', padding:'0.75rem'}} onClick={onManage}>
+                {t.manageBtn}
+              </button>
+            )}
+            {!isSubscribed && (
+              <button className="submit-btn" style={{width:'100%', justifyContent:'center', padding:'0.75rem'}} onClick={onUpgrade}>
+                <Sparkles size={15} /> {t.upgradeBtn}
+              </button>
+            )}
+            {canManage && (
+              <div style={{fontSize:'0.75rem', color:'var(--text-muted)', textAlign:'center'}}>{t.manageNote}</div>
+            )}
+            <button className="ctrl-btn" style={{width:'100%', justifyContent:'center', padding:'0.6rem', marginTop:'0.25rem'}} onClick={onSignOut}>
+              <LogOut size={14} /> {t.signOut}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 
 // ── Email Capture Modal (shown before the paywall) ──────────────────────────────
 function EmailCaptureModal({ onClose, onSubmit, onSkip, lang }) {
@@ -1511,6 +1605,7 @@ export default function App() {
   const [showLogin, setShowLogin]     = useState(false)
   const [loginMode, setLoginMode]     = useState('signin')
   const [showUpgrade, setShowUpgrade] = useState(false)
+  const [showAccount, setShowAccount] = useState(false)
   const [showEmailCapture, setShowEmailCapture] = useState(false)
   const [emailCaptured, setEmailCaptured] = useState(() => {
     try { return !!localStorage.getItem('alimne_lead') } catch { return false }
@@ -1594,6 +1689,22 @@ export default function App() {
       .then(d => { if (!d.error) setUserInfo(d) })
       .catch(() => {})
   }
+
+  // Back from Stripe Checkout (?sub=success): confirm, then re-read the plan a
+  // few times — the webhook that activates Pro can land a few seconds later.
+  useEffect(() => {
+    if (!session?.access_token) return
+    let params
+    try { params = new URLSearchParams(window.location.search) } catch { return }
+    if (params.get('sub') !== 'success') return
+    toast(t.subSuccess, 'success')
+    const token = session.access_token
+    const timers = [2500, 7000, 15000].map(ms => setTimeout(() => _fetchUserInfo(token), ms))
+    params.delete('sub')
+    const qs = params.toString()
+    try { window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash) } catch {}
+    return () => timers.forEach(clearTimeout)
+  }, [session?.access_token])
 
   const _fetchRefStats = (token) => {
     fetch('/api/referral/stats', { headers: { Authorization: `Bearer ${token}` } })
@@ -1984,9 +2095,13 @@ export default function App() {
                           </button>
                         )
                       })()}
-                      {/* User avatar / sign out */}
-                      <button className="ctrl-btn" onClick={signOut}
-                        title={`${userInfo?.name || userInfo?.email || ''} — ${t.signOut}`}>
+                      {/* User avatar → account panel (plan, billing, sign out) */}
+                      <button className="ctrl-btn"
+                        onClick={() => {
+                          if (session?.access_token) _fetchUserInfo(session.access_token)
+                          setShowAccount(true)
+                        }}
+                        title={`${userInfo?.name || userInfo?.email || ''} — ${t.accountTitle}`}>
                         {userInfo?.avatar_url
                           ? <img src={userInfo.avatar_url} alt="" style={{width:18,height:18,borderRadius:'50%',objectFit:'cover'}} />
                           : <User size={13} />}
@@ -2537,6 +2652,17 @@ export default function App() {
           onClose={() => setShowUpgrade(false)}
           onUpgrade={handleCheckout}
           onManage={handleManageBilling}
+          isSubscribed={isSubscribed}
+          lang={lang}
+        />
+      )}
+      {showAccount && session && (
+        <AccountModal
+          onClose={() => setShowAccount(false)}
+          onManage={handleManageBilling}
+          onUpgrade={() => { setShowAccount(false); handleCheckout() }}
+          onSignOut={() => { setShowAccount(false); signOut() }}
+          userInfo={userInfo}
           isSubscribed={isSubscribed}
           lang={lang}
         />

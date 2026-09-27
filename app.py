@@ -2766,6 +2766,9 @@ def auth_me():
         "tokens_remaining":        user.get("tokens_remaining", 0),
         "subscription_status":     user.get("subscription_status", "free"),
         "subscription_period_end": str(user.get("subscription_period_end") or ""),
+        # Lets the Account panel offer "Manage / cancel subscription" to anyone
+        # with a Stripe billing account, even while status is still catching up.
+        "has_billing":             bool(user.get("stripe_customer_id")),
         "referral_code":           ref_code or "",
     })
 
