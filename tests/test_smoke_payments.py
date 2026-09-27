@@ -198,9 +198,26 @@ def test_webhook_rejects_malformed_payload(client, monkeypatch):
     assert "payload" in resp.get_json()["error"].lower()
 
 
+class _NotADict:
+    """Mimics stripe-python v13+ StripeObject: NOT a dict, no .get().
+
+    The handler must never depend on construct_event's return value behaving
+    like a dict — that assumption 500'd every real event in production."""
+    def __getattr__(self, name):
+        raise AttributeError(name)
+
+
+def _post_event(client, event):
+    # Stripe sends the event as the raw JSON body; the handler reads that body.
+    return client.post("/api/stripe/webhook", data=json.dumps(event).encode(),
+                       headers={"Stripe-Signature": "sig"})
+
+
 def test_webhook_grants_tokens_and_is_idempotent(client, monkeypatch):
     fake = _make_fake_stripe()
     monkeypatch.setattr(appmod, "_stripe", fake)
+    # construct_event returns a NON-dict object, like real stripe v13+.
+    fake.Webhook.construct_event.return_value = _NotADict()
 
     sb = MagicMock()
     monkeypatch.setattr(appmod, "_get_sb", lambda: sb)
@@ -208,11 +225,10 @@ def test_webhook_grants_tokens_and_is_idempotent(client, monkeypatch):
     monkeypatch.setattr(appmod, "_award_referral", MagicMock())
 
     event = _grant_event("evt_grant_unique_1")
-    fake.Webhook.construct_event.return_value = event
+    event["data"]["object"].update({"subscription": "sub_123", "customer": "cus_123"})
 
     # First delivery → grants tokens.
-    resp1 = client.post("/api/stripe/webhook", data=b"{}",
-                        headers={"Stripe-Signature": "sig"})
+    resp1 = _post_event(client, event)
     assert resp1.status_code == 200
     first = resp1.get_json()
     assert first.get("ok") is True
@@ -223,15 +239,62 @@ def test_webhook_grants_tokens_and_is_idempotent(client, monkeypatch):
     update_arg = sb.table.return_value.update.call_args[0][0]
     assert update_arg["subscription_status"] == "active"
     assert update_arg["tokens_remaining"] == 30
+    assert update_arg["subscription_id"] == "sub_123"
+    assert update_arg["stripe_customer_id"] == "cus_123"
     grant_writes = sb.table.return_value.update.call_count
 
     # Second delivery of the SAME event id → deduped, no further grant.
-    resp2 = client.post("/api/stripe/webhook", data=b"{}",
-                        headers={"Stripe-Signature": "sig"})
+    resp2 = _post_event(client, event)
     assert resp2.status_code == 200
     assert resp2.get_json().get("deduped") is True
     # No additional update write happened on the replay.
     assert sb.table.return_value.update.call_count == grant_writes
+
+
+def test_webhook_failure_is_not_deduped_so_stripe_can_retry(client, monkeypatch):
+    fake = _make_fake_stripe()
+    monkeypatch.setattr(appmod, "_stripe", fake)
+    fake.Webhook.construct_event.return_value = _NotADict()
+    monkeypatch.setattr(appmod, "_award_referral", MagicMock())
+
+    broken = MagicMock()
+    broken.table.side_effect = RuntimeError("db down")
+    monkeypatch.setattr(appmod, "_get_sb", lambda: broken)
+
+    event = _grant_event("evt_retry_after_failure_1")
+    resp1 = _post_event(client, event)
+    assert resp1.status_code == 500          # Stripe will retry
+
+    healthy = MagicMock()
+    monkeypatch.setattr(appmod, "_get_sb", lambda: healthy)
+    resp2 = _post_event(client, event)
+    assert resp2.status_code == 200
+    assert not resp2.get_json().get("deduped")   # the retry actually ran
+    assert healthy.table.return_value.update.call_args[0][0]["subscription_status"] == "active"
+
+
+def test_webhook_subscription_created_records_subscription(client, monkeypatch):
+    fake = _make_fake_stripe()
+    monkeypatch.setattr(appmod, "_stripe", fake)
+    fake.Webhook.construct_event.return_value = _NotADict()
+    sb = MagicMock()
+    monkeypatch.setattr(appmod, "_get_sb", lambda: sb)
+
+    event = {
+        "id": "evt_sub_created_1",
+        "type": "customer.subscription.created",
+        "data": {"object": {
+            "id": "sub_9", "customer": "cus_9", "status": "active",
+            "items": {"data": [{"current_period_end": 1790000000}]},
+        }},
+    }
+    resp = _post_event(client, event)
+    assert resp.status_code == 200
+    update_arg = sb.table.return_value.update.call_args[0][0]
+    assert update_arg["subscription_id"] == "sub_9"
+    assert update_arg["subscription_status"] == "active"
+    assert update_arg["subscription_period_end"].startswith("2026-")
+    sb.table.return_value.update.return_value.eq.assert_called_with("stripe_customer_id", "cus_9")
 
 
 def test_webhook_503_when_stripe_unconfigured(client, monkeypatch):

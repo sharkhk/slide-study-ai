@@ -2906,17 +2906,34 @@ _processed_events       = set()
 _processed_events_order = []
 _proc_events_lock       = threading.Lock()
 
-def _event_already_processed(eid):
+def _event_seen(eid):
     if not eid:
         return False
     with _proc_events_lock:
+        return eid in _processed_events
+
+def _mark_event_processed(eid):
+    if not eid:
+        return
+    with _proc_events_lock:
         if eid in _processed_events:
-            return True
+            return
         _processed_events.add(eid)
         _processed_events_order.append(eid)
         if len(_processed_events_order) > 2000:
             _processed_events.discard(_processed_events_order.pop(0))
-    return False
+
+def _period_end_iso(sub):
+    # current_period_end moved from the subscription top level onto its items
+    # in recent Stripe API versions — fall back to the first item.
+    period_end = sub.get("current_period_end")
+    if not period_end:
+        items = (sub.get("items") or {}).get("data") or []
+        period_end = items[0].get("current_period_end") if items else None
+    if not period_end:
+        return None
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(period_end, tz=timezone.utc).isoformat()
 
 @app.route("/api/stripe/webhook", methods=["POST"])
 def stripe_webhook():
@@ -2926,65 +2943,76 @@ def stripe_webhook():
     payload   = request.get_data()
     sig       = request.headers.get("Stripe-Signature", "")
     try:
-        event = _stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
+        # construct_event is used only to VERIFY the signature. Since
+        # stripe-python v13 its StripeObject is no longer a dict (no .get()),
+        # which made every real event 500 — so read the verified payload as
+        # plain JSON dicts instead.
+        _stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
+        event = json.loads(payload)
     except ValueError:
         return jsonify({"error": "Invalid payload"}), 400
     except _stripe.error.SignatureVerificationError:
         return jsonify({"error": "Invalid signature"}), 400
 
-    # Ack redelivered events without re-running side effects.
-    if _event_already_processed(event.get("id")):
+    # Ack redelivered events without re-running side effects. An event is only
+    # marked processed AFTER it succeeds, so a failed attempt can be retried.
+    eid = event.get("id")
+    if _event_seen(eid):
         return jsonify({"ok": True, "deduped": True})
 
     sb  = _get_sb()
-    typ = event["type"]
+    typ = event.get("type", "")
+    obj = (event.get("data") or {}).get("object") or {}
 
-    if typ == "checkout.session.completed":
-        sess    = event["data"]["object"]
-        user_id = (sess.get("metadata") or {}).get("user_id")
-        if user_id and sb:
-            sb.table("users").update({
-                "subscription_status": "active",
-                "tokens_remaining":    30,
-                "tokens_month":        time.strftime("%Y-%m"),
-            }).eq("id", user_id).execute()
-            _award_referral(user_id, sb)   # reward referrer if applicable
+    try:
+        if typ == "checkout.session.completed":
+            user_id = (obj.get("metadata") or {}).get("user_id")
+            if user_id and sb:
+                update = {
+                    "subscription_status": "active",
+                    "tokens_remaining":    30,
+                    "tokens_month":        time.strftime("%Y-%m"),
+                }
+                if obj.get("subscription"):
+                    update["subscription_id"] = obj["subscription"]
+                if obj.get("customer"):
+                    update["stripe_customer_id"] = obj["customer"]
+                sb.table("users").update(update).eq("id", user_id).execute()
+                try:
+                    _award_referral(user_id, sb)   # reward referrer if applicable
+                except Exception:
+                    _log.error("referral award failed for %s:\n%s", user_id, _tb.format_exc())
 
-    elif typ in ("customer.subscription.updated", "customer.subscription.deleted"):
-        sub         = event["data"]["object"]
-        cust_id     = sub.get("customer")
-        status      = sub.get("status", "")
-        # current_period_end moved from the subscription top level onto its
-        # items in recent Stripe API versions — fall back to the first item.
-        period_end  = sub.get("current_period_end")
-        if not period_end:
-            try:
-                _items = (sub.get("items") or {}).get("data") or []
-                period_end = _items[0].get("current_period_end") if _items else None
-            except Exception:
-                period_end = None
-        if sb and cust_id:
-            update = {"subscription_id": sub.get("id", "")}
-            if status == "active":
-                update["subscription_status"] = "active"
-                if period_end:
-                    from datetime import datetime, timezone
-                    update["subscription_period_end"] = datetime.fromtimestamp(
-                        period_end, tz=timezone.utc
-                    ).isoformat()
-            elif status in ("canceled", "unpaid", "past_due"):
-                update["subscription_status"] = status
-            sb.table("users").update(update).eq("stripe_customer_id", cust_id).execute()
+        elif typ in ("customer.subscription.created",
+                     "customer.subscription.updated",
+                     "customer.subscription.deleted"):
+            cust_id = obj.get("customer")
+            status  = obj.get("status", "")
+            if sb and cust_id:
+                update = {"subscription_id": obj.get("id", "")}
+                if typ == "customer.subscription.deleted":
+                    update["subscription_status"] = "canceled"
+                elif status in ("active", "trialing"):
+                    update["subscription_status"] = "active"
+                    period_end = _period_end_iso(obj)
+                    if period_end:
+                        update["subscription_period_end"] = period_end
+                elif status in ("canceled", "unpaid", "past_due"):
+                    update["subscription_status"] = status
+                sb.table("users").update(update).eq("stripe_customer_id", cust_id).execute()
 
-    elif typ == "invoice.payment_succeeded":
-        inv     = event["data"]["object"]
-        cust_id = inv.get("customer")
-        if inv.get("billing_reason") == "subscription_cycle" and sb and cust_id:
-            sb.table("users").update({
-                "tokens_remaining": 30,
-                "tokens_month":     time.strftime("%Y-%m"),
-            }).eq("stripe_customer_id", cust_id).execute()
+        elif typ == "invoice.payment_succeeded":
+            cust_id = obj.get("customer")
+            if obj.get("billing_reason") == "subscription_cycle" and sb and cust_id:
+                sb.table("users").update({
+                    "tokens_remaining": 30,
+                    "tokens_month":     time.strftime("%Y-%m"),
+                }).eq("stripe_customer_id", cust_id).execute()
+    except Exception:
+        _log.error("stripe webhook %s (%s) failed:\n%s", typ, eid, _tb.format_exc())
+        return jsonify({"error": "Webhook handler failed"}), 500   # Stripe retries
 
+    _mark_event_processed(eid)
     return jsonify({"ok": True})
 
 
