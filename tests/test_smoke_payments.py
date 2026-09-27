@@ -58,6 +58,16 @@ def test_app_imports_and_routes_register():
     assert "/api/config" in rules
 
 
+def test_healthz_is_ok_and_not_tracked(client):
+    # Render's health probe: must answer 200 fast and never touch the visitor
+    # feed / geo lookups (it is hit every few seconds).
+    before = len(appmod._visitors)
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True}
+    assert len(appmod._visitors) == before
+
+
 def test_config_endpoint_boots_offline(client):
     # A lightweight GET proves the test client boots and serves a route without
     # any external service configured.

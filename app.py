@@ -642,6 +642,10 @@ def _bump_visit_async():
 
 @app.before_request
 def track_visitor():
+    # Render's health probe hits /healthz every few seconds — never log, geo-look-
+    # up, or block it, or it would flood the visitor feed and could fail checks.
+    if request.path == "/healthz":
+        return
     skip = ("/assets/", "/favicon", "/admin")
     if any(request.path.startswith(s) for s in skip):
         # still enforce block on non-admin paths
@@ -2899,6 +2903,17 @@ def stripe_portal():
         return jsonify({"url": portal.url})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+# ── Liveness probe ─────────────────────────────────────────────────────────────
+# Render's Health Check Path points here. Deliberately trivial — no DB, network
+# or auth — so it answers only "is this process serving requests?". When it stops
+# answering, Render restarts/replaces the instance automatically instead of the
+# site sitting on 502, and zero-downtime deploys only switch traffic to a new
+# instance once it passes this check.
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok": True})
 
 
 # ── Stripe — webhook ───────────────────────────────────────────────────────────

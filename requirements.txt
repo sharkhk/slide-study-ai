@@ -17,6 +17,7 @@ pycryptodome
 arabic-reshaper
 python-bidi
 supabase
-stripe
+stripe>=15,<16            # verified on 15.x; an unpinned major upgrade (v13+ made
+                          # events non-dicts) silently broke the webhook in prod
 PyJWT>=2.8.0
 cryptography>=42.0.0
