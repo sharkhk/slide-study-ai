@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: alimne
+    name: slide-study-ai
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 8
@@ -12,7 +12,9 @@ services:
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL
-        value: llama-3.1-8b-instant
+        value: openai/gpt-oss-120b
+      - key: GROQ_TPM_LIMIT
+        value: "200000"
 
       # Auth & Database (Supabase)
       - key: SUPABASE_URL
