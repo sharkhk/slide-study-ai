@@ -1149,7 +1149,7 @@ Alimne is an AI-powered study tool registered under the souc.ai platform. It con
 • Subscriptions can be cancelled anytime via the billing portal. No refunds for partial months.
 • Payments are processed by Stripe, Inc. and are subject to Stripe's Terms of Service.
 
-3. YOUR FILES — PRIVACY & NO STORAGE
+3. YOUR FILES AND PRIVACY
 • Files you upload are processed entirely in server memory and never written to permanent storage.
 • No copy of your document is retained after processing is complete.
 • Generated study guides are held in temporary server memory for up to 15 minutes so you can download them, then deleted automatically.
@@ -1206,7 +1206,7 @@ Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصط
 • يمكن إلغاء الاشتراك في أي وقت عبر بوابة الفوترة. لا يوجد استرداد للأشهر الجزئية.
 • تُعالَج المدفوعات بواسطة Stripe وتخضع لشروط خدمة Stripe.
 
-٣. ملفاتك — الخصوصية وعدم التخزين
+٣. ملفاتك وخصوصيتك
 • تُعالَج الملفات التي ترفعها في ذاكرة الخادم فقط ولا تُكتب على أي تخزين دائم.
 • لا تُحتفظ بأي نسخة من مستنداتك بعد اكتمال المعالجة.
 • تُحفظ أدلة الدراسة المولَّدة في ذاكرة الخادم المؤقتة لمدة 15 دقيقة للتنزيل ثم تُحذف تلقائياً.
@@ -2624,8 +2624,8 @@ export default function App() {
             </a>
             &nbsp;·&nbsp;
             {lang === 'ar'
-              ? 'جرّب مجاناً · لا يُحفظ أي شيء'
-              : 'Free to try · No data stored'}
+              ? 'جرّب مجاناً · تُحذف الملفات تلقائياً'
+              : 'Free to try · Files deleted automatically'}
           </div>
           <a
             href="https://souc.ai"

@@ -4457,7 +4457,7 @@ def _legal_shell(title, body):
 def privacy_page():
     body = """
 <h1>Privacy Policy</h1>
-<div class="updated">Last updated: 26 August 2026</div>
+<div class="updated">Last updated: 26 September 2026</div>
 <p>Alimne ("we", "us"), operated by souc ai, turns your slides, documents, pasted text and
 YouTube videos into study guides and summaries. Privacy is core to how the product is built.
 This policy explains what we handle and why.</p>
@@ -4474,6 +4474,8 @@ session (maximum 15 minutes) and are purged automatically after that window, or 
 They are never persisted to disk, logged in full, or reviewed by a person.</li>
 <li>To generate a guide, the extracted text is sent to our AI provider (Groq) for processing. It is used
 only to produce your result and is not used to train models by us.</li>
+<li><strong>Shared guides:</strong> if you press "Share" on a guide, that generated guide (not your original
+file) is stored so its public link keeps working until it is removed.</li>
 </ul>
 
 <h2>2. Account information</h2>
@@ -4492,7 +4494,7 @@ subscription status.</p>
 <ul>
 <li>We do not sell, rent, or trade your personal data.</li>
 <li>We do not run advertising or third-party ad trackers.</li>
-<li>We do not retain your study material beyond the 90-minute processing window.</li>
+<li>We do not retain your study material beyond the 15-minute processing window, except guides you choose to Share (see section 1).</li>
 </ul>
 
 <h2>5. Data retention &amp; your rights</h2>
@@ -4515,7 +4517,7 @@ Email <a href="mailto:sales@souc.ai">sales@souc.ai</a>.</p>
 def terms_page():
     body = """
 <h1>Terms &amp; Conditions</h1>
-<div class="updated">Last updated: 26 August 2026</div>
+<div class="updated">Last updated: 26 September 2026</div>
 <p>By using Alimne (the "Service"), operated by souc ai, you agree to these terms.</p>
 
 <h2>1. The Service</h2>
