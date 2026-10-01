@@ -11,9 +11,11 @@ import secrets
 import threading
 import traceback as _tb
 import logging
+import ipaddress as _ipaddress
 import requests as http
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
+from urllib.parse import urlparse as _urlparse
 
 # ── Logger ─────────────────────────────────────────────────────────────────────
 # Stream to stdout so the hosting platform (Render) captures app errors/warnings
@@ -208,8 +210,10 @@ def _ar_shape(text):
     s = str(text)
     # A hyphen directly between two Arabic letters gets swallowed by the
     # reshaper and merges the words (e.g. النمسا-المجر → النمساالمجر). Pad it
-    # with spaces so the two words stay separate and the dash stays visible.
-    s = re.sub(r'(?<=[؀-ۿ])\s*-\s*(?=[؀-ۿ])', ' - ', s)
+    # with spaces so the two words stay separate, and draw it as U+2010 HYPHEN:
+    # the bundled Noto Naskh Arabic has no glyph for U+002D (it printed a box).
+    # Hyphens next to digits or Latin letters are left alone (2-3 stays a range).
+    s = re.sub(r'(?<=[؀-ۿ])\s*-\s*(?=[؀-ۿ])', ' \N{HYPHEN} ', s)
     return arabic_reshaper.reshape(s)
 
 def _ar_display(shaped, base_dir=None):
@@ -501,14 +505,38 @@ def _consume_token(user_id):
         print(f"consume_token error: {exc}", flush=True)
         return False, 0, "db_error"
 
-# Flips to False if the add_tokens RPC isn't installed yet (see migrations/).
+# Flips to False once PostgREST says the add_tokens RPC isn't installed (see
+# migrations/001) — and ONLY then; a timeout or 5xx never flips it.
 _add_tokens_rpc = True
 
+# PostgREST's answers for "this RPC does not exist": PGRST202 ("Could not find the
+# function … in the schema cache"; older PostgREST: "Could not find the
+# public.fn(…) function …"), a bare HTTP 404 (postgrest-py puts the status in
+# .code when the body isn't JSON) and Postgres 42883 "function … does not exist".
+_RPC_MISSING_CODES = {"PGRST202", "42883", "404"}
+_RPC_MISSING_RE    = re.compile(r"could not find the\b.*\bfunction\b|\bfunction\b.*\bdoes not exist\b",
+                                re.I | re.S)
+
+def _rpc_missing(exc):
+    """True only when the error PROVES the RPC is not installed (so the call
+    changed nothing). Timeouts, connection resets and 5xx are ambiguous: the RPC
+    may have run and only the reply was lost → False."""
+    code = getattr(exc, "code", None)
+    if code is not None and str(code).strip().upper() in _RPC_MISSING_CODES:
+        return True
+    msg = getattr(exc, "message", None)
+    if not isinstance(msg, str) or not msg:
+        msg = str(exc)
+    return bool(_RPC_MISSING_RE.search(msg))
+
 def _add_tokens(sb, user_id, delta):
-    """Atomically add (or subtract) `delta` tokens and return the new balance.
+    """Atomically add (or subtract) `delta` tokens and return the new balance,
+    or None when it failed or its outcome is unknown.
     Uses the add_tokens SQL RPC when available — a plain read-modify-write here
     races with the atomic consume_token RPC and loses concurrent decrements.
-    Falls back to read-modify-write if the RPC is not installed."""
+    Falls back to read-modify-write ONLY when the RPC is definitively missing:
+    after a timeout / reset / 5xx the RPC may already have been applied, and a
+    second (fallback) update would credit the user twice."""
     global _add_tokens_rpc
     if not sb or not user_id:
         return None
@@ -521,8 +549,13 @@ def _add_tokens(sb, user_id, delta):
                 return r.data[0]
             return r.data
         except Exception as exc:
+            if not _rpc_missing(exc):
+                _log.error("add_tokens RPC failed for %s (delta %+d) — outcome unknown, NOT "
+                           "retried (a second update could double-apply): %s: %s",
+                           user_id, delta, type(exc).__name__, exc)
+                return None
             _add_tokens_rpc = False
-            _log.warning("add_tokens RPC unavailable — using read-modify-write: %s", exc)
+            _log.warning("add_tokens RPC not installed — using read-modify-write: %s", exc)
     try:
         row = sb.table("users").select("tokens_remaining").eq("id", user_id).single().execute()
         cur = (row.data or {}).get("tokens_remaining")
@@ -859,7 +892,8 @@ def _security_headers(resp):
     resp.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https":
         resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-    if request.path.startswith("/api/"):
+    if request.path.startswith("/api/") or request.path == "/admin" or request.path.startswith("/admin/"):
+        # Admin pages carry subscriber PII and set the session cookie: never cache.
         resp.headers.setdefault("Cache-Control", "no-store")
     # Content-Security-Policy — defence-in-depth backstop behind the output
     # escaping. The React SPA loads an external bundle (no inline JS), so it gets
@@ -927,9 +961,93 @@ _PRIVATE_RANGES = (
 def _is_private(ip):
     return any(ip.startswith(p) for p in _PRIVATE_RANGES)
 
+# ── Admin authentication ───────────────────────────────────────────────────────
+# The admin token is NEVER read from the query string (query strings end up in
+# Render's / Cloudflare's request logs), never rendered into a page and never
+# kept in localStorage. A browser signs in once via POST /admin/login and gets an
+# HttpOnly cookie "v2.<issued-ms>.<lifetime-s>.<nonce>.<sig>", signed with a key *derived*
+# from ADMIN_TOKEN (never the token), so rotating ADMIN_TOKEN invalidates every
+# cookie. The server enforces the lifetime itself (a copied cookie stops working
+# after 30 days with "Remember", 12 hours without) and Sign out revokes every
+# cookie issued before it (_admin_not_before). Scripts send X-Admin-Token.
+ADMIN_COOKIE         = "alimne_admin"
+_ADMIN_COOKIE_PATH   = "/admin"
+_ADMIN_REMEMBER_SECS = 30 * 24 * 3600     # "Remember on this device" = 30 days
+_ADMIN_SESSION_SECS  = 12 * 3600          # without "Remember": a browser-session cookie, and 12 h max on the server
+_ADMIN_CSRF_HEADER   = "X-Requested-With"
+_ADMIN_CSRF_VALUE    = "alimne-admin"
+_ADMIN_LOGIN_PER_MIN = 10
+_ADMIN_CLOCK_SKEW_MS = 60 * 1000
+# Sessions issued at or before this time (ms since the epoch) are revoked. Sign
+# out moves it to "now". In memory: the single gunicorn worker shares it across
+# its threads; a restart forgets it, and the signed lifetime still caps the cookie.
+_admin_not_before    = [0]
+_admin_session_lock  = threading.Lock()
+
+def _ct_eq(a, b):
+    """Constant-time string compare that never raises. secrets.compare_digest
+    raises TypeError on non-ASCII str (a 500 for a stray 'é' header)."""
+    if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
+        return False
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+def _admin_session_sig(body):
+    # Keyed by ADMIN_TOKEN at call time: a new token => a new key, so every
+    # previously issued cookie stops verifying automatically.
+    key = hmac.new(ADMIN_TOKEN.encode("utf-8"), b"alimne-admin-session-v2", hashlib.sha256).digest()
+    return hmac.new(key, body.encode("ascii"), hashlib.sha256).hexdigest()
+
+def _admin_session_value(ttl):
+    """A fresh cookie value for a session that lasts `ttl` seconds from now."""
+    with _admin_session_lock:
+        # Strictly after any Sign out, even within the same millisecond.
+        iat_ms = max(int(time.time() * 1000), _admin_not_before[0] + 1)
+    body = f"v2.{iat_ms}.{int(ttl)}.{secrets.token_hex(8)}"   # nonce: every login is unique
+    return f"{body}.{_admin_session_sig(body)}"
+
+def _admin_session_ok(value):
+    """True for an untampered, unexpired, unrevoked cookie from _admin_session_value."""
+    if not isinstance(value, str) or not value or len(value) > 160 or not ADMIN_TOKEN:
+        return False
+    parts = value.split(".")
+    if len(parts) != 5 or parts[0] != "v2":
+        return False
+    _, iat_s, ttl_s, nonce, sig = parts
+    if not (iat_s.isascii() and iat_s.isdigit() and ttl_s.isascii() and ttl_s.isdigit()
+            and nonce.isascii() and nonce.isalnum()):
+        return False
+    if not _ct_eq(sig, _admin_session_sig(f"v2.{iat_s}.{ttl_s}.{nonce}")):
+        return False
+    iat_ms, ttl = int(iat_s), int(ttl_s)
+    now_ms = int(time.time() * 1000)
+    if iat_ms <= _admin_not_before[0] or iat_ms > now_ms + _ADMIN_CLOCK_SKEW_MS:
+        return False
+    return now_ms - iat_ms < min(ttl, _ADMIN_REMEMBER_SECS) * 1000
+
+def _admin_revoke_sessions():
+    """Sign out everywhere: every cookie issued up to now stops working."""
+    with _admin_session_lock:
+        _admin_not_before[0] = max(_admin_not_before[0], int(time.time() * 1000))
+
+def _admin_auth():
+    """How this request is authenticated as admin: 'header' (X-Admin-Token, for
+    scripts), 'cookie' (browser session from /admin/login) or None."""
+    if _ct_eq(request.headers.get("X-Admin-Token", ""), ADMIN_TOKEN):
+        return "header"
+    if _admin_session_ok(request.cookies.get(ADMIN_COOKIE, "")):
+        return "cookie"
+    return None
+
 def _admin_ok():
-    supplied = request.headers.get("X-Admin-Token") or request.args.get("token") or ""
-    return secrets.compare_digest(supplied, ADMIN_TOKEN)
+    how = _admin_auth()
+    if how is None:
+        return False
+    if how == "cookie" and request.method not in ("GET", "HEAD", "OPTIONS"):
+        # CSRF defence in depth on top of SameSite=Strict: a cross-site page
+        # can't attach a custom header without a CORS preflight, and credentialed
+        # CORS is never granted here. Header (script) auth needs no such check.
+        return request.headers.get(_ADMIN_CSRF_HEADER, "") == _ADMIN_CSRF_VALUE
+    return True
 
 def _safe_err(e):
     if isinstance(e, ValueError):
@@ -1061,6 +1179,8 @@ def _canonical_host():
     if host.endswith(".onrender.com"):
         from urllib.parse import quote
         qs = request.query_string.decode("latin-1")
+        if request.path == "/admin" or request.path.startswith("/admin/"):
+            qs = ""   # never carry an old ?token= across — query strings get logged
         path = quote(request.path, safe="/%:@!$&'()*+,;=-._~")
         return redirect(_CANONICAL_ORIGIN + path + ("?" + qs if qs else ""), 301)
     return None
@@ -1094,7 +1214,7 @@ def track_visitor():
         "isp":     "",
         "lat":     "",
         "lon":     "",
-        "path":    request.path,
+        "path":    request.path,      # path only, never the query string (secrets)
         "method":  request.method,
         "ua":      (request.headers.get("User-Agent") or "")[:160],
     }
@@ -1262,66 +1382,155 @@ def admin_user_cancel():
     return jsonify({"ok": True, "canceled_at_period_end": False})
 
 
-# Token gate for /admin. Lets you enter the admin token once; the browser then
-# remembers it (localStorage) and auto-opens the dashboard on later visits, so
-# you never retype it. The token value is only ever entered by you.
-ADMIN_GATE_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8">
+# Sign-in gate for /admin. The token is POSTed once to /admin/login, which sets
+# an HttpOnly session cookie; the token never goes into a URL, is not kept in
+# the browser, and is never rendered back into a page. On load the gate also
+# deletes the token older versions left in localStorage (migration).
+ADMIN_GATE_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Admin — Alimne</title>
 <style>
  *{box-sizing:border-box;margin:0;padding:0}
  body{font-family:'Segoe UI',system-ui,sans-serif;background:#050d1a;color:#e8f0ff;
       min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
- .card{background:#0a1628;border:1px solid #1a3a6e;border-radius:14px;padding:1.8rem;max-width:400px;width:100%}
- h2{font-size:1.1rem;margin:0 0 .4rem;display:flex;gap:.5rem;align-items:center}
- p{color:#8aa0c8;font-size:.88rem;margin:0 0 1.1rem;line-height:1.5}
+ .card{background:#0a1628;border:1px solid #1a3a6e;border-radius:14px;padding:1.8rem;max-width:420px;width:100%}
+ h2{font-size:1.1rem;margin:0 0 .4rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+ p{color:#8aa0c8;font-size:.88rem;margin:0 0 .6rem;line-height:1.5}
+ p.ar{margin-bottom:1.1rem}
+ .ar{font-family:'Segoe UI',Tahoma,'Noto Naskh Arabic',system-ui,sans-serif}
  input[type=password]{width:100%;padding:.7rem;border-radius:8px;border:1px solid #1a3a6e;
       background:#050d1a;color:#e8f0ff;font-size:.9rem;margin-bottom:.75rem}
  button{width:100%;padding:.72rem;border-radius:8px;border:none;background:#4f8ef7;color:#fff;
       font-weight:600;font-size:.9rem;cursor:pointer}
  button:hover{opacity:.9}
- .err{color:#f87171;font-size:.85rem;margin-bottom:.75rem;display:none}
- label{display:flex;gap:.5rem;align-items:center;color:#8aa0c8;font-size:.82rem;margin:0 0 1rem;cursor:pointer}
+ button[disabled]{opacity:.6;cursor:wait}
+ .err{color:#f87171;font-size:.85rem;margin-bottom:.75rem;display:none;line-height:1.5}
+ label{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;color:#8aa0c8;font-size:.82rem;margin:0 0 1rem;cursor:pointer}
 </style></head><body>
 <div class="card">
-  <h2>🔒 Alimne Admin</h2>
-  <p>Enter your admin token once. This browser will remember it, so you won't be asked again.</p>
-  <div class="err" id="err">That token was rejected — check it and try again.</div>
-  <input id="tok" type="password" placeholder="Admin token" autocomplete="off" autofocus>
-  <label><input type="checkbox" id="remember" checked> Remember on this device</label>
-  <button id="go">Open dashboard</button>
+  <h2>🔒 Alimne Admin <span class="ar" lang="ar" dir="rtl">لوحة الإدارة</span></h2>
+  <p>Enter your admin token. With &ldquo;Remember&rdquo; ticked, this device stays signed in for 30 days &mdash; the token itself is never saved in the browser.</p>
+  <p class="ar" lang="ar" dir="rtl">أدخل رمز المشرف. عند تفعيل «تذكّرني» يبقى هذا الجهاز مسجَّل الدخول لمدة 30 يومًا، ولا يُحفظ الرمز نفسه في المتصفح أبدًا.</p>
+  <div class="err" id="err" role="alert"><div id="err-en"></div><div id="err-ar" class="ar" lang="ar" dir="rtl"></div></div>
+  <input id="tok" type="password" placeholder="Admin token · رمز المشرف" autocomplete="off" autofocus>
+  <label><input type="checkbox" id="remember" checked> Remember on this device (30 days) · <span class="ar" lang="ar" dir="rtl">تذكّرني على هذا الجهاز (30 يومًا)</span></label>
+  <button id="go" type="button">Open dashboard · <span class="ar" lang="ar" dir="rtl">فتح لوحة التحكم</span></button>
 </div>
 <script>
- var KEY = "alimne_admin_token";
- var tried = new URLSearchParams(location.search).get("token");
- if (tried) {
-   // A token was supplied but we still landed on this gate => it was invalid.
-   try { localStorage.removeItem(KEY); } catch (e) {}
+(function () {
+ // Migration: older versions kept the raw admin token in localStorage. Delete
+ // it — sign-in now lives in an HttpOnly cookie that page scripts can't read.
+ try { localStorage.removeItem("alimne_admin_token"); } catch (e) {}
+ var MSG = {
+   bad:  ["That token was rejected — check it and try again.",
+          "تم رفض هذا الرمز — تحقّق منه وحاول مرة أخرى."],
+   rate: ["Too many attempts — wait a minute and try again.",
+          "محاولات كثيرة جدًا — انتظر دقيقة ثم حاول مرة أخرى."],
+   net:  ["Couldn't reach the server — check your connection and try again.",
+          "تعذّر الوصول إلى الخادم — تحقّق من اتصالك وحاول مرة أخرى."],
+   oops: ["Something went wrong on the server — try again in a moment.",
+          "حدث خطأ في الخادم — حاول مرة أخرى بعد قليل."]
+ };
+ function showErr(k) {
+   document.getElementById("err-en").textContent = MSG[k][0];
+   document.getElementById("err-ar").textContent = MSG[k][1];
    document.getElementById("err").style.display = "block";
- } else {
-   var saved = null; try { saved = localStorage.getItem(KEY); } catch (e) {}
-   if (saved) { location.replace("/admin?token=" + encodeURIComponent(saved)); }
  }
+ // A link from another site (email, chat app) doesn't carry the SameSite=Strict
+ // cookie, so we can land here while still signed in. Ask same-origin and, if
+ // the session is valid, forward once (time-guarded so it can never loop).
+ try {
+   var last = +(sessionStorage.getItem("alimne_admin_fwd") || 0);
+   if (Date.now() - last > 10000) {
+     fetch("/admin/session", {credentials: "same-origin"}).then(function (r) {
+       if (r.status === 204) {
+         try { sessionStorage.setItem("alimne_admin_fwd", String(Date.now())); } catch (e) {}
+         location.replace("/admin");
+       }
+     }).catch(function () {});
+   }
+ } catch (e) {}
+ var btn = document.getElementById("go"), tok = document.getElementById("tok");
  function go() {
-   var v = document.getElementById("tok").value.trim();
-   if (!v) return;
-   try {
-     if (document.getElementById("remember").checked) localStorage.setItem(KEY, v);
-     else localStorage.removeItem(KEY);
-   } catch (e) {}
-   location.href = "/admin?token=" + encodeURIComponent(v);
+   var v = tok.value.trim();
+   if (!v || btn.disabled) return;
+   btn.disabled = true;
+   fetch("/admin/login", {
+     method: "POST", credentials: "same-origin",
+     headers: {"Content-Type": "application/json", "X-Requested-With": "alimne-admin"},
+     body: JSON.stringify({token: v, remember: document.getElementById("remember").checked})
+   }).then(function (r) {
+     btn.disabled = false;
+     if (r.ok) { tok.value = ""; location.replace("/admin"); return; }
+     showErr(r.status === 429 ? "rate" : (r.status === 401 ? "bad" : "oops"));
+   }).catch(function () { btn.disabled = false; showErr("net"); });
  }
- document.getElementById("go").addEventListener("click", go);
- document.getElementById("tok").addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
+ btn.addEventListener("click", go);
+ tok.addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
+})();
 </script>
 </body></html>"""
 
 
+@app.route("/admin/login", methods=["POST"])
+def admin_login():
+    """Exchange the admin token (JSON body, never the URL) for an HttpOnly
+    session cookie. Rate limited per IP; the supplied value is never logged."""
+    ip = _client_ip()
+    if not _check_rate_limit(ip, scope="admin-login", limit=_ADMIN_LOGIN_PER_MIN):
+        _log.warning("ADMIN login rate-limited for %s", ip)
+        return jsonify({"ok": False, "error": "Too many attempts — wait a minute and try again.",
+                        "code": "rate_limited"}), 429
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
+    supplied = data.get("token")
+    if not (isinstance(supplied, str) and len(supplied) <= 512 and _ct_eq(supplied, ADMIN_TOKEN)):
+        _log.warning("ADMIN login failed from %s", ip)
+        return jsonify({"ok": False, "error": "Invalid admin token.", "code": "bad_token"}), 401
+    remember = data.get("remember") is True
+    resp = jsonify({"ok": True})
+    resp.set_cookie(ADMIN_COOKIE,
+                    _admin_session_value(_ADMIN_REMEMBER_SECS if remember else _ADMIN_SESSION_SECS),
+                    max_age=_ADMIN_REMEMBER_SECS if remember else None,   # None = session cookie
+                    path=_ADMIN_COOKIE_PATH, secure=True, httponly=True, samesite="Strict")
+    _log.info("ADMIN login from %s (remember=%s)", ip, remember)
+    return resp
+
+
+@app.route("/admin/logout", methods=["POST"])
+def admin_logout():
+    """Sign out: clear this browser's cookie and, when the signed-in admin asks
+    (cookie + CSRF header, or X-Admin-Token), revoke every session on every
+    device. An unauthenticated caller only clears its own cookie - it can never
+    sign the admin out."""
+    if _admin_ok():
+        _admin_revoke_sessions()
+        _log.info("ADMIN sign out (all sessions revoked) from %s", _client_ip())
+    resp = jsonify({"ok": True})
+    resp.delete_cookie(ADMIN_COOKIE, path=_ADMIN_COOKIE_PATH,
+                       secure=True, httponly=True, samesite="Strict")
+    return resp
+
+
+@app.route("/admin/session")
+def admin_session():
+    """204 if this request is signed in as admin, else 401. Lets the gate page
+    forward to the dashboard when a cross-site link arrived without the
+    SameSite=Strict cookie. Reveals nothing beyond yes/no to the caller."""
+    if not _admin_ok():
+        return jsonify({"ok": False}), 401
+    return "", 204
+
+
 @app.route("/admin")
 def admin_page():
+    if request.query_string:
+        # Old bookmarks and the old gate put the token in ?token=. Never honour
+        # it (query strings are logged) and drop it from the address bar/history.
+        return redirect("/admin", 302)
     if not _admin_ok():
         return ADMIN_GATE_HTML, 401
-    token = ADMIN_TOKEN
     with _vis_lock:
         vis_copy     = list(_visitors)
         blocked_copy = set(_blocked_ips)
@@ -1332,9 +1541,26 @@ def admin_page():
             return ""
         return "".join(chr(0x1F1E6 + ord(c) - ord('A')) for c in cc.upper())
 
-    # JS-string-safe escaper for values dropped into an onclick='...(\'x\')'
+    # Escaper for values dropped into onclick="fn('x')". The browser HTML-decodes
+    # the attribute BEFORE the JS parser sees it, so HTML-escaping first (the old
+    # way: ' -> &#39;) handed JS a real ' that closed the string. Now JS-escape
+    # first: everything but ASCII letters/digits and " .:-_@+" becomes \xHH or
+    # \uHHHH, so no quote, backslash, line break or markup survives; the final
+    # HTML-escape is then a no-op kept as a belt.
     def _js(s):
-        return _he(s).replace("\\", "\\\\").replace("'", "\\'")
+        out = []
+        for ch in str(s):
+            o = ord(ch)
+            if (o < 0x80 and ch.isalnum()) or ch in " .:-_@+":
+                out.append(ch)
+            elif o < 0x100:
+                out.append("\\x%02x" % o)
+            elif o < 0x10000:
+                out.append("\\u%04x" % o)
+            else:                      # astral: a UTF-16 surrogate pair, as JS strings are
+                o -= 0x10000
+                out.append("\\u%04x\\u%04x" % (0xD800 + (o >> 10), 0xDC00 + (o & 0x3FF)))
+        return _he("".join(out))
 
     rows = ""
     for v in vis_copy:
@@ -1690,7 +1916,7 @@ def admin_page():
   <div class="actions">
     <button class="btn btn-gray" onclick="location.reload()">↻ Refresh</button>
     <button class="btn btn-red" onclick="clearLog()">🗑 Clear Log</button>
-    <button class="btn btn-gray" onclick="forgetToken()" title="Forget the saved admin token on this device">⎋ Sign out</button>
+    <button class="btn btn-gray" onclick="signOut()" title="Sign out of the admin dashboard on every device · تسجيل الخروج من لوحة الإدارة على جميع الأجهزة">⎋ Sign out</button>
   </div>
 </div>
 {subs_section}
@@ -1711,36 +1937,41 @@ def admin_page():
 </div>
 <div id="toast"></div>
 <script>
-const TOKEN = "{str(token).replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))}";
-// Remember the token on this device so /admin auto-opens next time, and strip
-// the token out of the address bar / history now that it's saved.
-try {{ localStorage.setItem("alimne_admin_token", TOKEN); if (location.search) history.replaceState(null, "", "/admin"); }} catch (e) {{}}
+// Auth rides on the HttpOnly session cookie, which the browser attaches to these
+// same-origin requests by itself; the admin token never reaches this page. The
+// server requires the fixed X-Requested-With header on every cookie-authed POST.
+try {{ localStorage.removeItem("alimne_admin_token"); }} catch (e) {{}}   // legacy copy
+const ADMIN_HEADERS = {{"Content-Type":"application/json","X-Requested-With":"alimne-admin"}};
 function toast(msg, color="#16a34a"){{
   const t = document.getElementById("toast");
   t.textContent = msg; t.style.background = color; t.style.display = "block";
   setTimeout(()=>t.style.display="none", 2500);
 }}
-// Send the admin token in the X-Admin-Token HEADER, never the URL query string
-// (query strings are recorded in access logs; the header is not).
+// POST an admin action. Resolves to the Response, or null when the session has
+// expired (cookie cleared, or the admin token was rotated) — then it sends you to sign in.
+async function adminPost(url, body){{
+  const r = await fetch(url, {{method:"POST", credentials:"same-origin", headers:ADMIN_HEADERS,
+                               body: JSON.stringify(body || {{}})}});
+  if (r.status === 401) {{
+    toast("Session expired — sign in again. · انتهت الجلسة — سجّل الدخول مرة أخرى.", "#dc2626");
+    setTimeout(()=>{{ location.href = "/admin"; }}, 1800);
+    return null;
+  }}
+  return r;
+}}
 async function blockIp(ip){{
   if(!confirm("Block " + ip + "?\\nThis will 403 all their requests immediately.")) return;
-  const r = await fetch("/admin/block", {{
-    method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}},
-    body: JSON.stringify({{ip}})
-  }});
-  if(r.ok){{ toast("⛔ Blocked: " + ip, "#dc2626"); setTimeout(()=>location.reload(),1200); }}
+  const r = await adminPost("/admin/block", {{ip}});
+  if(r && r.ok){{ toast("⛔ Blocked: " + ip, "#dc2626"); setTimeout(()=>location.reload(),1200); }}
 }}
 async function unblock(ip){{
-  const r = await fetch("/admin/unblock", {{
-    method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}},
-    body: JSON.stringify({{ip}})
-  }});
-  if(r.ok){{ toast("✓ Unblocked: " + ip); setTimeout(()=>location.reload(),1200); }}
+  const r = await adminPost("/admin/unblock", {{ip}});
+  if(r && r.ok){{ toast("✓ Unblocked: " + ip); setTimeout(()=>location.reload(),1200); }}
 }}
 async function clearLog(){{
   if(!confirm("Clear all visitor log entries?")) return;
-  const r = await fetch("/admin/clear", {{method:"POST", headers:{{"X-Admin-Token":TOKEN}}}});
-  if(r.ok){{ toast("🗑 Log cleared"); setTimeout(()=>location.reload(),1200); }}
+  const r = await adminPost("/admin/clear");
+  if(r && r.ok){{ toast("🗑 Log cleared"); setTimeout(()=>location.reload(),1200); }}
 }}
 
 // ── Subscribers: search / paying-only filter / sort / CSV / actions ──────────
@@ -1793,19 +2024,23 @@ async function grantTokens(uid, email){{
   if (v === null) return;
   var amount = parseInt(v, 10);
   if (!amount) {{ toast("Enter a non-zero number", "#dc2626"); return; }}
-  var r = await fetch("/admin/user/grant", {{method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}}, body: JSON.stringify({{user_id: uid, amount: amount}})}});
+  var r = await adminPost("/admin/user/grant", {{user_id: uid, amount: amount}});
+  if (!r) return;
   var d = await r.json().catch(function(){{ return {{}}; }});
   if (r.ok) {{ toast("✓ " + email + ": " + d.tokens_remaining + " tokens"); setTimeout(function(){{ location.reload(); }}, 900); }}
   else {{ toast("✗ " + (d.error || "failed"), "#dc2626"); }}
 }}
 async function cancelSub(uid, email){{
   if (!confirm("Cancel subscription for " + email + "?\\nStripe subscriptions cancel at period end (they keep access until then).")) return;
-  var r = await fetch("/admin/user/cancel", {{method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}}, body: JSON.stringify({{user_id: uid}})}});
+  var r = await adminPost("/admin/user/cancel", {{user_id: uid}});
+  if (!r) return;
   var d = await r.json().catch(function(){{ return {{}}; }});
   if (r.ok) {{ toast(d.canceled_at_period_end ? "✓ Cancels at period end" : "✓ Set to free"); setTimeout(function(){{ location.reload(); }}, 900); }}
   else {{ toast("✗ " + (d.error || "failed"), "#dc2626"); }}
 }}
-function forgetToken(){{
+async function signOut(){{
+  // Server clears the HttpOnly cookie (page JS can't); then back to the sign-in gate.
+  try {{ await fetch("/admin/logout", {{method:"POST", credentials:"same-origin", headers:ADMIN_HEADERS, body:"{{}}"}}); }} catch(e) {{}}
   try {{ localStorage.removeItem("alimne_admin_token"); }} catch(e) {{}}
   location.href = "/admin";
 }}
@@ -1992,6 +2227,29 @@ def _guide_blob(guide, filename):
 
 def _guide_sig(blob):
     return hmac.new(_GUIDE_KEY, blob.encode("utf-8"), hashlib.sha256).hexdigest()
+
+# ── Loose guide shapes ─────────────────────────────────────────────────────────
+# Guide content comes from the LLM (and from older shared copies), so any field
+# can arrive in the wrong shape: a keyword dict without 'term', one string where
+# a list belongs, a number as the title. Readers (chat, share page, views) use
+# these instead of assuming the ideal shape — a loose guide must never be a 500.
+def _as_list(v):
+    """A guide list field: a list stays; one non-blank string becomes [it];
+    anything else (None, a number, a dict) is []."""
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str) and v.strip():
+        return [v]
+    return []
+
+def _scalar_text(v):
+    """Display text for a scalar guide value: a str as-is, a number as str();
+    anything else (None, bool, list, dict) → ''."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return str(v)
+    return ""
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY        = colors.HexColor('#0a1628')
@@ -2402,10 +2660,15 @@ def _ar_pdf_text(s):
     from reportlab.pdfbase.rl_codecs import RL_Codecs
     RL_Codecs.register()
     has = _ar_font_has()
-    return "".join(
-        ch if (has.get(ord(ch)) or _enc_ok(ch, "cp1252") or _enc_ok(ch, "symbol"))
-        else _pdf_winansi_alt(ch)
-        for ch in _pdf_normalize(str(s)))
+    out = []
+    for ch in str(s):
+        if has.get(ord(ch)):          # the Arabic font draws it as-is (e.g. U+2010)
+            out.append(ch)
+            continue
+        for c in _pdf_normalize(ch):  # lookalike hyphens/spaces → plain ones
+            out.append(c if (has.get(ord(c)) or _enc_ok(c, "cp1252") or _enc_ok(c, "symbol"))
+                       else _pdf_winansi_alt(c))
+    return "".join(out)
 
 
 def _ar_pdf_markup(s):
@@ -2447,6 +2710,9 @@ def _para_line_texts(para):
     return out
 
 
+_AR_LETTER_RE = re.compile("[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
+
+
 class _ArabicParagraph(Paragraph):
     """Paragraph for one Arabic plain-text field of build_pdf.
 
@@ -2456,42 +2722,63 @@ class _ArabicParagraph(Paragraph):
     breaks it into lines from the wrong end: a multi-line paragraph came out with
     its lines in reverse order, the first sentence on the last line.
 
-    This wraps the reshaped LOGICAL text with a probe Paragraph, bidi-reorders the
-    resulting lines (_ar_display_lines: levels resolved over the whole paragraph,
-    then each line reordered with the paragraph's direction) and lays those
-    lines out joined by <br/>. It is redone on every wrap(), because tables wrap
-    the same cell at different widths. `shaped` is _ar_shape() output: plain text,
-    reshaped, not bidi-reordered and not escaped - markup is never interpreted.
+    This wraps the reshaped LOGICAL text (itself, as a plain Paragraph), bidi-
+    reorders the resulting lines (_ar_display_lines: levels resolved over the whole
+    paragraph, then each line reordered with the paragraph's direction) and lays
+    those lines out joined by <br/> in a second Paragraph (_real), which is what
+    gets drawn. Tables wrap the same cell at several widths, and wrap it again and
+    again at each (KeepTogether, splitting, drawing), so the layout and its size
+    are built once per distinct width and reused (_layouts). `shaped` is
+    _ar_shape() output: plain text, reshaped, not bidi-reordered and not escaped -
+    markup is never interpreted. `base_dir` 'R'/'L' fixes the paragraph
+    direction; None takes it from the first strong letter. build_pdf passes 'R'
+    for Arabic text, so "DNA هو ..." still reads right-to-left.
 
     Characters the Arabic font lacks (Latin, % - ( ) ? ·) are drawn in Helvetica
-    (_ar_pdf_text/_ar_pdf_markup). The probe is wrapped with that same mixed
+    (_ar_pdf_text/_ar_pdf_markup). The probe (this flowable) uses that same mixed
     markup, so every line is measured in the fonts it is drawn in.
     """
 
-    def __init__(self, shaped, style):
+    _MAX_LAYOUTS = 8      # distinct widths kept per paragraph (a table probes a few)
+
+    def __init__(self, shaped, style, base_dir=None):
         self._shaped = _ar_pdf_text(shaped or "")
-        self._base_dir = _ar_base_dir(self._shaped)
+        self._base_dir = base_dir if base_dir in ("R", "L") else _ar_base_dir(self._shaped)
         self._real = None
-        # Start out as the old one-line rendering, so anything that looks at the
-        # flowable before wrap() (minWidth, getPlainText, ...) behaves as before.
-        Paragraph.__init__(self, _ar_pdf_markup(_ar_display(self._shaped, self._base_dir)), style)
+        self._layouts = {}    # availWidth -> [real Paragraph, (w, h) or None]
+        # The flowable itself holds the LOGICAL text: it is the line-breaking
+        # probe. Same glyphs, fonts and word widths as the drawn lines.
+        Paragraph.__init__(self, _ar_pdf_markup(self._shaped), style)
 
     def _layout(self, availWidth, availHeight):
-        probe = Paragraph(_ar_pdf_markup(self._shaped), self.style)
-        probe.wrap(availWidth, availHeight)
-        lines = [ln.strip() for ln in _para_line_texts(probe)]
-        self._real = Paragraph(
-            "<br/>".join(_ar_pdf_markup(ln) for ln in _ar_display_lines(lines, self._base_dir)),
-            self.style)
-        return self._real
+        entry = self._layouts.get(availWidth)
+        if entry is None:
+            # Line breaking depends only on the width (availHeight matters to split()).
+            Paragraph.wrap(self, availWidth, availHeight)
+            lines = [ln.strip() for ln in _para_line_texts(self)]
+            real = Paragraph(
+                "<br/>".join(_ar_pdf_markup(ln) for ln in _ar_display_lines(lines, self._base_dir)),
+                self.style)
+            if len(self._layouts) >= self._MAX_LAYOUTS:
+                self._layouts.clear()
+            entry = self._layouts[availWidth] = [real, None]
+        self._real = entry[0]
+        return entry
 
     def wrap(self, availWidth, availHeight):
-        self.width, self.height = self._layout(availWidth, availHeight).wrap(availWidth, availHeight)
+        entry = self._layout(availWidth, availHeight)
+        if entry[1] is None:
+            # A layout is only ever wrapped at its own width, so its size is fixed.
+            entry[1] = entry[0].wrap(availWidth, availHeight)
+        self.width, self.height = entry[1]
         return self.width, self.height
 
     def split(self, availWidth, availHeight):
         # The parts are plain Paragraphs of already-ordered lines.
-        return self._layout(availWidth, availHeight).split(availWidth, availHeight)
+        entry = self._layout(availWidth, availHeight)
+        if entry[1] is None:
+            entry[1] = entry[0].wrap(availWidth, availHeight)
+        return entry[0].split(availWidth, availHeight)
 
     def draw(self):
         real = self._real
@@ -3182,12 +3469,20 @@ def build_pdf(guide, language, out_filename="study_guide"):
         # Paragraph for one plain-text field (`prefix` is app text, e.g. "3.  ").
         # Arabic is wrapped in logical order and then reordered line by line
         # (_ArabicParagraph); reordering the whole string first put the lines of a
-        # multi-line paragraph in reverse order. English, and Arabic without its
-        # font, is exactly the old Paragraph(prefix + T(text)).
+        # multi-line paragraph in reverse order. Every paragraph of an Arabic guide
+        # runs right-to-left, even one that starts with a Latin term ("DNA هو ...").
+        # English, and Arabic without its font, is exactly the old
+        # Paragraph(prefix + T(text)).
         if ar_ok:
-            return _ArabicParagraph(prefix + _ar_shape(_clean(text)), style)
+            shaped = prefix + _ar_shape(_clean(text))
+            # Right-to-left whenever the text has Arabic in it ("DNA هو ..."); a purely
+            # Latin field (an English key term "Term (EN)") keeps its own direction, or
+            # forced RTL would move its closing bracket to the wrong end.
+            return _ArabicParagraph(shaped, style,
+                                    base_dir="R" if _AR_LETTER_RE.search(shaped) else None)
         return Paragraph(prefix + T(text), style)
 
+    AR_GUIDE, AR_LUCK = "دليل الدراسة بالذكاء الاصطناعي", "حظ سعيد!"   # footer (logical order)
     L = {
         "objectives": T("الأهداف التعليمية") if is_ar else "LEARNING OBJECTIVES",
         "obj_bullet": "",
@@ -3199,8 +3494,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
         "sec_bullet": "",
         "bul_bullet": "",
         "q_pre":      "" if is_ar else "Q. ",
-        "guide":      T("دليل الدراسة بالذكاء الاصطناعي") if is_ar else "AI Exam Study Guide",
-        "luck":       T("حظ سعيد!") if is_ar else "Good luck!",
+        "guide":      T(AR_GUIDE) if is_ar else "AI Exam Study Guide",
+        "luck":       T(AR_LUCK) if is_ar else "Good luck!",
     }
 
     buf = io.BytesIO()
@@ -3351,10 +3646,14 @@ def build_pdf(guide, language, out_filename="study_guide"):
             headers = tbl["headers"]
             n_cols  = len(headers)
             col_w   = W / n_cols
-            tbl_rows = [[P(h, ST["tbl_hdr"]) for h in headers]]
+            # Arabic tables run right-to-left: the first column is drawn on the
+            # right (like the key-terms table). Every column has the same width
+            # and no column-specific style, so reversing the cells is enough.
+            rtl = (lambda cells: cells[::-1]) if is_ar else (lambda cells: cells)
+            tbl_rows = [rtl([P(h, ST["tbl_hdr"]) for h in headers])]
             for ri, row in enumerate(tbl["rows"]):
                 padded = (list(row) + [""] * n_cols)[:n_cols]
-                tbl_rows.append([P(str(c), ST["tbl_cell"]) for c in padded])
+                tbl_rows.append(rtl([P(str(c), ST["tbl_cell"]) for c in padded]))
             inner = Table(tbl_rows, colWidths=[col_w]*n_cols)
             ts = [
                 ("BACKGROUND",    (0,0), (-1,0),  NAVY_LIGHT),
@@ -3460,14 +3759,21 @@ def build_pdf(guide, language, out_filename="study_guide"):
     # ── Footer ────────────────────────────────────────────────────────────────
     elems.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
     elems.append(Spacer(1, 0.1*cm))
-    # The footer style is the Arabic font in Arabic PDFs, which has no Latin
-    # letters, "·" or "—": the app's own Latin text goes in Helvetica there.
-    lat, end = ('<font face="Helvetica">', "</font>") if ar_ok else ("", "")
-    elems.append(Paragraph(
-        f"{T(guide.get('title',''))}{lat}  ·  {end}{L['guide']}{lat}  ·  {end}{L['luck']}<br/>"
-        f"{lat}Made with <b>alimne.app</b> — turn any lecture into a study guide{end}",
-        ST["footer"]
-    ))
+    made_with = "Made with <b>alimne.app</b> — turn any lecture into a study guide"
+    if ar_ok:
+        # One logical string through P(): reordering it as ONE line (T) put the
+        # title last for a right-to-left reader and reversed its lines if it ever
+        # wrapped. The separator is U+2010 because the Arabic font has no "·", and
+        # the Latin line gets its own Helvetica paragraph because it has no Latin
+        # letters either.
+        sep = " \N{HYPHEN} "
+        elems.append(P(f"{guide.get('title', '')}{sep}{AR_GUIDE}{sep}{AR_LUCK}", ST["footer"]))
+        elems.append(Paragraph(made_with, _st("FTL", ST["footer"], fontName="Helvetica")))
+    else:
+        elems.append(Paragraph(
+            f"{T(guide.get('title',''))}  ·  {L['guide']}  ·  {L['luck']}<br/>" + made_with,
+            ST["footer"]
+        ))
 
     doc.multiBuild(elems)
     buf.seek(0)
@@ -3932,6 +4238,100 @@ def capture_lead():
     return jsonify({"ok": True})
 
 
+# ── Request-field validation ───────────────────────────────────────────────────
+# Runs BEFORE _charge_credit: a malformed field is a cheap 400 'bad_request' —
+# never a spent credit followed by a 500 (e.g. {"text": 123} on /api/summarize-text
+# charged, crashed on .strip() and was never refunded).
+class _BadField(ValueError):
+    """A request field (or the whole JSON body) has the wrong type."""
+    def __init__(self, field):
+        super().__init__(field)
+        self.field = field
+
+def _json_object():
+    """The JSON body as a dict: no / unparsable body → {} (callers then report
+    what is missing); a JSON array, string, number or bool → _BadField('body')."""
+    data = request.get_json(silent=True)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise _BadField("body")
+    return data
+
+def _str_field(data, key, default=""):
+    """data[key] as a str. Missing or null → `default`; a number, bool, list or
+    object → _BadField (never silently str()'d)."""
+    v = data.get(key)
+    if v is None:
+        return default
+    if not isinstance(v, str):
+        raise _BadField(key)
+    return v
+
+def _flag_field(data, key, default=True):
+    """An on/off option sent as a bool or a string. Keeps the historical rule
+    str(v).lower() != 'false' for any scalar; null → `default`; a list or
+    object → _BadField."""
+    v = data.get(key)
+    if v is None:
+        return default
+    if isinstance(v, (list, dict)):
+        raise _BadField(key)
+    return str(v).lower() != "false"
+
+def _wants_ar(data=None):
+    """Answer in Arabic? The request's own `language` field decides; otherwise
+    (auto / missing / malformed) the browser's Accept-Language."""
+    lang = data.get("language") if isinstance(data, dict) else None
+    if lang in ("ar", "en"):
+        return lang == "ar"
+    try:
+        return request.accept_languages.best_match(("en", "ar")) == "ar"
+    except Exception:
+        return False
+
+def _bad_request(en, ar, data=None, **extra):
+    """400 for malformed input: code 'bad_request', text in the caller's language."""
+    body = {"error": ar if _wants_ar(data) else en, "code": "bad_request"}
+    body.update(extra)
+    return jsonify(body), 400
+
+_BAD_FIELD_EN = "Something in this request was malformed — please refresh the page and try again."
+_BAD_FIELD_AR = "بعض بيانات هذا الطلب غير صالحة — يُرجى تحديث الصفحة والمحاولة مرة أخرى."
+
+def _bad_field(exc, data=None):
+    """400 for a _BadField; `field` names the offending input (for debugging)."""
+    return _bad_request(_BAD_FIELD_EN, _BAD_FIELD_AR, data, field=exc.field)
+
+_NO_TEXT_EN = "No text or URL provided"
+_NO_TEXT_AR = "لم يتم إدخال أي نص أو رابط."
+
+_BAD_URL_EN = "Only public http(s) URLs are supported — paste the full link, starting with https://"
+_BAD_URL_AR = "لا نقبل إلا الروابط العامة (http أو https) — الصق الرابط كاملًا بدءًا بـ https://"
+
+def _url_precheck(url):
+    """Cheap checks on a pasted URL BEFORE a credit is charged (no DNS, no I/O):
+    http(s), a host and a valid port, and not localhost or a literal private /
+    loopback / link-local address. _fetch_url_text still screens the resolved
+    IPs (and pins the connection) when it actually fetches."""
+    try:
+        p = _urlparse(url)
+        host = p.hostname
+        p.port                       # raises ValueError for an invalid port
+    except ValueError:
+        return False
+    if p.scheme not in ("http", "https") or not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        addr = _ipaddress.ip_address(host)
+    except ValueError:
+        return True                  # a host name: resolved and screened at fetch time
+    return not (addr.is_private or addr.is_loopback or addr.is_link_local or
+                addr.is_reserved or addr.is_multicast or addr.is_unspecified)
+
+
 # ── SSE streaming endpoint ─────────────────────────────────────────────────────
 
 def _sse(data):
@@ -3978,6 +4378,15 @@ def summarize_stream():
         return _auth_rejected()
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
+    f     = request.files["file"]
+    fname = f.filename or ""
+    # Validate BEFORE the charge: a rejected type used to be charged and then
+    # refunded — and a refund can fail (e.g. the durable device quota before
+    # migration 012), silently costing an anonymous visitor a free preview.
+    # (Multipart form fields are always strings, so no type checks are needed.)
+    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
+    if not fname.lower().endswith(_ALLOWED_EXT):
+        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     # ── Credit gate: signed-in users spend a token; anonymous users get a
     #    small free quota per device/IP so they can try without an account. ────
@@ -3987,18 +4396,12 @@ def summarize_stream():
     tok_left = charge.tok_left
 
     _log_usage_async("user" if uid else "anon", "file")
-    f            = request.files["file"]
     lang_param   = request.form.get("language", "auto")
-    out_name     = _safe_name(request.form.get("filename", f.filename.rsplit(".", 1)[0]))
+    out_name     = _safe_name(request.form.get("filename", fname.rsplit(".", 1)[0]))
     detail_level = request.form.get("detail", "standard")
     dcfg         = DETAIL.get(detail_level, DETAIL["standard"])
     include_quiz = request.form.get("mode", "full") != "summary"
     include_mcq  = str(request.form.get("quiz", "true")).lower() != "false"
-
-    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
-    if not f.filename.lower().endswith(_ALLOWED_EXT):
-        charge.refund()
-        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     if not ollama_running():
         charge.refund()
@@ -4253,7 +4656,8 @@ def share_guide(job_id):
     sb = _get_sb()
     if sb is None:
         return jsonify({"error": "Sharing is temporarily unavailable."}), 503
-    guide = job.get("guide") or {}
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
     # Sharing works signed out too: a rejected token (False) just shares anonymously,
     # and created_by must never be False.
     uid   = _auth_optional(request) or None
@@ -4264,7 +4668,11 @@ def share_guide(job_id):
         "mcqs":       guide.get("mcqs",       []), "keywords":   guide.get("keywords",   []),
         "objectives": guide.get("objectives", []), "language":   lang,
     }
-    base = {"guide": payload, "title": (guide.get("title") or "Study Guide")[:200],
+    # The title column is text: a number title (1984) used to 500 on [:200], and a
+    # list/object one was stored as-is. Numbers become text; others the default.
+    t = guide.get("title")
+    title = (t if isinstance(t, str) else _scalar_text(t)) or "Study Guide"
+    base = {"guide": payload, "title": title[:200],
             "language": lang, "created_by": uid}
     for _ in range(6):
         slug = _new_slug()
@@ -4283,14 +4691,16 @@ def share_guide(job_id):
 
 def _sg_bullet(b):
     if isinstance(b, str):  return _debullet(b)
-    if isinstance(b, dict): return _debullet(b.get("text") or b.get("fact") or "")
-    return _debullet(b)
+    if isinstance(b, dict): return _debullet(_scalar_text(b.get("text") or b.get("fact")))
+    return _debullet(_scalar_text(b))   # a number → its text; None / list → "" (skipped, not "None")
 
 def _sg_desc(g):
-    parts = [o for o in (g.get("objectives") or []) if isinstance(o, str) and o.strip()]
+    parts = [o for o in _as_list(g.get("objectives")) if isinstance(o, str) and o.strip()]
     if not parts:
-        for sec in (g.get("sections") or []):
-            for b in (sec.get("bullets") or []):
+        for sec in _as_list(g.get("sections")):
+            if not isinstance(sec, dict):
+                continue
+            for b in _as_list(sec.get("bullets")):
                 t = _sg_bullet(b).strip()
                 if t:
                     parts.append(t); break
@@ -4372,7 +4782,11 @@ def _shared_404():
     return _shared_shell("Guide not found · Alimne", "", body)
 
 def _render_shared_guide(row):
-    g      = row.get("guide") or {}
+    # Every field read here tolerates loose shapes (see _as_list / _scalar_text):
+    # this is a PUBLIC page, and a stored guide with e.g. a number for bullets or
+    # options, or a string section, used to answer 500.
+    g      = row.get("guide")
+    g      = g if isinstance(g, dict) else {}
     is_ar  = (row.get("language") or g.get("language")) == "ar"
     L = {
         "tag":   "دليل دراسة" if is_ar else "Study guide",
@@ -4386,13 +4800,14 @@ def _render_shared_guide(row):
                  if is_ar else "Upload a lecture — PowerPoint, PDF, or a YouTube link — and get notes, flashcards and a quiz in seconds.",
         "pbtn":  "ابدأ مجاناً" if is_ar else "Start free",
     }
-    title_raw = g.get("title") or "Study Guide"
+    title_raw = _scalar_text(g.get("title")) or "Study Guide"
     title = _he(title_raw)
     desc  = _sg_desc(g)
-    sub   = ("<p class=\"sub\">%s</p>" % _he(g.get("subtitle"))) if g.get("subtitle") else ""
+    sub_raw = _scalar_text(g.get("subtitle"))
+    sub   = ("<p class=\"sub\">%s</p>" % _he(sub_raw)) if sub_raw else ""
 
-    flashcards = [f for f in (g.get("flashcards") or []) if isinstance(f, dict)]
-    mcqs       = [m for m in (g.get("mcqs") or []) if isinstance(m, dict)]
+    flashcards = [f for f in _as_list(g.get("flashcards")) if isinstance(f, dict)]
+    mcqs       = [m for m in _as_list(g.get("mcqs")) if isinstance(m, dict)]
     meta_bits = []
     if flashcards: meta_bits.append(("%d بطاقة" % len(flashcards)) if is_ar else "%d flashcards" % len(flashcards))
     if mcqs:       meta_bits.append(("%d سؤال" % len(mcqs)) if is_ar else "%d quiz questions" % len(mcqs))
@@ -4400,19 +4815,20 @@ def _render_shared_guide(row):
     meta = "<div class=\"meta\">%s</div>" % _he(" · ".join(meta_bits))
 
     parts = []
-    objs = [o for o in (g.get("objectives") or []) if isinstance(o, str) and o.strip()]
+    objs = [o for o in _as_list(g.get("objectives")) if isinstance(o, str) and o.strip()]
     if objs:
         parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (
             _he(L["learn"]), "".join("<li>%s</li>" % _he(o) for o in objs)))
-    for sec in (g.get("sections") or []):
+    for sec in _as_list(g.get("sections")):
         if not isinstance(sec, dict): continue
         lis = "".join("<li>%s</li>" % _he(_sg_bullet(b).strip())
-                      for b in (sec.get("bullets") or []) if _sg_bullet(b).strip())
+                      for b in _as_list(sec.get("bullets")) if _sg_bullet(b).strip())
         if lis:
-            parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (_he(sec.get("title", "")), lis))
-    kws = [k for k in (g.get("keywords") or []) if isinstance(k, dict) and k.get("term")]
+            parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (_he(_scalar_text(sec.get("title"))), lis))
+    kws = [k for k in _as_list(g.get("keywords")) if isinstance(k, dict) and _scalar_text(k.get("term")).strip()]
     if kws:
-        dl = "".join("<div class=\"kw\"><dt>%s</dt><dd>%s</dd></div>" % (_he(k.get("term", "")), _he(k.get("definition", ""))) for k in kws)
+        dl = "".join("<div class=\"kw\"><dt>%s</dt><dd>%s</dd></div>" % (
+            _he(_scalar_text(k.get("term"))), _he(_scalar_text(k.get("definition")))) for k in kws)
         parts.append("<section class=\"sec\"><h2>%s</h2>%s</section>" % (_he(L["keys"]), dl))
     if flashcards:
         cards = "".join("<div class=\"fc\"><div class=\"fc-q\">%s</div><div class=\"fc-a\">%s</div></div>" % (
@@ -4426,7 +4842,7 @@ def _render_shared_guide(row):
             opts = "".join("<li class=\"opt%s\">%s%s</li>" % (
                 " correct" if _mcq_correct(o, ans) else "",
                 "✓ " if _mcq_correct(o, ans) else "",
-                _he(o if isinstance(o, str) else str(o))) for o in (m.get("options") or []))
+                _he(o if isinstance(o, str) else str(o))) for o in _as_list(m.get("options")))
             expl = m.get("explanation") or m.get("rationale") or ""
             ex = ("<div class=\"expl\">%s</div>" % _he(expl)) if expl else ""
             qz.append("<div class=\"qz\"><div class=\"qz-q\">%s</div><ul class=\"opts\">%s</ul>%s</div>" % (qt, opts, ex))
@@ -4482,6 +4898,60 @@ def shared_guide_page(slug):
     return _render_shared_guide(row)
 
 
+def _chat_context(guide):
+    """The study material for the chat prompt (title, objectives, section notes,
+    key terms) — rather than raw slide chunks. Tolerates loose guide shapes: a
+    keyword dict without 'term', a string where a list belongs, non-string
+    entries… are str()'d or skipped, never a 500."""
+    guide = guide if isinstance(guide, dict) else {}
+    parts = []
+    title = _scalar_text(guide.get("title"))
+    if title.strip():
+        parts.append(f"Title: {title}")
+    objs = [t for t in (_scalar_text(o) for o in _as_list(guide.get("objectives"))) if t.strip()]
+    if objs:
+        parts.append("Objectives:\n" + "\n".join(f"- {o}" for o in objs))
+    for sec in _as_list(guide.get("sections")):
+        if not isinstance(sec, dict):
+            continue
+        lines = []
+        for b in _as_list(sec.get("bullets")):
+            if isinstance(b, dict):
+                b = b.get("text") or b.get("fact")
+            t = _scalar_text(b)
+            if t.strip():
+                lines.append(f"- {t}")
+        if lines:
+            parts.append(f"\n[{_scalar_text(sec.get('title'))}]\n" + "\n".join(lines))
+    kw_lines = []
+    for k in _as_list(guide.get("keywords"))[:30]:
+        if isinstance(k, dict):
+            term, defn = _scalar_text(k.get("term")), _scalar_text(k.get("definition"))
+            line = f"{term}: {defn}" if term.strip() else defn
+        else:
+            line = _scalar_text(k)
+        if line.strip():
+            kw_lines.append(line)
+    if kw_lines:
+        parts.append("Key terms:\n" + "\n".join(kw_lines))
+    return "\n\n".join(parts) or "No material available."
+
+def _chat_answer(result):
+    """The model's answer as a string, whatever JSON shape came back: a list
+    ([{"answer": …}]), a bare JSON string, an answer that is a list of lines…
+    An unusable answer is '' (the client then shows its own localized
+    'no answer' text, as it did for null); no 'answer' key at all keeps the
+    historical default text."""
+    if isinstance(result, str):
+        return result.strip()
+    res = _as_dict(result)
+    if "answer" not in res:
+        return "No answer found in the material."
+    ans = res.get("answer")
+    if isinstance(ans, list):
+        ans = "\n".join(t for t in (_scalar_text(a) for a in ans) if t.strip())
+    return _scalar_text(ans)
+
 @app.route("/api/chat/<job_id>", methods=["POST"])
 def chat_with_slides(job_id):
     if not _check_rate_limit(_client_ip(), scope="chat", limit=20):
@@ -4491,37 +4961,32 @@ def chat_with_slides(job_id):
         return err
     if not _valid_job(job_id):
         return jsonify({"error": "Invalid job ID"}), 400
-    data     = request.json or {}
-    question = data.get("question", "")[:500].strip()
-    language = "ar" if data.get("language") == "ar" else "en"
+    # A non-string question (a number, list, object, null) or a non-object body
+    # used to 500 on [:500]; it is a 400 'bad_request' now.
+    data = {}
+    try:
+        data     = _json_object()
+        question = _str_field(data, "question")[:500].strip()
+    except _BadField as e:
+        return _bad_field(e, data)
     if not question:
-        return jsonify({"error": "No question provided"}), 400
+        return _bad_request("No question provided",
+                            "لم يتم إدخال أي سؤال — اكتب سؤالك أولاً.", data)
     with _jobs_lock:
         job = get_job(job_id)
     if not job:
         return _job_expired_json()
 
-    # Build rich context from guide (sections + keywords) rather than raw slide chunks
-    guide   = job.get("guide") or {}
-    context_parts = []
-    if guide.get("title"):
-        context_parts.append(f"Title: {guide['title']}")
-    if guide.get("objectives"):
-        context_parts.append("Objectives:\n" + "\n".join(f"- {o}" for o in guide["objectives"]))
-    for sec in (guide.get("sections") or []):
-        bullets = sec.get("bullets") or []
-        if bullets:
-            context_parts.append(f"\n[{sec.get('title','')}]\n" + "\n".join(
-                f"- {b}" if isinstance(b, str) else f"- {b.get('text') or b.get('fact','')}"
-                for b in bullets
-            ))
-    if guide.get("keywords"):
-        kw_lines = [
-            f"{k['term']}: {k.get('definition','')}" if isinstance(k, dict) else str(k)
-            for k in guide["keywords"][:30]
-        ]
-        context_parts.append("Key terms:\n" + "\n".join(kw_lines))
-    context = "\n\n".join(context_parts) or "No material available."
+    guide = job.get("guide")
+    # An explicit en/ar choice wins. 'auto' (or nothing) answers in the guide's
+    # own language: the client may not have the guide's language to send.
+    req_lang = data.get("language")
+    if req_lang in ("ar", "en"):
+        language = req_lang
+    else:
+        language = "ar" if isinstance(guide, dict) and guide.get("language") == "ar" else "en"
+
+    context = _chat_context(guide)
 
     lang = "in Arabic" if language == "ar" else "in English"
     try:
@@ -4540,7 +5005,7 @@ Rules:
 - If genuinely not covered, say so briefly
 - Be helpful and detailed; include facts, definitions, examples from the material
 - JSON only""", num_predict=1024)
-        return jsonify({"answer": result.get("answer", "No answer found in the material.")})
+        return jsonify({"answer": _chat_answer(result)})
     except Exception as e:
         return jsonify({"error": _safe_err(e)}), 500
 
@@ -4577,9 +5042,11 @@ def view_md(job_id):
         job = get_job(job_id)
     if not job:
         return _VIEW_EXPIRED_HTML, 404, {"Content-Type": "text/html; charset=utf-8"}
-    is_ar = (job.get("guide") or {}).get("language") == "ar"
-    title = _he(job["guide"].get("title", "Study Guide"))
-    md = job["md"]
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
+    is_ar = guide.get("language") == "ar"
+    title = _he(_scalar_text(guide.get("title", "Study Guide")) or "Study Guide")
+    md = job.get("md") or ""
 
     def _md_to_html(text):
         lines, out = text.split('\n'), []
@@ -4675,9 +5142,10 @@ def view_cards(job_id):
         job = get_job(job_id)
     if not job:
         return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
-    guide = job["guide"]
-    title = _he(guide.get("title", "Flash Cards"))
-    cards = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
+    title = _he(_scalar_text(guide.get("title", "Flash Cards")) or "Flash Cards")
+    cards = [f for f in _as_list(guide.get("flashcards")) if isinstance(f, dict)]
     if not cards:
         return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No flash cards available.</p>")
 
@@ -4747,6 +5215,20 @@ render();
     return _page_shell(f"Flash Cards — {title}", css, html, script)
 
 
+def _quiz_items(mcqs):
+    """Quiz questions the view script can render: dicts whose `options` is a
+    non-empty list of strings. q.options.map() crashed the page on a string or
+    number, and a question with no options can never be answered (its Next
+    button only appears after a pick), so such questions are left out."""
+    out = []
+    for m in _as_list(mcqs):
+        if not isinstance(m, dict):
+            continue
+        opts = [t for t in (_scalar_text(o) for o in _as_list(m.get("options"))) if t.strip()]
+        if opts:
+            out.append({**m, "options": opts})
+    return out
+
 @app.route("/api/view/quiz/<job_id>")
 def view_quiz(job_id):
     if not _valid_job(job_id):
@@ -4755,9 +5237,10 @@ def view_quiz(job_id):
         job = get_job(job_id)
     if not job:
         return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
-    guide = job["guide"]
-    title = _he(guide.get("title", "Quiz"))
-    mcqs = [m for m in guide.get("mcqs", []) if isinstance(m, dict)]
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
+    title = _he(_scalar_text(guide.get("title", "Quiz")) or "Quiz")
+    mcqs = _quiz_items(guide.get("mcqs"))
     if not mcqs:
         return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No quiz questions available.</p>")
 
@@ -5151,13 +5634,19 @@ def youtube_transcript():
     if uid is False:
         return _auth_rejected()   # a sent-but-rejected token is never 'anonymous'
 
-    data = request.get_json(silent=True) or {}
-    url = (data.get("url") or "").strip()
-    lang_param = data.get("language", "auto")
-    detail_level = data.get("detail", "standard")
+    # Type-check every field first: a number/list url or a list detail used to
+    # crash here with a 500 (.strip() / unhashable dict key).
+    data = {}
+    try:
+        data = _json_object()
+        url          = _str_field(data, "url").strip()
+        lang_param   = _str_field(data, "language", "auto")
+        detail_level = _str_field(data, "detail", "standard")
+        include_quiz = _str_field(data, "mode", "full") != "summary"
+        include_mcq  = _flag_field(data, "quiz", True)
+    except _BadField as e:
+        return _bad_field(e, data)
     yt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
-    include_quiz = data.get("mode", "full") != "summary"
-    include_mcq  = str(data.get("quiz", True)).lower() != "false"
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not ollama_running():
@@ -5348,13 +5837,19 @@ def summarize_text():
     # taps "Try a sample" → a real guide on a FIXED server-side lecture. No credit
     # consumed; separate tighter rate limit; fixed text can't be abused as a free
     # generator. This is the activation unlock — the point is that they SEE it work.
-    _peek = request.get_json(silent=True) or {}
-    if _peek.get("demo"):
+    # The body is read ONCE, here, before anything can be spent. silent=True: a
+    # non-JSON body is {} (→ "No text or URL" below); a JSON array/string/number
+    # body is a 400 (it used to 500 on .get()).
+    try:
+        data = _json_object()
+    except _BadField as e:
+        return _bad_field(e)
+    if data.get("demo"):
         if not _check_rate_limit(_client_ip(), scope="demo", limit=8):
             return jsonify({"error": "Too many demo runs — please wait a moment."}), 429
         if not ollama_running():
             return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
-        d_lang = "ar" if _peek.get("language") == "ar" else "en"
+        d_lang = "ar" if data.get("language") == "ar" else "en"
         d_text = _DEMO_TEXT_AR if d_lang == "ar" else _DEMO_TEXT_EN
         _log_usage_async("demo", "demo")
         gen = _stream_text_as_sse(d_text, d_lang, "sample_lecture", "text",
@@ -5368,24 +5863,35 @@ def summarize_text():
     uid = _auth_optional(request)
     if uid is False:
         return _auth_rejected()   # a sent-but-rejected token is never 'anonymous'
+
+    # Validate and normalise every field BEFORE the charge: {"text": 123} (or a
+    # number/list url, filename, language, detail…) used to spend a credit and
+    # then 500 with no refund. Missing/null → the default.
+    try:
+        text         = _str_field(data, "text").strip()
+        url          = _str_field(data, "url").strip()
+        lang_param   = _str_field(data, "language", "auto")
+        filename     = _safe_name(_str_field(data, "filename") or "pasted_text")
+        detail_level = _str_field(data, "detail", "standard")
+        include_quiz = _str_field(data, "mode", "full") != "summary"
+        include_mcq  = _flag_field(data, "quiz", True)
+    except _BadField as e:
+        return _bad_field(e, data)
+    txt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
+    if not text and not url:
+        return _bad_request(_NO_TEXT_EN, _NO_TEXT_AR, data)
+    # A URL that can never be fetched (no https://, localhost, a private IP…) is
+    # refused BEFORE the charge: charging then refunding could lose an anonymous
+    # visitor's free preview when the durable refund is unavailable.
+    if not text and not _url_precheck(url):
+        return _bad_request(_BAD_URL_EN, _BAD_URL_AR, data)
+
     charge, err = _charge_credit(uid, request)
     if err:
         return err
     tok_left = charge.tok_left
 
     _log_usage_async("user" if uid else "anon", "text")
-    # silent=True: a non-JSON body must not raise here (it would 415/500 AFTER
-    # the token was already consumed above, with no refund). Empty body → {} →
-    # falls through to the "No text or URL" refund path below.
-    data = request.get_json(silent=True) or {}
-    text = (data.get("text") or "").strip()
-    url  = (data.get("url")  or "").strip()
-    lang_param   = data.get("language", "auto")
-    filename     = _safe_name(data.get("filename") or "pasted_text")
-    detail_level = data.get("detail", "standard")
-    txt_dcfg     = DETAIL.get(detail_level, DETAIL["standard"])
-    include_quiz = data.get("mode", "full") != "summary"
-    include_mcq  = str(data.get("quiz", True)).lower() != "false"
 
     if not ollama_running():
         charge.refund()
@@ -5401,9 +5907,9 @@ def summarize_text():
             charge.refund()
             raise
 
-    if not text:
+    if not text:   # the page had no readable text
         charge.refund()
-        return jsonify({"error": "No text or URL provided"}), 400
+        return _bad_request(_NO_TEXT_EN, _NO_TEXT_AR, data)
 
     # Cap total input so a huge paste / large fetched page can't amplify Groq cost.
     text = text[:500_000]

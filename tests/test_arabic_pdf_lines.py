@@ -138,9 +138,10 @@ def test_markup_in_model_text_stays_literal(style):
 
 def test_hyphen_between_arabic_words_stays_separate():
     # _ar()'s fix is kept: a hyphen between two Arabic letters is padded so the
-    # reshaper does not merge the two words.
+    # reshaper does not merge the two words (drawn as U+2010, which the Arabic
+    # font has - see test_arabic_pdf_polish.py).
     ar_word_a, ar_word_b = "النمسا", "المجر"
-    assert appmod._ar_shape(f"{ar_word_a}-{ar_word_b}") == arabic_reshaper.reshape(f"{ar_word_a} - {ar_word_b}")
+    assert appmod._ar_shape(f"{ar_word_a}-{ar_word_b}") == arabic_reshaper.reshape(f"{ar_word_a} \N{HYPHEN} {ar_word_b}")
     assert appmod._ar(f"{ar_word_a}-{ar_word_b}") == appmod._ar_display(appmod._ar_shape(f"{ar_word_a}-{ar_word_b}"))
 
 

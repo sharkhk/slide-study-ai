@@ -1380,7 +1380,8 @@ function ChatModal({ onClose, t, isAr, needsSignIn, onSignIn, ask }) {
         <div className="chat-msgs">
           {msgs.map((m, i) => (
             <div key={i} className={`chat-msg ${m.role}`}>
-              <div className="chat-bubble" style={{position:'relative'}}>
+              {/* answers come in the guide's language; each message takes its own direction */}
+              <div className="chat-bubble" dir="auto" style={{position:'relative'}}>
                 {m.text}
                 {m.role === 'ai' && i > 0 && (
                   <button onClick={() => navigator.clipboard?.writeText(m.text).then(() => toast(t.referCopied), () => {})}
@@ -1424,6 +1425,7 @@ function ChatModal({ onClose, t, isAr, needsSignIn, onSignIn, ask }) {
           <div className="chat-input-row">
             <input
               className="chat-input"
+              dir={input ? 'auto' : undefined}
               placeholder={t.chatPh}
               value={input}
               onChange={e => setInput(e.target.value)}
@@ -2129,7 +2131,8 @@ export default function App() {
   const [copied, setCopied]         = useState(false)
 
   const inputRef = useRef()
-  // UI strings + direction only; the API still receives `lang` unchanged ('auto' included)
+  // UI strings + direction only; the API still receives `lang` unchanged ('auto' included).
+  // Only the user (chooseLang) ever changes `lang` — never a guide's detected language.
   const uiLang = lang === 'auto' ? (NAV_AR ? 'ar' : 'en') : lang
   const t = T[uiLang] || T['en']
   const isAr = uiLang === 'ar'
@@ -2138,7 +2141,6 @@ export default function App() {
   const sessionRef  = useRef(null)
   const userInfoRef = useRef(userInfo); userInfoRef.current = userInfo
   const queueRef    = useRef(queue);    queueRef.current = queue
-  const langRef     = useRef(lang);     langRef.current = lang
   const tRef        = useRef(t);        tRef.current = t
   const lastUid     = useRef(null)
   const meSeq       = useRef(0)
@@ -2582,8 +2584,10 @@ export default function App() {
       tRef.current)
   })
 
+  // The language a stream reports for its guide is deliberately NOT fed back into `lang`:
+  // in Auto it would flip the whole UI and force that language on every later upload.
+  // A guide's own direction comes from guide.language in the views that show it.
   const onGenEvent = (id, ev, hadBearer, demo) => {
-    if (!demo && ev.language && langRef.current === 'auto') setLang(ev.language)
     if (ev.error) return
     if (ev.step === 'done') {
       const counts = { sections: ev.sections, keywords: ev.keywords, flashcards: ev.flashcards, mcqs: ev.mcqs }
@@ -2888,7 +2892,9 @@ export default function App() {
     for (let attempt = 0; attempt < 2; attempt++) {
       const cur = latestItem(id)
       if (!cur?.jobId) throw new Error('expired')
-      const language = lang === 'auto' ? (cur.guide?.language || uiLang) : lang
+      // Auto: the guide's language, or 'auto' so the server reads it off the stored
+      // guide (cur.guide is only a best-effort cache) - never the UI's language.
+      const language = lang === 'auto' ? (cur.guide?.language || 'auto') : lang
       const headers = { 'Content-Type': 'application/json', ...(await authHeaders()) }
       const { r } = await jobFetch(cur, j => `/api/chat/${j}`, { method: 'POST', headers, body: JSON.stringify({ question: q, language }) }, 60000)
         .catch(e => { throw e?.message === 'restore_failed' ? new Error(reqErr(e, t.errRetry)) : e })
@@ -3425,7 +3431,8 @@ export default function App() {
                         </div>
 
                         <div style={{flex:1,minWidth:0}}>
-                          <div className="queue-name">{item.name}</div>
+                          {/* own script decides the direction (an Arabic file name stays RTL in an English UI); aligned with the row */}
+                          <div className="queue-name" dir="auto" style={{textAlign: isAr ? 'right' : 'left'}}>{item.name}</div>
                           {item.error && <div style={{fontSize:'0.72rem',color:'#ef4444',marginTop:2}}>{item.error}</div>}
                           {item.status === 'expired' && <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{t.expiredNote}</div>}
                           {hint && <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{hint}</div>}
