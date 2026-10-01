@@ -329,14 +329,38 @@ def _consume_token(user_id):
         print(f"consume_token error: {exc}", flush=True)
         return False, 0, "db_error"
 
-# Flips to False if the add_tokens RPC isn't installed yet (see migrations/).
+# Flips to False once PostgREST says the add_tokens RPC isn't installed (see
+# migrations/001) — and ONLY then; a timeout or 5xx never flips it.
 _add_tokens_rpc = True
 
+# PostgREST's answers for "this RPC does not exist": PGRST202 ("Could not find the
+# function … in the schema cache"; older PostgREST: "Could not find the
+# public.fn(…) function …"), a bare HTTP 404 (postgrest-py puts the status in
+# .code when the body isn't JSON) and Postgres 42883 "function … does not exist".
+_RPC_MISSING_CODES = {"PGRST202", "42883", "404"}
+_RPC_MISSING_RE    = re.compile(r"could not find the\b.*\bfunction\b|\bfunction\b.*\bdoes not exist\b",
+                                re.I | re.S)
+
+def _rpc_missing(exc):
+    """True only when the error PROVES the RPC is not installed (so the call
+    changed nothing). Timeouts, connection resets and 5xx are ambiguous: the RPC
+    may have run and only the reply was lost → False."""
+    code = getattr(exc, "code", None)
+    if code is not None and str(code).strip().upper() in _RPC_MISSING_CODES:
+        return True
+    msg = getattr(exc, "message", None)
+    if not isinstance(msg, str) or not msg:
+        msg = str(exc)
+    return bool(_RPC_MISSING_RE.search(msg))
+
 def _add_tokens(sb, user_id, delta):
-    """Atomically add (or subtract) `delta` tokens and return the new balance.
+    """Atomically add (or subtract) `delta` tokens and return the new balance,
+    or None when it failed or its outcome is unknown.
     Uses the add_tokens SQL RPC when available — a plain read-modify-write here
     races with the atomic consume_token RPC and loses concurrent decrements.
-    Falls back to read-modify-write if the RPC is not installed."""
+    Falls back to read-modify-write ONLY when the RPC is definitively missing:
+    after a timeout / reset / 5xx the RPC may already have been applied, and a
+    second (fallback) update would credit the user twice."""
     global _add_tokens_rpc
     if not sb or not user_id:
         return None
@@ -349,8 +373,13 @@ def _add_tokens(sb, user_id, delta):
                 return r.data[0]
             return r.data
         except Exception as exc:
+            if not _rpc_missing(exc):
+                _log.error("add_tokens RPC failed for %s (delta %+d) — outcome unknown, NOT "
+                           "retried (a second update could double-apply): %s: %s",
+                           user_id, delta, type(exc).__name__, exc)
+                return None
             _add_tokens_rpc = False
-            _log.warning("add_tokens RPC unavailable — using read-modify-write: %s", exc)
+            _log.warning("add_tokens RPC not installed — using read-modify-write: %s", exc)
     try:
         row = sb.table("users").select("tokens_remaining").eq("id", user_id).single().execute()
         cur = (row.data or {}).get("tokens_remaining")
