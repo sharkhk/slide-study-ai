@@ -120,47 +120,114 @@ DETAIL = {
 }
 
 # ── Arabic PDF support ─────────────────────────────────────────────────────────
-_ARABIC_FONT      = "NotoNaskhArabic"
-_ARABIC_FONT_PATH = "/tmp/NotoNaskhArabic.ttf"
-_arabic_font_ok   = False
-_arabic_font_lock = threading.Lock()
+# The font ships in the repo (fonts/, SIL OFL 1.1 - see fonts/OFL.txt). It used to
+# be downloaded from GitHub on the first Arabic build: any network hiccup, rate
+# limit or cold /tmp silently turned the whole Arabic PDF into Helvetica boxes.
+_ARABIC_FONT         = "NotoNaskhArabic"
+_ARABIC_FONT_BUNDLED = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "fonts", "NotoNaskhArabic-Regular.ttf")
+_ARABIC_FONT_PATH    = "/tmp/NotoNaskhArabic.ttf"   # last-resort download cache only
+_ARABIC_FONT_URL     = ("https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/"
+                        "NotoNaskhArabic/NotoNaskhArabic-Regular.ttf")
+_ARABIC_FONT_RETRY_S = 300      # after a failed download, don't try again for 5 min
+_arabic_font_ok          = False
+_arabic_font_fail_at     = None # time.monotonic() of the last failed download
+_arabic_font_downloading = False
+_arabic_font_lock        = threading.Lock()   # guards the state above; never held over I/O
+
+def _register_arabic_font_file(path):
+    """Register `path` as the Arabic font. Caller holds _arabic_font_lock."""
+    global _arabic_font_ok
+    _pdfmetrics.registerFont(_TTFont(_ARABIC_FONT, path))
+    _arabic_font_ok = True
 
 def _ensure_arabic_font():
-    global _arabic_font_ok
+    """Register the Arabic PDF font on first use (never at import). True when usable.
+
+    1. the copy bundled in fonts/ (no network - the normal path),
+    2. a copy a previous last-resort download left in /tmp,
+    3. a last-resort GitHub download: short timeout, OUTSIDE the lock, and a
+       failure is remembered for 5 minutes so concurrent builds never queue behind
+       it (they render with Helvetica instead of waiting)."""
+    global _arabic_font_fail_at, _arabic_font_downloading
+    if _arabic_font_ok:
+        return True
     with _arabic_font_lock:
         if _arabic_font_ok:
             return True
-        try:
-            if not os.path.exists(_ARABIC_FONT_PATH):
-                r = http.get(
-                    "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoNaskhArabic/NotoNaskhArabic-Regular.ttf",
-                    timeout=30, allow_redirects=True
-                )
-                r.raise_for_status()
-                with open(_ARABIC_FONT_PATH, "wb") as fh:
-                    fh.write(r.content)
-            _pdfmetrics.registerFont(_TTFont(_ARABIC_FONT, _ARABIC_FONT_PATH))
-            _arabic_font_ok = True
-            return True
-        except Exception as exc:
-            print(f"Arabic font error: {exc}", flush=True)
+        for path in (_ARABIC_FONT_BUNDLED, _ARABIC_FONT_PATH):
+            if os.path.isfile(path):
+                try:
+                    _register_arabic_font_file(path)
+                    return True
+                except Exception as exc:
+                    _log.error("Arabic font %s unusable: %s", path, exc)
+        if _arabic_font_downloading:
             return False
+        if _arabic_font_fail_at is not None and time.monotonic() - _arabic_font_fail_at < _ARABIC_FONT_RETRY_S:
+            return False
+        _arabic_font_downloading = True
+    _log.warning("Arabic font not bundled - downloading it as a last resort")
+    tmp_path = None
+    try:
+        r = http.get(_ARABIC_FONT_URL, timeout=8, allow_redirects=True)
+        r.raise_for_status()
+        tmp_path = f"{_ARABIC_FONT_PATH}.{uuid.uuid4().hex}.part"
+        with open(tmp_path, "wb") as fh:
+            fh.write(r.content)
+        _TTFont(_ARABIC_FONT, tmp_path)          # parse it before anyone can use it
+        os.replace(tmp_path, _ARABIC_FONT_PATH)
+        tmp_path = None
+        with _arabic_font_lock:
+            _register_arabic_font_file(_ARABIC_FONT_PATH)
+            _arabic_font_downloading = False
+        return True
+    except Exception as exc:
+        _log.error("Arabic font download failed (retry in %ss): %s", _ARABIC_FONT_RETRY_S, exc)
+        with _arabic_font_lock:
+            _arabic_font_fail_at = time.monotonic()
+            _arabic_font_downloading = False
+        return False
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
-def _ar(text):
-    """Reshape + bidi-flip Arabic for correct visual display in LTR PDF renderer."""
+def _ar_shape(text):
+    """Arabic PDF text, step 1: join the letters (arabic_reshaper), still in LOGICAL
+    order. Wrap this text, then run _ar_display() on each line (_ArabicParagraph)."""
     if not text:
         return text
     try:
         import arabic_reshaper
-        from bidi.algorithm import get_display
-        s = str(text)
-        # A hyphen directly between two Arabic letters gets swallowed by the
-        # reshaper and merges the words (e.g. النمسا-المجر → النمساالمجر). Pad it
-        # with spaces so the two words stay separate and the dash stays visible.
-        s = re.sub(r'(?<=[؀-ۿ])\s*-\s*(?=[؀-ۿ])', ' - ', s)
-        return get_display(arabic_reshaper.reshape(s))
     except ImportError:
         return str(text)
+    s = str(text)
+    # A hyphen directly between two Arabic letters gets swallowed by the
+    # reshaper and merges the words (e.g. النمسا-المجر → النمساالمجر). Pad it
+    # with spaces so the two words stay separate and the dash stays visible.
+    s = re.sub(r'(?<=[؀-ۿ])\s*-\s*(?=[؀-ۿ])', ' - ', s)
+    return arabic_reshaper.reshape(s)
+
+def _ar_display(shaped, base_dir=None):
+    """Arabic PDF text, step 2: bidi-reorder ONE line of _ar_shape() text into
+    drawing (left-to-right) order. base_dir 'R'/'L' fixes the paragraph direction;
+    None takes it from the line's first strong letter."""
+    if not shaped:
+        return shaped
+    try:
+        from bidi.algorithm import get_display
+    except ImportError:
+        return shaped
+    return get_display(shaped, base_dir=base_dir)
+
+def _ar(text):
+    """Reshape + bidi-flip a ONE-LINE Arabic string for reportlab (which is LTR-only).
+    Text that may wrap must go through _ArabicParagraph instead: reordering the
+    whole string before wrapping lays its lines out in reverse order."""
+    return _ar_display(_ar_shape(text))
 
 # ── Supabase client (lazy, uses service-role key → bypasses RLS) ───────────────
 _sb_client = None
@@ -2377,6 +2444,88 @@ def _pdf_latin_markup(s):
     return "".join(out)
 
 
+def _pdf_xesc(s):
+    """Plain text → literal reportlab Paragraph text (no markup is interpreted)."""
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _ar_base_dir(s):
+    """'R' or 'L': the paragraph direction bidi itself would pick for `s` (its first
+    strong letter, UAX#9 rules P2/P3). Presentation forms count as Arabic (AL)."""
+    for ch in s:
+        d = _ud.bidirectional(ch)
+        if d in ("R", "AL"):
+            return "R"
+        if d == "L":
+            return "L"
+    return "L"
+
+
+def _para_line_texts(para):
+    """Plain text of each line of a WRAPPED Paragraph. Simple lines are
+    (extraSpace, [word, ...]) tuples; frag lines carry .words, a list of frags."""
+    bl = getattr(para, "blPara", None)
+    if bl is None:
+        return []
+    out = []
+    for line in bl.lines:
+        if isinstance(line, tuple):
+            out.append(" ".join(str(w) for w in line[1]))
+        else:
+            out.append("".join(getattr(f, "text", "") for f in line.words))
+    return out
+
+
+class _ArabicParagraph(Paragraph):
+    """Paragraph for one Arabic plain-text field of build_pdf.
+
+    reportlab here has no RTL support (no rlbidi/uharfbuzz), so Arabic has to be
+    handed over already in visual order. Running bidi over the WHOLE string before
+    reportlab wraps it (the old way) reverses the paragraph first, so reportlab
+    breaks it into lines from the wrong end: a multi-line paragraph came out with
+    its lines in reverse order, the first sentence on the last line.
+
+    This wraps the reshaped LOGICAL text with a probe Paragraph, bidi-reorders each
+    resulting line on its own (all with the paragraph's direction) and lays those
+    lines out joined by <br/>. It is redone on every wrap(), because tables wrap
+    the same cell at different widths. `shaped` is _ar_shape() output: plain text,
+    reshaped, not bidi-reordered and not escaped - markup is never interpreted.
+    """
+
+    def __init__(self, shaped, style):
+        self._shaped = str(shaped or "")
+        self._base_dir = _ar_base_dir(self._shaped)
+        self._real = None
+        # Start out as the old one-line rendering, so anything that looks at the
+        # flowable before wrap() (minWidth, getPlainText, ...) behaves as before.
+        Paragraph.__init__(self, _pdf_xesc(_ar_display(self._shaped, self._base_dir)), style)
+
+    def _layout(self, availWidth, availHeight):
+        probe = Paragraph(_pdf_xesc(self._shaped), self.style)
+        probe.wrap(availWidth, availHeight)
+        lines = [ln.strip() for ln in _para_line_texts(probe)]
+        self._real = Paragraph(
+            "<br/>".join(_pdf_xesc(_ar_display(ln, self._base_dir)) for ln in lines),
+            self.style)
+        return self._real
+
+    def wrap(self, availWidth, availHeight):
+        self.width, self.height = self._layout(availWidth, availHeight).wrap(availWidth, availHeight)
+        return self.width, self.height
+
+    def split(self, availWidth, availHeight):
+        # The parts are plain Paragraphs of already-ordered lines.
+        return self._layout(availWidth, availHeight).split(availWidth, availHeight)
+
+    def draw(self):
+        real = self._real
+        real.canv = self.canv
+        try:
+            real.draw()
+        finally:
+            del real.canv
+
+
 def _detect_language(content):
     """Detect 'ar' or 'en' from slides list or plain text. Based on Arabic char ratio."""
     if isinstance(content, list):
@@ -3035,25 +3184,41 @@ def build_pdf(guide, language, out_filename="study_guide"):
         # whole build. All app-added markup is added OUTSIDE this function.
         return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    def T(text):
+    def _clean(text):
         # Scrub any bullet glyph the model embedded in the text (leading or inline)
         # BEFORE Arabic reshaping/escaping, so no •/▪/■/… ever reaches the PDF from
         # any field — objectives, section titles, keywords, flashcards or quiz.
         # _debullet preserves hyphens, ranges and formula middle-dots (CuSO4·5H2O).
-        s = _pdf_normalize(_debullet(str(text)))
+        return _pdf_normalize(_debullet(str(text)))
+
+    def T(text):
+        # Paragraph markup for one field. Arabic is reordered as ONE line here, so
+        # use it only for text that never wraps or is mixed with tags (the footer);
+        # everything else goes through P().
+        s = _clean(text)
         if ar_ok:
             return _xesc(_ar(s))
         if is_ar:                      # Arabic font unavailable: keep the text as-is
             return _xesc(s)
         return _pdf_latin_markup(s)    # escapes too; no glyph Helvetica can't draw
 
+    def P(text, style, prefix=""):
+        # Paragraph for one plain-text field (`prefix` is app text, e.g. "3.  ").
+        # Arabic is wrapped in logical order and then reordered line by line
+        # (_ArabicParagraph); reordering the whole string first put the lines of a
+        # multi-line paragraph in reverse order. English, and Arabic without its
+        # font, is exactly the old Paragraph(prefix + T(text)).
+        if ar_ok:
+            return _ArabicParagraph(prefix + _ar_shape(_clean(text)), style)
+        return Paragraph(prefix + T(text), style)
+
     L = {
         "objectives": T("الأهداف التعليمية") if is_ar else "LEARNING OBJECTIVES",
         "obj_bullet": "",
         "contents":   T("المحتويات") if is_ar else "CONTENTS",
         "kw_head":    T("قاموس المصطلحات") if is_ar else "KEY TERMS",
-        "kw_append":  [(T("قاموس المصطلحات"), ""), (T("بطاقات المراجعة"), "")] if is_ar
-                      else [("KEY TERMS", ""), ("FLASH CARDS", "")],
+        "toc_extra":  ["قاموس المصطلحات", "بطاقات المراجعة"] if is_ar
+                      else ["KEY TERMS", "FLASH CARDS"],
         "fc_head":    T("بطاقات المراجعة") if is_ar else "FLASH CARDS",
         "sec_bullet": "",
         "bul_bullet": "",
@@ -3103,11 +3268,9 @@ def build_pdf(guide, language, out_filename="study_guide"):
 
     # ── Header ────────────────────────────────────────────────────────────────
     raw_title = str(guide.get("title") or "Study Guide")
-    title    = T(raw_title.upper() if not is_ar else raw_title)
-    subtitle = T(guide.get("subtitle", "Exam Study Guide"))
     hdr = Table([
-        [Paragraph(title, ST["h_title"])],
-        [Paragraph(subtitle, ST["h_sub"])],
+        [P(raw_title.upper() if not is_ar else raw_title, ST["h_title"])],
+        [P(guide.get("subtitle", "Exam Study Guide"), ST["h_sub"])],
     ], colWidths=[W])
     hdr.setStyle(TableStyle([
         ("BACKGROUND",    (0,0), (-1,-1), NAVY),
@@ -3126,7 +3289,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
     if objectives:
         rows = [[Paragraph(L["objectives"], ST["obj_head"])]]
         for o in objectives:
-            rows.append([Paragraph(f"{L['obj_bullet']}{T(o)}", ST["obj_item"])])
+            rows.append([P(o, ST["obj_item"], prefix=L["obj_bullet"])])
         t = Table(rows, colWidths=[W])
         t.setStyle(TableStyle([
             ("BACKGROUND",    (0,0), (-1,0),  SECTION_BG),
@@ -3144,10 +3307,10 @@ def build_pdf(guide, language, out_filename="study_guide"):
     sections = guide.get("sections", [])
     if sections:
         toc_rows = [[Paragraph(L["contents"], ST["toc_title"])]]
-        all_items = [(T(s.get("title", "")), "") for s in sections] + L["kw_append"]
-        for i, (name, _) in enumerate(all_items, 1):
+        toc_names = [s.get("title", "") for s in sections] + L["toc_extra"]
+        for i, name in enumerate(toc_names, 1):
             dot_row = Table(
-                [[Paragraph(f"{i}.  {name}", ST["toc_item"]), Paragraph("", ST["toc_item"])]],
+                [[P(name, ST["toc_item"], prefix=f"{i}.  "), Paragraph("", ST["toc_item"])]],
                 colWidths=[W*0.85, W*0.15]
             )
             dot_row.setStyle(TableStyle([
@@ -3174,14 +3337,11 @@ def build_pdf(guide, language, out_filename="study_guide"):
         block = []
 
         _st_raw = str(sec.get("title", ""))
-        # Upper-case BEFORE T(): T() returns markup (&amp;, <font face="Symbol">)
+        # Upper-case BEFORE T()/P(): T() returns markup (&amp;, <font face="Symbol">)
         # that must not be upper-cased.
-        sec_title_text = T(_st_raw if is_ar else _st_raw.upper())
         sec_hdr = Table(
-            [[Paragraph(
-                f"{L['sec_bullet']}{idx} · {sec_title_text}",
-                ST["sec_title"]
-            )]],
+            [[P(_st_raw if is_ar else _st_raw.upper(), ST["sec_title"],
+                prefix=f"{L['sec_bullet']}{idx} · ")]],
             colWidths=[W]
         )
         sec_hdr.setStyle(TableStyle([
@@ -3197,7 +3357,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
         if bullets:
             # Clear prose paragraphs — no bullet glyphs, no separator lines between
             # points. Each point is a justified paragraph inside one soft panel.
-            bdata = [[Paragraph(T(_debullet(b)), ST["para"])] for b in bullets]
+            bdata = [[P(_debullet(b), ST["para"])] for b in bullets]
             bt = Table(bdata, colWidths=[W])
             bt.setStyle(TableStyle([
                 ("TOPPADDING",    (0,0),  (0,0),   7),
@@ -3215,10 +3375,10 @@ def build_pdf(guide, language, out_filename="study_guide"):
             headers = tbl["headers"]
             n_cols  = len(headers)
             col_w   = W / n_cols
-            tbl_rows = [[Paragraph(T(h), ST["tbl_hdr"]) for h in headers]]
+            tbl_rows = [[P(h, ST["tbl_hdr"]) for h in headers]]
             for ri, row in enumerate(tbl["rows"]):
                 padded = (list(row) + [""] * n_cols)[:n_cols]
-                tbl_rows.append([Paragraph(T(str(c)), ST["tbl_cell"]) for c in padded])
+                tbl_rows.append([P(str(c), ST["tbl_cell"]) for c in padded])
             inner = Table(tbl_rows, colWidths=[col_w]*n_cols)
             ts = [
                 ("BACKGROUND",    (0,0), (-1,0),  NAVY_LIGHT),
@@ -3256,14 +3416,14 @@ def build_pdf(guide, language, out_filename="study_guide"):
             # Arabic: definition left, term right (visual RTL order)
             lc, rc = W*0.60, W*0.40
             kw_rows = [[
-                Paragraph(T(k.get("definition", "")), ST["kw_def"]),
-                Paragraph(T(k.get("term", "")),       ST["kw_term"]),
+                P(k.get("definition", ""), ST["kw_def"]),
+                P(k.get("term", ""),       ST["kw_term"]),
             ] for k in keywords]
         else:
             lc, rc = W*0.27, W*0.73
             kw_rows = [[
-                Paragraph(T(k.get("term", "")),       ST["kw_term"]),
-                Paragraph(T(k.get("definition", "")), ST["kw_def"]),
+                P(k.get("term", ""),       ST["kw_term"]),
+                P(k.get("definition", ""), ST["kw_def"]),
             ] for k in keywords]
         kw_t = Table(kw_rows, colWidths=[lc, rc])
         kts = [
@@ -3302,12 +3462,11 @@ def build_pdf(guide, language, out_filename="study_guide"):
         # answer. Cleaner and far more readable than the old cramped 2-up grid
         # (mismatched heights + awkward mid-word wraps).
         for fc in flashcards:
-            q = T(fc.get('q', '')); a = T(fc.get('a', ''))
-            if not q and not a:
+            if not T(fc.get('q', '')) and not T(fc.get('a', '')):
                 continue
             card = Table([
-                [Paragraph(f"{L['q_pre']}{q}", ST["fc_q"])],
-                [Paragraph(a, ST["fc_a"])],
+                [P(fc.get('q', ''), ST["fc_q"], prefix=L["q_pre"])],
+                [P(fc.get('a', ''), ST["fc_a"])],
             ], colWidths=[W])
             card.setStyle(TableStyle([
                 ("BACKGROUND",    (0,0), (-1,0),  CARD_Q),
