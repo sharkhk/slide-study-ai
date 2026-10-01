@@ -119,7 +119,10 @@ def test_paragraph_draws_each_run_in_a_font_that_has_it(style, width):
     p.wrap(width, 10000)
     _assert_every_glyph_drawable(p._real)
     drawn = "".join("".join(t for t, _f, _s in line) for line in _frag_lines(p._real))
-    for probe in ("DNA", "ATP", "H2O", "95%", "R&D", "<b>x</b>"):
+    # The last ">" of "<b>x</b>" is not a bracket: between Latin and the Arabic
+    # that follows it takes the paragraph's direction (UAX#9 N1/N2) and is drawn
+    # mirrored at the far end of the Latin run, as in any browser.
+    for probe in ("DNA", "ATP", "H2O", "95%", "[R&D]", "<b>x</b"):
         assert probe in drawn, probe
 
 
