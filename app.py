@@ -2118,8 +2118,9 @@ def _debullet(text):
     s = str(text).replace("\r", "\n")
     # Sub-lists the model split across lines → one flowing line
     s = re.sub(r"\s*\n+\s*", " ", s).strip()
-    # Drop a leading list marker: bullet glyph, dash/asterisk, or "1." / "1)"
-    s = re.sub(r"^\s*(?:[" + _BULLET_GLYPHS + r"\-–—*]+|\d+[.)])\s*", "", s)
+    # Drop a leading list marker: bullet glyph, dash/asterisk, or "1." / "1)".
+    # A dash or "N." directly followed by a digit is a number ("-273.15", "3.5"), not a marker.
+    s = re.sub(r"^\s*(?:[" + _BULLET_GLYPHS + r"]+|[\-–—*]+(?!\d)|\d+[.)](?!\d))\s*", "", s)
     # Any bullet glyph still inside the text is an inline separator → "; "
     s = re.sub(r"\s*[" + _BULLET_GLYPHS + r"]+\s*", "; ", s)
     # Tidy: collapse spaces, drop a "; " that lands right before punctuation, and
