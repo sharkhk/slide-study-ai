@@ -55,11 +55,11 @@ def _ar_guide(**over):
 def test_rewrapping_at_the_same_width_does_not_redo_the_layout(style, monkeypatch):
     p = appmod._ArabicParagraph(appmod._ar_shape(LONG), style)
     calls = []
-    real = appmod._ar_display
-    monkeypatch.setattr(appmod, "_ar_display", lambda *a, **k: calls.append(1) or real(*a, **k))
+    real = appmod._ar_display_lines
+    monkeypatch.setattr(appmod, "_ar_display_lines", lambda *a, **k: calls.append(1) or real(*a, **k))
     first = p.wrap(WIDTH, 10000)
     per_layout = len(calls)
-    assert per_layout >= 3                      # one bidi pass per line
+    assert per_layout == 1                      # one bidi pass per layout (all lines)
     for _ in range(8):                          # tables / KeepTogether re-wrap cells
         assert p.wrap(WIDTH, 10000) == first
     assert len(calls) == per_layout, "the layout was rebuilt for a width it already had"

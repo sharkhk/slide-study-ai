@@ -199,7 +199,8 @@ def _ensure_arabic_font():
 
 def _ar_shape(text):
     """Arabic PDF text, step 1: join the letters (arabic_reshaper), still in LOGICAL
-    order. Wrap this text, then run _ar_display() on each line (_ArabicParagraph)."""
+    order. Wrap this text, then reorder its lines with _ar_display_lines()
+    (_ArabicParagraph)."""
     if not text:
         return text
     try:
@@ -221,11 +222,115 @@ def _ar_display(shaped, base_dir=None):
     None takes it from the line's first strong letter."""
     if not shaped:
         return shaped
+    return _ar_display_lines([shaped], base_dir)[0]
+
+def _ar_display_lines(lines, base_dir=None):
+    """_ar_display() for the lines of ONE wrapped paragraph. UAX#9 resolves the
+    levels over the whole paragraph and only reorders line by line (L1-L4), so
+    each line still sees its neighbours: a "(" that ends one line stays paired
+    with the ")" that starts the next. The lines are rejoined with the space the
+    wrap broke them at.
+
+    python-bidi's pure-Python algorithm, run step by step so bracket pairs can be
+    resolved (_ar_bidi_n0) and the lines cut out before reordering."""
     try:
-        from bidi.algorithm import get_display
+        from bidi.algorithm import (
+            PARAGRAPH_LEVELS, get_empty_storage, get_base_level, get_embedding_levels,
+            explicit_embed_and_overrides, resolve_weak_types, resolve_neutral_types,
+            resolve_implicit_levels, reorder_resolved_levels, apply_mirroring)
     except ImportError:
-        return shaped
-    return get_display(shaped, base_dir=base_dir)
+        return list(lines)
+    text = " ".join(lines)
+    st = get_empty_storage()
+    st["base_level"] = PARAGRAPH_LEVELS[base_dir] if base_dir else get_base_level(text)
+    st["base_dir"] = "LR"[st["base_level"]]
+    get_embedding_levels(text, st)
+    for i, ch in enumerate(st["chars"]):
+        ch["idx"] = i                  # X9 drops formatting characters: keep positions
+    explicit_embed_and_overrides(st)
+    resolve_weak_types(st)
+    _ar_bidi_n0(st)
+    resolve_neutral_types(st, False)
+    resolve_implicit_levels(st, False)
+    out, pos = [], 0
+    for ln in lines:
+        line = dict(st, chars=[c for c in st["chars"] if pos <= c["idx"] < pos + len(ln)])
+        reorder_resolved_levels(line, False)
+        apply_mirroring(line, False)
+        out.append("".join(c["ch"] for c in line["chars"]))
+        pos += len(ln) + 1
+    return out
+
+_AR_BRACKETS = None
+
+def _ar_brackets():
+    """{bracket: (is_opening, pair id)}, Unicode's Bidi_Paired_Bracket derived the
+    way BidiBrackets.txt is: a Ps and a Pe character, both bidi class ON, that are
+    each other's mirror glyph. The id is the opening bracket's NFC form, so the
+    canonically equivalent U+2329/U+3008 angle brackets pair with each other."""
+    global _AR_BRACKETS
+    if _AR_BRACKETS is None:
+        from bidi.mirror import MIRRORED
+        table = {}
+        for o, c in MIRRORED.items():
+            if (_ud.category(o) == "Ps" and _ud.category(c) == "Pe" and MIRRORED.get(c) == o
+                    and _ud.bidirectional(o) == _ud.bidirectional(c) == "ON"):
+                pid = _ud.normalize("NFC", o)
+                table[o], table[c] = (True, pid), (False, pid)
+        _AR_BRACKETS = table
+    return _AR_BRACKETS
+
+def _ar_bidi_n0(storage):
+    """UAX#9 BD16 + N0, which python-bidi's pure-Python algorithm predates: both
+    brackets of a pair take one direction, from the text they enclose (or, when
+    that is all of the other direction, from the text before them). Resolved one
+    by one from their neighbours, "ATP (adenosine triphosphate)" in Arabic text
+    got an LTR "(" and an RTL ")" that was mirrored and moved to the other end:
+    "(ATP (adenosine triphosphate". Runs between W7 and N1 on each level run
+    (there are no isolates, so those are the isolating run sequences)."""
+    brackets = _ar_brackets()
+    chars = storage["chars"]
+
+    def strong(t):                     # N0 counts EN and AN as R
+        return "L" if t == "L" else "R" if t in ("R", "EN", "AN") else None
+
+    for run in storage["runs"]:
+        start, end = run["start"], run["start"] + run["length"]
+        # BD16: each closing bracket closes the nearest open bracket of its kind.
+        stack, pairs = [], []
+        for i in range(start, end):
+            b = brackets.get(chars[i]["ch"]) if chars[i]["type"] == "ON" else None
+            if b is None:
+                continue
+            if b[0]:
+                if len(stack) == 63:
+                    break
+                stack.append((b[1], i))
+                continue
+            for k in range(len(stack) - 1, -1, -1):
+                if stack[k][0] == b[1]:
+                    pairs.append((stack[k][1], i))
+                    del stack[k:]
+                    break
+        e = "LR"[chars[start]["level"] % 2]          # embedding direction
+        for o, c in sorted(pairs):
+            inside = {strong(chars[i]["type"]) for i in range(o + 1, c)} - {None}
+            if not inside:
+                continue               # N0 d: nothing strong inside, N1/N2 decide
+            if e in inside:
+                d = e                  # N0 b
+            else:                      # N0 c: the other direction, if the text before is too
+                d = run["sor"]
+                for i in range(o - 1, start - 1, -1):
+                    if strong(chars[i]["type"]):
+                        d = strong(chars[i]["type"])
+                        break
+            for i in (o, c):
+                chars[i]["type"] = d
+                j = i + 1              # marks on a bracket follow it (W1 gave them ON)
+                while j < end and chars[j]["orig"] == "NSM":
+                    chars[j]["type"] = d
+                    j += 1
 
 def _ar(text):
     """Reshape + bidi-flip a ONE-LINE Arabic string for reportlab (which is LTR-only).
@@ -2618,15 +2723,16 @@ class _ArabicParagraph(Paragraph):
     its lines in reverse order, the first sentence on the last line.
 
     This wraps the reshaped LOGICAL text (itself, as a plain Paragraph), bidi-
-    reorders each resulting line on its own (all with the paragraph's direction)
-    and lays those lines out joined by <br/> in a second Paragraph (_real), which
-    is what gets drawn. Tables wrap the same cell at several widths, and wrap it
-    again and again at each (KeepTogether, splitting, drawing), so the layout and
-    its size are built once per distinct width and reused (_layouts). `shaped` is
+    reorders the resulting lines (_ar_display_lines: levels resolved over the whole
+    paragraph, then each line reordered with the paragraph's direction) and lays
+    those lines out joined by <br/> in a second Paragraph (_real), which is what
+    gets drawn. Tables wrap the same cell at several widths, and wrap it again and
+    again at each (KeepTogether, splitting, drawing), so the layout and its size
+    are built once per distinct width and reused (_layouts). `shaped` is
     _ar_shape() output: plain text, reshaped, not bidi-reordered and not escaped -
     markup is never interpreted. `base_dir` 'R'/'L' fixes the paragraph
     direction; None takes it from the first strong letter. build_pdf passes 'R'
-    for Arabic guides, so "DNA هو ..." still reads right-to-left.
+    for Arabic text, so "DNA هو ..." still reads right-to-left.
 
     Characters the Arabic font lacks (Latin, % - ( ) ? ·) are drawn in Helvetica
     (_ar_pdf_text/_ar_pdf_markup). The probe (this flowable) uses that same mixed
@@ -2651,7 +2757,7 @@ class _ArabicParagraph(Paragraph):
             Paragraph.wrap(self, availWidth, availHeight)
             lines = [ln.strip() for ln in _para_line_texts(self)]
             real = Paragraph(
-                "<br/>".join(_ar_pdf_markup(_ar_display(ln, self._base_dir)) for ln in lines),
+                "<br/>".join(_ar_pdf_markup(ln) for ln in _ar_display_lines(lines, self._base_dir)),
                 self.style)
             if len(self._layouts) >= self._MAX_LAYOUTS:
                 self._layouts.clear()
