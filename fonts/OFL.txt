@@ -1,4 +1,8 @@
-Copyright 2022 The Noto Project Authors (https://github.com/notofonts/arabic)
+Copyright 2019-2021 Google LLC. All Rights Reserved.
+
+Noto Naskh Arabic 2.012 (hinted build), from https://github.com/googlefonts/noto-fonts
+(fonts/NotoNaskhArabic-Regular.ttf). The notice above is the font's own
+copyright notice (name table, nameID 0).
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

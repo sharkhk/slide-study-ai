@@ -11,9 +11,11 @@ import secrets
 import threading
 import traceback as _tb
 import logging
+import ipaddress as _ipaddress
 import requests as http
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
+from urllib.parse import urlparse as _urlparse
 
 # ── Logger ─────────────────────────────────────────────────────────────────────
 # Stream to stdout so the hosting platform (Render) captures app errors/warnings
@@ -207,8 +209,10 @@ def _ar_shape(text):
     s = str(text)
     # A hyphen directly between two Arabic letters gets swallowed by the
     # reshaper and merges the words (e.g. النمسا-المجر → النمساالمجر). Pad it
-    # with spaces so the two words stay separate and the dash stays visible.
-    s = re.sub(r'(?<=[؀-ۿ])\s*-\s*(?=[؀-ۿ])', ' - ', s)
+    # with spaces so the two words stay separate, and draw it as U+2010 HYPHEN:
+    # the bundled Noto Naskh Arabic has no glyph for U+002D (it printed a box).
+    # Hyphens next to digits or Latin letters are left alone (2-3 stays a range).
+    s = re.sub(r'(?<=[؀-ۿ])\s*-\s*(?=[؀-ۿ])', ' \N{HYPHEN} ', s)
     return arabic_reshaper.reshape(s)
 
 def _ar_display(shaped, base_dir=None):
@@ -856,14 +860,24 @@ def _is_private(ip):
 # The admin token is NEVER read from the query string (query strings end up in
 # Render's / Cloudflare's request logs), never rendered into a page and never
 # kept in localStorage. A browser signs in once via POST /admin/login and gets an
-# HttpOnly cookie holding an HMAC *derived* from ADMIN_TOKEN (not the token), so
-# rotating ADMIN_TOKEN invalidates every cookie. Scripts send X-Admin-Token.
+# HttpOnly cookie "v2.<issued-ms>.<lifetime-s>.<nonce>.<sig>", signed with a key *derived*
+# from ADMIN_TOKEN (never the token), so rotating ADMIN_TOKEN invalidates every
+# cookie. The server enforces the lifetime itself (a copied cookie stops working
+# after 30 days with "Remember", 12 hours without) and Sign out revokes every
+# cookie issued before it (_admin_not_before). Scripts send X-Admin-Token.
 ADMIN_COOKIE         = "alimne_admin"
 _ADMIN_COOKIE_PATH   = "/admin"
 _ADMIN_REMEMBER_SECS = 30 * 24 * 3600     # "Remember on this device" = 30 days
+_ADMIN_SESSION_SECS  = 12 * 3600          # without "Remember": a browser-session cookie, and 12 h max on the server
 _ADMIN_CSRF_HEADER   = "X-Requested-With"
 _ADMIN_CSRF_VALUE    = "alimne-admin"
 _ADMIN_LOGIN_PER_MIN = 10
+_ADMIN_CLOCK_SKEW_MS = 60 * 1000
+# Sessions issued at or before this time (ms since the epoch) are revoked. Sign
+# out moves it to "now". In memory: the single gunicorn worker shares it across
+# its threads; a restart forgets it, and the signed lifetime still caps the cookie.
+_admin_not_before    = [0]
+_admin_session_lock  = threading.Lock()
 
 def _ct_eq(a, b):
     """Constant-time string compare that never raises. secrets.compare_digest
@@ -872,18 +886,50 @@ def _ct_eq(a, b):
         return False
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
-def _admin_session_value():
-    # Derived from ADMIN_TOKEN at call time: a new token => a new value, so every
-    # previously issued cookie stops matching automatically.
-    return hmac.new(ADMIN_TOKEN.encode("utf-8"), b"alimne-admin-session-v1",
-                    hashlib.sha256).hexdigest()
+def _admin_session_sig(body):
+    # Keyed by ADMIN_TOKEN at call time: a new token => a new key, so every
+    # previously issued cookie stops verifying automatically.
+    key = hmac.new(ADMIN_TOKEN.encode("utf-8"), b"alimne-admin-session-v2", hashlib.sha256).digest()
+    return hmac.new(key, body.encode("ascii"), hashlib.sha256).hexdigest()
+
+def _admin_session_value(ttl):
+    """A fresh cookie value for a session that lasts `ttl` seconds from now."""
+    with _admin_session_lock:
+        # Strictly after any Sign out, even within the same millisecond.
+        iat_ms = max(int(time.time() * 1000), _admin_not_before[0] + 1)
+    body = f"v2.{iat_ms}.{int(ttl)}.{secrets.token_hex(8)}"   # nonce: every login is unique
+    return f"{body}.{_admin_session_sig(body)}"
+
+def _admin_session_ok(value):
+    """True for an untampered, unexpired, unrevoked cookie from _admin_session_value."""
+    if not isinstance(value, str) or not value or len(value) > 160 or not ADMIN_TOKEN:
+        return False
+    parts = value.split(".")
+    if len(parts) != 5 or parts[0] != "v2":
+        return False
+    _, iat_s, ttl_s, nonce, sig = parts
+    if not (iat_s.isascii() and iat_s.isdigit() and ttl_s.isascii() and ttl_s.isdigit()
+            and nonce.isascii() and nonce.isalnum()):
+        return False
+    if not _ct_eq(sig, _admin_session_sig(f"v2.{iat_s}.{ttl_s}.{nonce}")):
+        return False
+    iat_ms, ttl = int(iat_s), int(ttl_s)
+    now_ms = int(time.time() * 1000)
+    if iat_ms <= _admin_not_before[0] or iat_ms > now_ms + _ADMIN_CLOCK_SKEW_MS:
+        return False
+    return now_ms - iat_ms < min(ttl, _ADMIN_REMEMBER_SECS) * 1000
+
+def _admin_revoke_sessions():
+    """Sign out everywhere: every cookie issued up to now stops working."""
+    with _admin_session_lock:
+        _admin_not_before[0] = max(_admin_not_before[0], int(time.time() * 1000))
 
 def _admin_auth():
     """How this request is authenticated as admin: 'header' (X-Admin-Token, for
     scripts), 'cookie' (browser session from /admin/login) or None."""
     if _ct_eq(request.headers.get("X-Admin-Token", ""), ADMIN_TOKEN):
         return "header"
-    if _ct_eq(request.cookies.get(ADMIN_COOKIE, ""), _admin_session_value()):
+    if _admin_session_ok(request.cookies.get(ADMIN_COOKIE, "")):
         return "cookie"
     return None
 
@@ -1339,7 +1385,8 @@ def admin_login():
         return jsonify({"ok": False, "error": "Invalid admin token.", "code": "bad_token"}), 401
     remember = data.get("remember") is True
     resp = jsonify({"ok": True})
-    resp.set_cookie(ADMIN_COOKIE, _admin_session_value(),
+    resp.set_cookie(ADMIN_COOKIE,
+                    _admin_session_value(_ADMIN_REMEMBER_SECS if remember else _ADMIN_SESSION_SECS),
                     max_age=_ADMIN_REMEMBER_SECS if remember else None,   # None = session cookie
                     path=_ADMIN_COOKIE_PATH, secure=True, httponly=True, samesite="Strict")
     _log.info("ADMIN login from %s (remember=%s)", ip, remember)
@@ -1348,7 +1395,13 @@ def admin_login():
 
 @app.route("/admin/logout", methods=["POST"])
 def admin_logout():
-    """Clear the admin session cookie on this device."""
+    """Sign out: clear this browser's cookie and, when the signed-in admin asks
+    (cookie + CSRF header, or X-Admin-Token), revoke every session on every
+    device. An unauthenticated caller only clears its own cookie - it can never
+    sign the admin out."""
+    if _admin_ok():
+        _admin_revoke_sessions()
+        _log.info("ADMIN sign out (all sessions revoked) from %s", _client_ip())
     resp = jsonify({"ok": True})
     resp.delete_cookie(ADMIN_COOKIE, path=_ADMIN_COOKIE_PATH,
                        secure=True, httponly=True, samesite="Strict")
@@ -1383,9 +1436,26 @@ def admin_page():
             return ""
         return "".join(chr(0x1F1E6 + ord(c) - ord('A')) for c in cc.upper())
 
-    # JS-string-safe escaper for values dropped into an onclick='...(\'x\')'
+    # Escaper for values dropped into onclick="fn('x')". The browser HTML-decodes
+    # the attribute BEFORE the JS parser sees it, so HTML-escaping first (the old
+    # way: ' -> &#39;) handed JS a real ' that closed the string. Now JS-escape
+    # first: everything but ASCII letters/digits and " .:-_@+" becomes \xHH or
+    # \uHHHH, so no quote, backslash, line break or markup survives; the final
+    # HTML-escape is then a no-op kept as a belt.
     def _js(s):
-        return _he(s).replace("\\", "\\\\").replace("'", "\\'")
+        out = []
+        for ch in str(s):
+            o = ord(ch)
+            if (o < 0x80 and ch.isalnum()) or ch in " .:-_@+":
+                out.append(ch)
+            elif o < 0x100:
+                out.append("\\x%02x" % o)
+            elif o < 0x10000:
+                out.append("\\u%04x" % o)
+            else:                      # astral: a UTF-16 surrogate pair, as JS strings are
+                o -= 0x10000
+                out.append("\\u%04x\\u%04x" % (0xD800 + (o >> 10), 0xDC00 + (o & 0x3FF)))
+        return _he("".join(out))
 
     rows = ""
     for v in vis_copy:
@@ -1741,7 +1811,7 @@ def admin_page():
   <div class="actions">
     <button class="btn btn-gray" onclick="location.reload()">↻ Refresh</button>
     <button class="btn btn-red" onclick="clearLog()">🗑 Clear Log</button>
-    <button class="btn btn-gray" onclick="signOut()" title="Sign out of the admin dashboard on this device · تسجيل الخروج من لوحة الإدارة على هذا الجهاز">⎋ Sign out</button>
+    <button class="btn btn-gray" onclick="signOut()" title="Sign out of the admin dashboard on every device · تسجيل الخروج من لوحة الإدارة على جميع الأجهزة">⎋ Sign out</button>
   </div>
 </div>
 {subs_section}
@@ -2485,37 +2555,58 @@ class _ArabicParagraph(Paragraph):
     breaks it into lines from the wrong end: a multi-line paragraph came out with
     its lines in reverse order, the first sentence on the last line.
 
-    This wraps the reshaped LOGICAL text with a probe Paragraph, bidi-reorders each
-    resulting line on its own (all with the paragraph's direction) and lays those
-    lines out joined by <br/>. It is redone on every wrap(), because tables wrap
-    the same cell at different widths. `shaped` is _ar_shape() output: plain text,
-    reshaped, not bidi-reordered and not escaped - markup is never interpreted.
+    This wraps the reshaped LOGICAL text (itself, as a plain Paragraph), bidi-
+    reorders each resulting line on its own (all with the paragraph's direction)
+    and lays those lines out joined by <br/> in a second Paragraph (_real), which
+    is what gets drawn. Tables wrap the same cell at several widths, and wrap it
+    again and again at each (KeepTogether, splitting, drawing), so the layout and
+    its size are built once per distinct width and reused (_layouts). `shaped` is
+    _ar_shape() output: plain text, reshaped, not bidi-reordered and not escaped -
+    markup is never interpreted. `base_dir` 'R'/'L' fixes the paragraph
+    direction; None takes it from the first strong letter. build_pdf passes 'R'
+    for Arabic guides, so "DNA هو ..." still reads right-to-left.
     """
 
-    def __init__(self, shaped, style):
+    _MAX_LAYOUTS = 8      # distinct widths kept per paragraph (a table probes a few)
+
+    def __init__(self, shaped, style, base_dir=None):
         self._shaped = str(shaped or "")
-        self._base_dir = _ar_base_dir(self._shaped)
+        self._base_dir = base_dir if base_dir in ("R", "L") else _ar_base_dir(self._shaped)
         self._real = None
-        # Start out as the old one-line rendering, so anything that looks at the
-        # flowable before wrap() (minWidth, getPlainText, ...) behaves as before.
-        Paragraph.__init__(self, _pdf_xesc(_ar_display(self._shaped, self._base_dir)), style)
+        self._layouts = {}    # availWidth -> [real Paragraph, (w, h) or None]
+        # The flowable itself holds the LOGICAL text: it is the line-breaking
+        # probe. Same glyphs and word widths as the drawn lines (minWidth agrees).
+        Paragraph.__init__(self, _pdf_xesc(self._shaped), style)
 
     def _layout(self, availWidth, availHeight):
-        probe = Paragraph(_pdf_xesc(self._shaped), self.style)
-        probe.wrap(availWidth, availHeight)
-        lines = [ln.strip() for ln in _para_line_texts(probe)]
-        self._real = Paragraph(
-            "<br/>".join(_pdf_xesc(_ar_display(ln, self._base_dir)) for ln in lines),
-            self.style)
-        return self._real
+        entry = self._layouts.get(availWidth)
+        if entry is None:
+            # Line breaking depends only on the width (availHeight matters to split()).
+            Paragraph.wrap(self, availWidth, availHeight)
+            lines = [ln.strip() for ln in _para_line_texts(self)]
+            real = Paragraph(
+                "<br/>".join(_pdf_xesc(_ar_display(ln, self._base_dir)) for ln in lines),
+                self.style)
+            if len(self._layouts) >= self._MAX_LAYOUTS:
+                self._layouts.clear()
+            entry = self._layouts[availWidth] = [real, None]
+        self._real = entry[0]
+        return entry
 
     def wrap(self, availWidth, availHeight):
-        self.width, self.height = self._layout(availWidth, availHeight).wrap(availWidth, availHeight)
+        entry = self._layout(availWidth, availHeight)
+        if entry[1] is None:
+            # A layout is only ever wrapped at its own width, so its size is fixed.
+            entry[1] = entry[0].wrap(availWidth, availHeight)
+        self.width, self.height = entry[1]
         return self.width, self.height
 
     def split(self, availWidth, availHeight):
         # The parts are plain Paragraphs of already-ordered lines.
-        return self._layout(availWidth, availHeight).split(availWidth, availHeight)
+        entry = self._layout(availWidth, availHeight)
+        if entry[1] is None:
+            entry[1] = entry[0].wrap(availWidth, availHeight)
+        return entry[0].split(availWidth, availHeight)
 
     def draw(self):
         real = self._real
@@ -3206,12 +3297,15 @@ def build_pdf(guide, language, out_filename="study_guide"):
         # Paragraph for one plain-text field (`prefix` is app text, e.g. "3.  ").
         # Arabic is wrapped in logical order and then reordered line by line
         # (_ArabicParagraph); reordering the whole string first put the lines of a
-        # multi-line paragraph in reverse order. English, and Arabic without its
-        # font, is exactly the old Paragraph(prefix + T(text)).
+        # multi-line paragraph in reverse order. Every paragraph of an Arabic guide
+        # runs right-to-left, even one that starts with a Latin term ("DNA هو ...").
+        # English, and Arabic without its font, is exactly the old
+        # Paragraph(prefix + T(text)).
         if ar_ok:
-            return _ArabicParagraph(prefix + _ar_shape(_clean(text)), style)
+            return _ArabicParagraph(prefix + _ar_shape(_clean(text)), style, base_dir="R")
         return Paragraph(prefix + T(text), style)
 
+    AR_GUIDE, AR_LUCK = "دليل الدراسة بالذكاء الاصطناعي", "حظ سعيد!"   # footer (logical order)
     L = {
         "objectives": T("الأهداف التعليمية") if is_ar else "LEARNING OBJECTIVES",
         "obj_bullet": "",
@@ -3223,8 +3317,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
         "sec_bullet": "",
         "bul_bullet": "",
         "q_pre":      "" if is_ar else "Q. ",
-        "guide":      T("دليل الدراسة بالذكاء الاصطناعي") if is_ar else "AI Exam Study Guide",
-        "luck":       T("حظ سعيد!") if is_ar else "Good luck!",
+        "guide":      T(AR_GUIDE) if is_ar else "AI Exam Study Guide",
+        "luck":       T(AR_LUCK) if is_ar else "Good luck!",
     }
 
     buf = io.BytesIO()
@@ -3375,10 +3469,14 @@ def build_pdf(guide, language, out_filename="study_guide"):
             headers = tbl["headers"]
             n_cols  = len(headers)
             col_w   = W / n_cols
-            tbl_rows = [[P(h, ST["tbl_hdr"]) for h in headers]]
+            # Arabic tables run right-to-left: the first column is drawn on the
+            # right (like the key-terms table). Every column has the same width
+            # and no column-specific style, so reversing the cells is enough.
+            rtl = (lambda cells: cells[::-1]) if is_ar else (lambda cells: cells)
+            tbl_rows = [rtl([P(h, ST["tbl_hdr"]) for h in headers])]
             for ri, row in enumerate(tbl["rows"]):
                 padded = (list(row) + [""] * n_cols)[:n_cols]
-                tbl_rows.append([P(str(c), ST["tbl_cell"]) for c in padded])
+                tbl_rows.append(rtl([P(str(c), ST["tbl_cell"]) for c in padded]))
             inner = Table(tbl_rows, colWidths=[col_w]*n_cols)
             ts = [
                 ("BACKGROUND",    (0,0), (-1,0),  NAVY_LIGHT),
@@ -3484,11 +3582,21 @@ def build_pdf(guide, language, out_filename="study_guide"):
     # ── Footer ────────────────────────────────────────────────────────────────
     elems.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
     elems.append(Spacer(1, 0.1*cm))
-    elems.append(Paragraph(
-        f"{T(guide.get('title',''))}  ·  {L['guide']}  ·  {L['luck']}<br/>"
-        f"Made with <b>alimne.app</b> — turn any lecture into a study guide",
-        ST["footer"]
-    ))
+    made_with = "Made with <b>alimne.app</b> — turn any lecture into a study guide"
+    if ar_ok:
+        # One logical string through P(): reordering it as ONE line (T) put the
+        # title last for a right-to-left reader and reversed its lines if it ever
+        # wrapped. The separator is U+2010 because the Arabic font has no "·", and
+        # the Latin line gets its own Helvetica paragraph because it has no Latin
+        # letters either.
+        sep = " \N{HYPHEN} "
+        elems.append(P(f"{guide.get('title', '')}{sep}{AR_GUIDE}{sep}{AR_LUCK}", ST["footer"]))
+        elems.append(Paragraph(made_with, _st("FTL", ST["footer"], fontName="Helvetica")))
+    else:
+        elems.append(Paragraph(
+            f"{T(guide.get('title',''))}  ·  {L['guide']}  ·  {L['luck']}<br/>" + made_with,
+            ST["footer"]
+        ))
 
     doc.multiBuild(elems)
     buf.seek(0)
@@ -4020,6 +4128,31 @@ def _bad_field(exc, data=None):
 
 _NO_TEXT_EN = "No text or URL provided"
 _NO_TEXT_AR = "لم يتم إدخال أي نص أو رابط."
+
+_BAD_URL_EN = "Only public http(s) URLs are supported — paste the full link, starting with https://"
+_BAD_URL_AR = "لا نقبل إلا الروابط العامة (http أو https) — الصق الرابط كاملًا بدءًا بـ https://"
+
+def _url_precheck(url):
+    """Cheap checks on a pasted URL BEFORE a credit is charged (no DNS, no I/O):
+    http(s), a host and a valid port, and not localhost or a literal private /
+    loopback / link-local address. _fetch_url_text still screens the resolved
+    IPs (and pins the connection) when it actually fetches."""
+    try:
+        p = _urlparse(url)
+        host = p.hostname
+        p.port                       # raises ValueError for an invalid port
+    except ValueError:
+        return False
+    if p.scheme not in ("http", "https") or not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return False
+    try:
+        addr = _ipaddress.ip_address(host)
+    except ValueError:
+        return True                  # a host name: resolved and screened at fetch time
+    return not (addr.is_private or addr.is_loopback or addr.is_link_local or
+                addr.is_reserved or addr.is_multicast or addr.is_unspecified)
 
 
 # ── SSE streaming endpoint ─────────────────────────────────────────────────────
@@ -4659,7 +4792,6 @@ def chat_with_slides(job_id):
         question = _str_field(data, "question")[:500].strip()
     except _BadField as e:
         return _bad_field(e, data)
-    language = "ar" if data.get("language") == "ar" else "en"
     if not question:
         return _bad_request("No question provided",
                             "لم يتم إدخال أي سؤال — اكتب سؤالك أولاً.", data)
@@ -4668,7 +4800,16 @@ def chat_with_slides(job_id):
     if not job:
         return _job_expired_json()
 
-    context = _chat_context(job.get("guide"))
+    guide = job.get("guide")
+    # An explicit en/ar choice wins. 'auto' (or nothing) answers in the guide's
+    # own language: the client may not have the guide's language to send.
+    req_lang = data.get("language")
+    if req_lang in ("ar", "en"):
+        language = req_lang
+    else:
+        language = "ar" if isinstance(guide, dict) and guide.get("language") == "ar" else "en"
+
+    context = _chat_context(guide)
 
     lang = "in Arabic" if language == "ar" else "in English"
     try:
@@ -5562,6 +5703,11 @@ def summarize_text():
     txt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
     if not text and not url:
         return _bad_request(_NO_TEXT_EN, _NO_TEXT_AR, data)
+    # A URL that can never be fetched (no https://, localhost, a private IP…) is
+    # refused BEFORE the charge: charging then refunding could lose an anonymous
+    # visitor's free preview when the durable refund is unavailable.
+    if not text and not _url_precheck(url):
+        return _bad_request(_BAD_URL_EN, _BAD_URL_AR, data)
 
     charge, err = _charge_credit(uid, request)
     if err:

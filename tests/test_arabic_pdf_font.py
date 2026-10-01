@@ -15,6 +15,7 @@ import time. Everything here runs offline: the network is monkeypatched to fail.
 import io
 import json
 import os
+import struct
 import subprocess
 import sys
 import threading
@@ -72,7 +73,37 @@ def test_font_and_licence_ship_in_the_repo():
     assert face.name == b"NotoNaskhArabic-Regular"
     lic = open(os.path.join(ROOT, "fonts", "OFL.txt"), encoding="utf-8").read()
     assert "SIL OPEN FONT LICENSE Version 1.1" in lic
-    assert "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/arabic)" in lic
+
+
+def _font_name_record(path, name_id):
+    """A Windows-platform (3) record of the TTF 'name' table, decoded."""
+    data = open(path, "rb").read()
+    num_tables = struct.unpack(">H", data[4:6])[0]
+    for i in range(num_tables):
+        tag, _, offset, _ = struct.unpack(">4sIII", data[12 + 16 * i: 28 + 16 * i])
+        if tag == b"name":
+            _, count, str_off = struct.unpack(">HHH", data[offset:offset + 6])
+            for j in range(count):
+                rec = data[offset + 6 + 12 * j: offset + 18 + 12 * j]
+                pid, _, _, nid, length, off = struct.unpack(">HHHHHH", rec)
+                if pid == 3 and nid == name_id:
+                    start = offset + str_off + off
+                    return data[start:start + length].decode("utf-16-be")
+    return None
+
+
+def test_licence_names_the_bundled_fonts_own_copyright_holder():
+    # OFL condition 2: the copyright notice travels with the font. The standalone
+    # OFL.txt must carry the SAME notice as the font file itself (the hinted
+    # googlefonts/noto-fonts build, v2.012), not another Noto release's.
+    notice = _font_name_record(BUNDLED, 0)
+    version = _font_name_record(BUNDLED, 5)
+    assert notice == "Copyright 2019-2021 Google LLC. All Rights Reserved."
+    assert version.startswith("Version 2.012")
+    lic = open(os.path.join(ROOT, "fonts", "OFL.txt"), encoding="utf-8").read()
+    assert lic.startswith(notice), "OFL.txt must open with the font's own copyright notice"
+    assert "Noto Naskh Arabic 2.012" in lic and "github.com/googlefonts/noto-fonts" in lic
+    assert "notofonts/arabic" not in lic and "Copyright 2022 The Noto Project Authors" not in lic
 
 
 def test_font_registers_from_the_repo_with_no_network(no_network):

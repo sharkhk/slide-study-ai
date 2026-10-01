@@ -2892,7 +2892,9 @@ export default function App() {
     for (let attempt = 0; attempt < 2; attempt++) {
       const cur = latestItem(id)
       if (!cur?.jobId) throw new Error('expired')
-      const language = lang === 'auto' ? (cur.guide?.language || uiLang) : lang
+      // Auto: the guide's language, or 'auto' so the server reads it off the stored
+      // guide (cur.guide is only a best-effort cache) - never the UI's language.
+      const language = lang === 'auto' ? (cur.guide?.language || 'auto') : lang
       const headers = { 'Content-Type': 'application/json', ...(await authHeaders()) }
       const { r } = await jobFetch(cur, j => `/api/chat/${j}`, { method: 'POST', headers, body: JSON.stringify({ question: q, language }) }, 60000)
         .catch(e => { throw e?.message === 'restore_failed' ? new Error(reqErr(e, t.errRetry)) : e })

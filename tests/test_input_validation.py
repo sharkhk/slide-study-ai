@@ -166,6 +166,79 @@ def test_summarize_text_url_path_still_works(client, ledger):
     assert ledger["consumed"] == 1 and ledger["refunded"] == 0
 
 
+# A URL that can never be fetched used to be CHARGED first and refunded after the
+# fetch failed. For an anonymous visitor on the durable device quota the refund
+# can fail (before migration 012), so the free preview was simply lost. The
+# syntactic checks (public http(s), a host, no literal private address) now run
+# BEFORE the charge; _fetch_url_text still re-checks the resolved IPs.
+UNUSABLE_URLS = [
+    "en.wikipedia.org/wiki/Photosynthesis",      # typed without https:// (the URL box doesn't add it)
+    "www.example.com",
+    "ftp://example.com/lecture.txt",
+    "javascript:alert(1)",
+    "file:///etc/passwd",
+    "https:///no-host",
+    "http://127.0.0.1/admin",
+    "http://localhost:5000/",
+    "http://api.localhost/",
+    "http://[::1]/",
+    "http://10.0.0.5/notes",
+    "http://192.168.1.1/",
+    "http://169.254.169.254/latest/meta-data",
+    "http://0.0.0.0/",
+    "http://example.com:99999/",                 # invalid port
+]
+
+
+@pytest.fixture
+def charges(monkeypatch):
+    calls = []
+    real = appmod._charge_credit
+
+    def spy(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+    monkeypatch.setattr(appmod, "_charge_credit", spy)
+    return calls
+
+
+@pytest.mark.parametrize("url", UNUSABLE_URLS)
+def test_summarize_text_unusable_url_is_rejected_before_charging(client, ledger, charges, url):
+    r = client.post("/api/summarize-text", json={"url": url, "language": "auto"},
+                    headers={"X-Device-Id": "dev-test-0001"})
+    assert r.status_code == 400, r.get_data(as_text=True)[:300]
+    d = r.get_json()
+    assert d["code"] == "bad_request" and d["error"]
+    assert charges == [], "a URL that can never be fetched must not be charged"
+    assert ledger["consumed"] == 0 and ledger["refunded"] == 0
+    assert ledger["fetched"] == []
+
+
+def test_unusable_url_message_is_bilingual(client, ledger, charges):
+    en = client.post("/api/summarize-text", json={"url": "en.wikipedia.org/wiki/X"}).get_json()["error"]
+    ar = client.post("/api/summarize-text", json={"url": "en.wikipedia.org/wiki/X", "language": "ar"}).get_json()["error"]
+    assert "https://" in en and not _has_arabic(en)
+    assert "https://" in ar and _has_arabic(ar)
+    assert charges == []
+
+
+@pytest.mark.parametrize("url", ["https://example.com/lecture", "http://example.com/a?b=c",
+                                 "https://en.wikipedia.org/wiki/Photosynthesis", "HTTPS://Example.COM/x",
+                                 "http://93.184.216.34/page", "https://example.com:8443/x"])
+def test_public_urls_still_reach_the_fetch(client, ledger, charges, url):
+    r = client.post("/api/summarize-text", json={"url": url, "language": "en"})
+    assert _events(r)[-1].get("step") == "done"
+    assert ledger["fetched"] == [url]
+    assert charges == [1] and ledger["consumed"] == 1 and ledger["refunded"] == 0
+
+
+def test_url_is_not_checked_when_text_is_given(client, ledger, charges):
+    # text wins over url (unchanged): a junk url next to pasted text is ignored
+    r = client.post("/api/summarize-text", json={"text": TEXT, "url": "not a url", "language": "en"})
+    assert _events(r)[-1].get("step") == "done"
+    assert ledger["fetched"] == [] and ledger["consumed"] == 1
+
+
 @pytest.mark.parametrize("lang", ["en", "ar", None, 5])
 def test_demo_path_stays_free_and_working(client, ledger, lang):
     body = {"demo": True}

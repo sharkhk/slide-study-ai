@@ -60,6 +60,7 @@ def _attrs(set_cookie):
 
 
 def _expected_session(token=TOKEN):
+    """The OLD fixed (v1) cookie value: it must never be issued or accepted again."""
     return hmac.new(token.encode(), b"alimne-admin-session-v1", hashlib.sha256).hexdigest()
 
 
@@ -121,7 +122,10 @@ def test_login_sets_hardened_cookie_and_cookie_authenticates(client):
     sc = _admin_cookie_header(r)
     assert sc is not None
     value = sc.split(";", 1)[0].split("=", 1)[1]
-    assert value == _expected_session() and TOKEN not in sc
+    # a signed, expiring session value derived from ADMIN_TOKEN - never the token
+    # itself, and never the old fixed v1 value (test_admin_session_expiry.py)
+    assert appmod._admin_session_ok(value) and TOKEN not in sc
+    assert value != _expected_session()
     a = _attrs(sc)
     assert "httponly" in a and "secure" in a
     assert a.get("samesite", "").lower() == "strict"
@@ -246,6 +250,13 @@ def test_session_probe(client):
     assert client.get("/admin/session").status_code == 204
 
 
+def test_old_fixed_v1_cookie_no_longer_authenticates(client):
+    c = appmod.app.test_client()
+    c.set_cookie("alimne_admin", _expected_session(), path="/admin")
+    assert c.get("/admin/session").status_code == 401
+    assert c.get("/admin").status_code == 401
+
+
 # ── 7. tracker + logs never record the token ────────────────────────────────────
 def test_visitor_tracker_and_logs_never_record_the_token(client, caplog):
     with appmod._vis_lock:
@@ -253,7 +264,8 @@ def test_visitor_tracker_and_logs_never_record_the_token(client, caplog):
     with caplog.at_level(logging.DEBUG):
         client.get(f"/admin?token={TOKEN}")
         client.post("/admin/login", json={"token": "wrong-" + TOKEN})
-        _login(client)
+        issued = [h.split(";", 1)[0].split("=", 1)[1] for h in _login(client).headers.getlist("Set-Cookie")
+                  if h.startswith("alimne_admin=")]
         client.get("/admin")
         # (not /admin/clear — that would empty the very list we inspect)
         client.post("/admin/unblock", json={"ip": "198.51.100.2"}, headers={"X-Admin-Token": TOKEN})
@@ -263,4 +275,4 @@ def test_visitor_tracker_and_logs_never_record_the_token(client, caplog):
     assert TOKEN not in recorded
     assert all("?" not in p for p in paths)
     assert TOKEN not in caplog.text
-    assert _expected_session() not in caplog.text and _expected_session() not in recorded
+    assert issued and all(v not in caplog.text and v not in recorded for v in issued)
