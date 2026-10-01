@@ -2483,6 +2483,15 @@ def _enc_ok(ch, codec):
     except Exception:
         return False
 
+def _pdf_winansi_alt(ch):
+    """WinAnsi stand-in for a character neither Helvetica nor Symbol can draw:
+    H₂O → H2O, ﬁ → fi, full-width → ASCII, then accents stripped (ā → a).
+    Emoji etc. become "" - dropped, never boxed."""
+    alt = _ud.normalize("NFKC", ch)
+    if not all(_enc_ok(c, "cp1252") for c in alt):
+        alt = "".join(c for c in _ud.normalize("NFKD", ch) if not _ud.combining(c))
+    return "".join(c for c in alt if _enc_ok(c, "cp1252"))
+
 def _pdf_latin_markup(s):
     """Escaped reportlab Paragraph markup for Helvetica text: every character is
     either WinAnsi (Helvetica) or wrapped in the Symbol font; nothing else
@@ -2504,12 +2513,7 @@ def _pdf_latin_markup(s):
             flush(); out.append(esc(ch)); continue
         if _enc_ok(ch, "symbol"):
             sym.append(ch); continue
-        # H₂O → H2O, ﬁ → fi, full-width → ASCII; then strip accents (ā → a)
-        alt = _ud.normalize("NFKC", ch)
-        if not all(_enc_ok(c, "cp1252") for c in alt):
-            alt = "".join(c for c in _ud.normalize("NFKD", ch) if not _ud.combining(c))
-        alt = "".join(c for c in alt if _enc_ok(c, "cp1252"))
-        flush(); out.append(esc(alt))   # emoji etc. are dropped, never boxed
+        flush(); out.append(esc(_pdf_winansi_alt(ch)))
     flush()
     return "".join(out)
 
@@ -2531,6 +2535,61 @@ def _ar_base_dir(s):
     return "L"
 
 
+# NotoNaskhArabic has no Latin letters and, below U+0600, only space ! , . 0-9 :
+# NBSP « » - so English terms (DNA, H2O), % - ( ) ? · — in an Arabic PDF printed
+# as missing-glyph boxes. Characters it lacks are drawn in Helvetica instead.
+# Only call these once _ensure_arabic_font() has registered the font.
+
+def _ar_font_has():
+    """Codepoint → glyph id of the registered Arabic font; a missing codepoint or
+    glyph 0 (.notdef, e.g. U+FFFF) means the font cannot draw it."""
+    return _pdfmetrics.getFont(_ARABIC_FONT).face.charToGlyph
+
+
+def _ar_pdf_text(s):
+    """Arabic PDF plain text with each character the Arabic font lacks replaced by
+    what Helvetica/Symbol will draw for it (H₂O → H2O, emoji dropped - the same
+    choices as _pdf_latin_markup). Afterwards _ar_pdf_markup() draws every
+    character as it is, so the text measures the same before and after the
+    per-line bidi reordering."""
+    from reportlab.pdfbase.rl_codecs import RL_Codecs
+    RL_Codecs.register()
+    has = _ar_font_has()
+    out = []
+    for ch in str(s):
+        if has.get(ord(ch)):          # the Arabic font draws it as-is (e.g. U+2010)
+            out.append(ch)
+            continue
+        for c in _pdf_normalize(ch):  # lookalike hyphens/spaces → plain ones
+            out.append(c if (has.get(ord(c)) or _enc_ok(c, "cp1252") or _enc_ok(c, "symbol"))
+                       else _pdf_winansi_alt(c))
+    return "".join(out)
+
+
+def _ar_pdf_markup(s):
+    """Escaped Paragraph markup for _ar_pdf_text() output (any order): runs the
+    Arabic font has stay in the paragraph's font, runs it lacks are wrapped in
+    Helvetica via _pdf_latin_markup (WinAnsi, or Symbol for Greek/maths)."""
+    has = _ar_font_has()
+    out, run, run_has = [], [], None
+
+    def flush():
+        if run:
+            t = "".join(run)
+            out.append(_pdf_xesc(t) if run_has else
+                       '<font face="Helvetica">' + _pdf_latin_markup(t) + "</font>")
+            run.clear()
+
+    for ch in s:
+        ch_has = bool(has.get(ord(ch)))
+        if ch_has != run_has:
+            flush()
+            run_has = ch_has
+        run.append(ch)
+    flush()
+    return "".join(out)
+
+
 def _para_line_texts(para):
     """Plain text of each line of a WRAPPED Paragraph. Simple lines are
     (extraSpace, [word, ...]) tuples; frag lines carry .words, a list of frags."""
@@ -2544,6 +2603,9 @@ def _para_line_texts(para):
         else:
             out.append("".join(getattr(f, "text", "") for f in line.words))
     return out
+
+
+_AR_LETTER_RE = re.compile("[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
 
 
 class _ArabicParagraph(Paragraph):
@@ -2565,18 +2627,22 @@ class _ArabicParagraph(Paragraph):
     markup is never interpreted. `base_dir` 'R'/'L' fixes the paragraph
     direction; None takes it from the first strong letter. build_pdf passes 'R'
     for Arabic guides, so "DNA هو ..." still reads right-to-left.
+
+    Characters the Arabic font lacks (Latin, % - ( ) ? ·) are drawn in Helvetica
+    (_ar_pdf_text/_ar_pdf_markup). The probe (this flowable) uses that same mixed
+    markup, so every line is measured in the fonts it is drawn in.
     """
 
     _MAX_LAYOUTS = 8      # distinct widths kept per paragraph (a table probes a few)
 
     def __init__(self, shaped, style, base_dir=None):
-        self._shaped = str(shaped or "")
+        self._shaped = _ar_pdf_text(shaped or "")
         self._base_dir = base_dir if base_dir in ("R", "L") else _ar_base_dir(self._shaped)
         self._real = None
         self._layouts = {}    # availWidth -> [real Paragraph, (w, h) or None]
         # The flowable itself holds the LOGICAL text: it is the line-breaking
-        # probe. Same glyphs and word widths as the drawn lines (minWidth agrees).
-        Paragraph.__init__(self, _pdf_xesc(self._shaped), style)
+        # probe. Same glyphs, fonts and word widths as the drawn lines.
+        Paragraph.__init__(self, _ar_pdf_markup(self._shaped), style)
 
     def _layout(self, availWidth, availHeight):
         entry = self._layouts.get(availWidth)
@@ -2585,7 +2651,7 @@ class _ArabicParagraph(Paragraph):
             Paragraph.wrap(self, availWidth, availHeight)
             lines = [ln.strip() for ln in _para_line_texts(self)]
             real = Paragraph(
-                "<br/>".join(_pdf_xesc(_ar_display(ln, self._base_dir)) for ln in lines),
+                "<br/>".join(_ar_pdf_markup(_ar_display(ln, self._base_dir)) for ln in lines),
                 self.style)
             if len(self._layouts) >= self._MAX_LAYOUTS:
                 self._layouts.clear()
@@ -3287,8 +3353,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
         # use it only for text that never wraps or is mixed with tags (the footer);
         # everything else goes through P().
         s = _clean(text)
-        if ar_ok:
-            return _xesc(_ar(s))
+        if ar_ok:                      # what the Arabic font lacks is drawn in Helvetica
+            return _ar_pdf_markup(_ar_display(_ar_pdf_text(_ar_shape(s))))
         if is_ar:                      # Arabic font unavailable: keep the text as-is
             return _xesc(s)
         return _pdf_latin_markup(s)    # escapes too; no glyph Helvetica can't draw
@@ -3302,7 +3368,12 @@ def build_pdf(guide, language, out_filename="study_guide"):
         # English, and Arabic without its font, is exactly the old
         # Paragraph(prefix + T(text)).
         if ar_ok:
-            return _ArabicParagraph(prefix + _ar_shape(_clean(text)), style, base_dir="R")
+            shaped = prefix + _ar_shape(_clean(text))
+            # Right-to-left whenever the text has Arabic in it ("DNA هو ..."); a purely
+            # Latin field (an English key term "Term (EN)") keeps its own direction, or
+            # forced RTL would move its closing bracket to the wrong end.
+            return _ArabicParagraph(shaped, style,
+                                    base_dir="R" if _AR_LETTER_RE.search(shaped) else None)
         return Paragraph(prefix + T(text), style)
 
     AR_GUIDE, AR_LUCK = "دليل الدراسة بالذكاء الاصطناعي", "حظ سعيد!"   # footer (logical order)
