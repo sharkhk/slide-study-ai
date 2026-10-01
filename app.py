@@ -120,31 +120,80 @@ DETAIL = {
 }
 
 # ── Arabic PDF support ─────────────────────────────────────────────────────────
-_ARABIC_FONT      = "NotoNaskhArabic"
-_ARABIC_FONT_PATH = "/tmp/NotoNaskhArabic.ttf"
-_arabic_font_ok   = False
-_arabic_font_lock = threading.Lock()
+# The font ships in the repo (fonts/, SIL OFL 1.1 - see fonts/OFL.txt). It used to
+# be downloaded from GitHub on the first Arabic build: any network hiccup, rate
+# limit or cold /tmp silently turned the whole Arabic PDF into Helvetica boxes.
+_ARABIC_FONT         = "NotoNaskhArabic"
+_ARABIC_FONT_BUNDLED = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "fonts", "NotoNaskhArabic-Regular.ttf")
+_ARABIC_FONT_PATH    = "/tmp/NotoNaskhArabic.ttf"   # last-resort download cache only
+_ARABIC_FONT_URL     = ("https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/"
+                        "NotoNaskhArabic/NotoNaskhArabic-Regular.ttf")
+_ARABIC_FONT_RETRY_S = 300      # after a failed download, don't try again for 5 min
+_arabic_font_ok          = False
+_arabic_font_fail_at     = None # time.monotonic() of the last failed download
+_arabic_font_downloading = False
+_arabic_font_lock        = threading.Lock()   # guards the state above; never held over I/O
+
+def _register_arabic_font_file(path):
+    """Register `path` as the Arabic font. Caller holds _arabic_font_lock."""
+    global _arabic_font_ok
+    _pdfmetrics.registerFont(_TTFont(_ARABIC_FONT, path))
+    _arabic_font_ok = True
 
 def _ensure_arabic_font():
-    global _arabic_font_ok
+    """Register the Arabic PDF font on first use (never at import). True when usable.
+
+    1. the copy bundled in fonts/ (no network - the normal path),
+    2. a copy a previous last-resort download left in /tmp,
+    3. a last-resort GitHub download: short timeout, OUTSIDE the lock, and a
+       failure is remembered for 5 minutes so concurrent builds never queue behind
+       it (they render with Helvetica instead of waiting)."""
+    global _arabic_font_fail_at, _arabic_font_downloading
+    if _arabic_font_ok:
+        return True
     with _arabic_font_lock:
         if _arabic_font_ok:
             return True
-        try:
-            if not os.path.exists(_ARABIC_FONT_PATH):
-                r = http.get(
-                    "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoNaskhArabic/NotoNaskhArabic-Regular.ttf",
-                    timeout=30, allow_redirects=True
-                )
-                r.raise_for_status()
-                with open(_ARABIC_FONT_PATH, "wb") as fh:
-                    fh.write(r.content)
-            _pdfmetrics.registerFont(_TTFont(_ARABIC_FONT, _ARABIC_FONT_PATH))
-            _arabic_font_ok = True
-            return True
-        except Exception as exc:
-            print(f"Arabic font error: {exc}", flush=True)
+        for path in (_ARABIC_FONT_BUNDLED, _ARABIC_FONT_PATH):
+            if os.path.isfile(path):
+                try:
+                    _register_arabic_font_file(path)
+                    return True
+                except Exception as exc:
+                    _log.error("Arabic font %s unusable: %s", path, exc)
+        if _arabic_font_downloading:
             return False
+        if _arabic_font_fail_at is not None and time.monotonic() - _arabic_font_fail_at < _ARABIC_FONT_RETRY_S:
+            return False
+        _arabic_font_downloading = True
+    _log.warning("Arabic font not bundled - downloading it as a last resort")
+    tmp_path = None
+    try:
+        r = http.get(_ARABIC_FONT_URL, timeout=8, allow_redirects=True)
+        r.raise_for_status()
+        tmp_path = f"{_ARABIC_FONT_PATH}.{uuid.uuid4().hex}.part"
+        with open(tmp_path, "wb") as fh:
+            fh.write(r.content)
+        _TTFont(_ARABIC_FONT, tmp_path)          # parse it before anyone can use it
+        os.replace(tmp_path, _ARABIC_FONT_PATH)
+        tmp_path = None
+        with _arabic_font_lock:
+            _register_arabic_font_file(_ARABIC_FONT_PATH)
+            _arabic_font_downloading = False
+        return True
+    except Exception as exc:
+        _log.error("Arabic font download failed (retry in %ss): %s", _ARABIC_FONT_RETRY_S, exc)
+        with _arabic_font_lock:
+            _arabic_font_fail_at = time.monotonic()
+            _arabic_font_downloading = False
+        return False
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 def _ar(text):
     """Reshape + bidi-flip Arabic for correct visual display in LTR PDF renderer."""
