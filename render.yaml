@@ -1,15 +1,20 @@
 services:
   - type: web
-    name: alimne
+    name: slide-study-ai
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 8
+    # Render restarts/replaces an instance that stops answering this, instead of
+    # leaving the site on 502. Keep it cheap (no DB/network) — see /healthz in app.py.
+    healthCheckPath: /healthz
     envVars:
       # AI
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL
-        value: llama-3.1-8b-instant
+        value: openai/gpt-oss-120b
+      - key: GROQ_TPM_LIMIT
+        value: "200000"
 
       # Auth & Database (Supabase)
       - key: SUPABASE_URL
@@ -33,6 +38,6 @@ services:
 
       # App
       - key: APP_URL
-        value: https://alimne.onrender.com
+        value: https://alimne.app
       - key: ADMIN_TOKEN
         generateValue: true

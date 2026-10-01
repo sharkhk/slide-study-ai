@@ -6,6 +6,10 @@ extracted.json
 test_output.pdf
 .env
 
+# DB credentials for the local migration runner — NEVER commit
+scripts/.db_url
+*.db_url
+
 # Node
 frontend/node_modules/
 

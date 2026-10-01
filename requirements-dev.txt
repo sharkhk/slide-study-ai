@@ -1,0 +1,7 @@
+# Dev/test-only dependencies (not needed at runtime).
+# Install with:  pip install -r requirements-dev.txt
+#
+# The smoke suite (tests/) and scripts/preflight.py run fully offline — they
+# mock Stripe / Supabase / Groq and make no real network calls.
+-r requirements.txt
+pytest>=8.0.0
