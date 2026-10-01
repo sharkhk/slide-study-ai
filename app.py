@@ -3433,9 +3433,13 @@ def stripe_portal():
 # answering, Render restarts/replaces the instance automatically instead of the
 # site sitting on 502, and zero-downtime deploys only switch traffic to a new
 # instance once it passes this check.
+# Render sets RENDER_GIT_COMMIT on every deploy; exposing it lets the nightly
+# debug routine confirm its own push is the version actually serving traffic.
+_DEPLOY_VERSION = os.environ.get("RENDER_GIT_COMMIT", "")[:12]
+
 @app.route("/healthz")
 def healthz():
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "version": _DEPLOY_VERSION})
 
 
 # ── Stripe — webhook ───────────────────────────────────────────────────────────

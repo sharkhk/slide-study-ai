@@ -64,7 +64,8 @@ def test_healthz_is_ok_and_not_tracked(client):
     before = len(appmod._visitors)
     resp = client.get("/healthz")
     assert resp.status_code == 200
-    assert resp.get_json() == {"ok": True}
+    body = resp.get_json()
+    assert body["ok"] is True and isinstance(body["version"], str)   # deploy commit (empty offline)
     assert len(appmod._visitors) == before
 
 
