@@ -2130,6 +2130,64 @@ def _debullet(text):
     return s.strip(" ;")
 
 
+# ── PDF glyph safety ───────────────────────────────────────────────────────────
+# English PDFs use Helvetica (WinAnsi only). Anything outside that set — the
+# model's favourite non-breaking hyphen U+2011 ("client‑side"), Greek, arrows,
+# ≤/≥, subscripts — rendered as a solid black box (■). Normalise lookalikes,
+# draw Greek/maths with the PDF Symbol font, and drop whatever neither can draw.
+import unicodedata as _ud
+_PDF_CHAR_MAP = {
+    "‐": "-", "‑": "-", "‒": "-", "⁃": "-", "−": "-",
+    "﹣": "-", "－": "-", "―": "—",
+    " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
+    " ": " ", " ": " ", " ": " ", " ": " ", " ": " ",
+    " ": " ", "　": " ",
+    "​": "", "⁠": "", "﻿": "", "­": "",
+}
+_PDF_CHAR_RE = re.compile("[" + "".join(_PDF_CHAR_MAP) + "]")
+
+def _pdf_normalize(s):
+    """Lookalike punctuation/spaces → plain ones. Safe for Arabic text too."""
+    return _PDF_CHAR_RE.sub(lambda m: _PDF_CHAR_MAP[m.group(0)], s)
+
+def _enc_ok(ch, codec):
+    try:
+        ch.encode(codec)
+        return True
+    except Exception:
+        return False
+
+def _pdf_latin_markup(s):
+    """Escaped reportlab Paragraph markup for Helvetica text: every character is
+    either WinAnsi (Helvetica) or wrapped in the Symbol font; nothing else
+    survives, so the PDF can never show a missing-glyph box."""
+    from reportlab.pdfbase.rl_codecs import RL_Codecs
+    RL_Codecs.register()
+    out, sym = [], []
+
+    def esc(t):
+        return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def flush():
+        if sym:
+            out.append('<font face="Symbol">' + esc("".join(sym)) + "</font>")
+            sym.clear()
+
+    for ch in _pdf_normalize(s):
+        if _enc_ok(ch, "cp1252"):
+            flush(); out.append(esc(ch)); continue
+        if _enc_ok(ch, "symbol"):
+            sym.append(ch); continue
+        # H₂O → H2O, ﬁ → fi, full-width → ASCII; then strip accents (ā → a)
+        alt = _ud.normalize("NFKC", ch)
+        if not all(_enc_ok(c, "cp1252") for c in alt):
+            alt = "".join(c for c in _ud.normalize("NFKD", ch) if not _ud.combining(c))
+        alt = "".join(c for c in alt if _enc_ok(c, "cp1252"))
+        flush(); out.append(esc(alt))   # emoji etc. are dropped, never boxed
+    flush()
+    return "".join(out)
+
+
 def _detect_language(content):
     """Detect 'ar' or 'en' from slides list or plain text. Based on Arabic char ratio."""
     if isinstance(content, list):
@@ -2780,9 +2838,12 @@ def build_pdf(guide, language, out_filename="study_guide"):
         # BEFORE Arabic reshaping/escaping, so no •/▪/■/… ever reaches the PDF from
         # any field — objectives, section titles, keywords, flashcards or quiz.
         # _debullet preserves hyphens, ranges and formula middle-dots (CuSO4·5H2O).
-        s = _debullet(str(text))
-        s = _ar(s) if ar_ok else s
-        return _xesc(s)
+        s = _pdf_normalize(_debullet(str(text)))
+        if ar_ok:
+            return _xesc(_ar(s))
+        if is_ar:                      # Arabic font unavailable: keep the text as-is
+            return _xesc(s)
+        return _pdf_latin_markup(s)    # escapes too; no glyph Helvetica can't draw
 
     L = {
         "objectives": T("الأهداف التعليمية") if is_ar else "LEARNING OBJECTIVES",
@@ -2910,10 +2971,13 @@ def build_pdf(guide, language, out_filename="study_guide"):
     for idx, sec in enumerate(sections, 1):
         block = []
 
-        sec_title_text = T(sec.get("title", ""))
+        _st_raw = str(sec.get("title", ""))
+        # Upper-case BEFORE T(): T() returns markup (&amp;, <font face="Symbol">)
+        # that must not be upper-cased.
+        sec_title_text = T(_st_raw if is_ar else _st_raw.upper())
         sec_hdr = Table(
             [[Paragraph(
-                f"{L['sec_bullet']}{idx} · {sec_title_text if is_ar else sec_title_text.upper()}",
+                f"{L['sec_bullet']}{idx} · {sec_title_text}",
                 ST["sec_title"]
             )]],
             colWidths=[W]
@@ -2996,8 +3060,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
         else:
             lc, rc = W*0.27, W*0.73
             kw_rows = [[
-                Paragraph(_xesc(k.get("term", "")),       ST["kw_term"]),
-                Paragraph(_xesc(k.get("definition", "")), ST["kw_def"]),
+                Paragraph(T(k.get("term", "")),       ST["kw_term"]),
+                Paragraph(T(k.get("definition", "")), ST["kw_def"]),
             ] for k in keywords]
         kw_t = Table(kw_rows, colWidths=[lc, rc])
         kts = [
