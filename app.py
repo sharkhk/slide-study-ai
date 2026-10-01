@@ -2277,6 +2277,10 @@ Rules:
     # and strip any bullet glyphs the model embedded (leading OR inline) so facts
     # render as clean prose everywhere downstream.
     bullets = result.get("bullets", [])
+    if isinstance(bullets, str):       # one fact as a bare string, not a list
+        bullets = [bullets]
+    elif not isinstance(bullets, list):
+        bullets = []
     result["bullets"] = [c for b in bullets if b for c in (_debullet(b),) if c]
     return result
 
@@ -2360,13 +2364,22 @@ Rules:
     return _as_dict(result, list_key="mcqs")
 
 
+def _slide_nums(sec):
+    """The section's slide numbers as a set of ints; the model sometimes sends a
+    bare int, null or a nested list instead of a flat list."""
+    raw = sec.get("slide_nums")
+    if not isinstance(raw, list):
+        raw = [raw]
+    return {n for n in raw if isinstance(n, int)}
+
+
 def _sections_parallel(sections, content_slides, language, dcfg):
     """Process sections sequentially (Groq rate limits prevent safe concurrency).
     Yields plain dicts. Flashcards+MCQ are parallelized separately."""
     n = len(sections)
     for i, sec in enumerate(sections):
         yield {"step": "section", "msg": f"Section {i+1}/{n}: {sec.get('title', '')}…"}
-        nums = set(sec.get("slide_nums", []))
+        nums = _slide_nums(sec)
         sl = [s for s in content_slides if s["slide_num"] in nums]
         if not sl:
             chunk = max(1, len(content_slides) // n)
@@ -2456,7 +2469,7 @@ def build_markdown(guide):
         tbl = sec.get("table")
         if isinstance(tbl, dict) and tbl.get("headers") and tbl.get("rows"):
             lines.append("")
-            lines.append("| " + " | ".join(tbl["headers"]) + " |")
+            lines.append("| " + " | ".join(str(h) for h in tbl["headers"]) + " |")
             lines.append("|" + "|".join(["---"] * len(tbl["headers"])) + "|")
             for row in tbl["rows"]:
                 lines.append("| " + " | ".join(str(c) for c in row) + " |")
@@ -2506,7 +2519,7 @@ def ask_ollama(slides, language, progress_cb=None):
     n = len(sections)
     for i, sec in enumerate(sections):
         if progress_cb: progress_cb("section", f"Building section {i+1} of {n}: {sec.get('title','')}…")
-        nums = set(sec.get("slide_nums", []))
+        nums = _slide_nums(sec)
         sl = [s for s in content_slides if s["slide_num"] in nums]
         if not sl:
             chunk = max(1, len(content_slides) // n)
@@ -2901,7 +2914,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
     elems = []
 
     # ── Header ────────────────────────────────────────────────────────────────
-    raw_title = guide.get("title", "Study Guide")
+    raw_title = str(guide.get("title") or "Study Guide")
     title    = T(raw_title.upper() if not is_ar else raw_title)
     subtitle = T(guide.get("subtitle", "Exam Study Guide"))
     hdr = Table([
