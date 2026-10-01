@@ -329,14 +329,38 @@ def _consume_token(user_id):
         print(f"consume_token error: {exc}", flush=True)
         return False, 0, "db_error"
 
-# Flips to False if the add_tokens RPC isn't installed yet (see migrations/).
+# Flips to False once PostgREST says the add_tokens RPC isn't installed (see
+# migrations/001) — and ONLY then; a timeout or 5xx never flips it.
 _add_tokens_rpc = True
 
+# PostgREST's answers for "this RPC does not exist": PGRST202 ("Could not find the
+# function … in the schema cache"; older PostgREST: "Could not find the
+# public.fn(…) function …"), a bare HTTP 404 (postgrest-py puts the status in
+# .code when the body isn't JSON) and Postgres 42883 "function … does not exist".
+_RPC_MISSING_CODES = {"PGRST202", "42883", "404"}
+_RPC_MISSING_RE    = re.compile(r"could not find the\b.*\bfunction\b|\bfunction\b.*\bdoes not exist\b",
+                                re.I | re.S)
+
+def _rpc_missing(exc):
+    """True only when the error PROVES the RPC is not installed (so the call
+    changed nothing). Timeouts, connection resets and 5xx are ambiguous: the RPC
+    may have run and only the reply was lost → False."""
+    code = getattr(exc, "code", None)
+    if code is not None and str(code).strip().upper() in _RPC_MISSING_CODES:
+        return True
+    msg = getattr(exc, "message", None)
+    if not isinstance(msg, str) or not msg:
+        msg = str(exc)
+    return bool(_RPC_MISSING_RE.search(msg))
+
 def _add_tokens(sb, user_id, delta):
-    """Atomically add (or subtract) `delta` tokens and return the new balance.
+    """Atomically add (or subtract) `delta` tokens and return the new balance,
+    or None when it failed or its outcome is unknown.
     Uses the add_tokens SQL RPC when available — a plain read-modify-write here
     races with the atomic consume_token RPC and loses concurrent decrements.
-    Falls back to read-modify-write if the RPC is not installed."""
+    Falls back to read-modify-write ONLY when the RPC is definitively missing:
+    after a timeout / reset / 5xx the RPC may already have been applied, and a
+    second (fallback) update would credit the user twice."""
     global _add_tokens_rpc
     if not sb or not user_id:
         return None
@@ -349,8 +373,13 @@ def _add_tokens(sb, user_id, delta):
                 return r.data[0]
             return r.data
         except Exception as exc:
+            if not _rpc_missing(exc):
+                _log.error("add_tokens RPC failed for %s (delta %+d) — outcome unknown, NOT "
+                           "retried (a second update could double-apply): %s: %s",
+                           user_id, delta, type(exc).__name__, exc)
+                return None
             _add_tokens_rpc = False
-            _log.warning("add_tokens RPC unavailable — using read-modify-write: %s", exc)
+            _log.warning("add_tokens RPC not installed — using read-modify-write: %s", exc)
     try:
         row = sb.table("users").select("tokens_remaining").eq("id", user_id).single().execute()
         cur = (row.data or {}).get("tokens_remaining")
@@ -1820,6 +1849,29 @@ def _guide_blob(guide, filename):
 
 def _guide_sig(blob):
     return hmac.new(_GUIDE_KEY, blob.encode("utf-8"), hashlib.sha256).hexdigest()
+
+# ── Loose guide shapes ─────────────────────────────────────────────────────────
+# Guide content comes from the LLM (and from older shared copies), so any field
+# can arrive in the wrong shape: a keyword dict without 'term', one string where
+# a list belongs, a number as the title. Readers (chat, share page, views) use
+# these instead of assuming the ideal shape — a loose guide must never be a 500.
+def _as_list(v):
+    """A guide list field: a list stays; one non-blank string becomes [it];
+    anything else (None, a number, a dict) is []."""
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str) and v.strip():
+        return [v]
+    return []
+
+def _scalar_text(v):
+    """Display text for a scalar guide value: a str as-is, a number as str();
+    anything else (None, bool, list, dict) → ''."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return str(v)
+    return ""
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY        = colors.HexColor('#0a1628')
@@ -3606,6 +3658,75 @@ def capture_lead():
     return jsonify({"ok": True})
 
 
+# ── Request-field validation ───────────────────────────────────────────────────
+# Runs BEFORE _charge_credit: a malformed field is a cheap 400 'bad_request' —
+# never a spent credit followed by a 500 (e.g. {"text": 123} on /api/summarize-text
+# charged, crashed on .strip() and was never refunded).
+class _BadField(ValueError):
+    """A request field (or the whole JSON body) has the wrong type."""
+    def __init__(self, field):
+        super().__init__(field)
+        self.field = field
+
+def _json_object():
+    """The JSON body as a dict: no / unparsable body → {} (callers then report
+    what is missing); a JSON array, string, number or bool → _BadField('body')."""
+    data = request.get_json(silent=True)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise _BadField("body")
+    return data
+
+def _str_field(data, key, default=""):
+    """data[key] as a str. Missing or null → `default`; a number, bool, list or
+    object → _BadField (never silently str()'d)."""
+    v = data.get(key)
+    if v is None:
+        return default
+    if not isinstance(v, str):
+        raise _BadField(key)
+    return v
+
+def _flag_field(data, key, default=True):
+    """An on/off option sent as a bool or a string. Keeps the historical rule
+    str(v).lower() != 'false' for any scalar; null → `default`; a list or
+    object → _BadField."""
+    v = data.get(key)
+    if v is None:
+        return default
+    if isinstance(v, (list, dict)):
+        raise _BadField(key)
+    return str(v).lower() != "false"
+
+def _wants_ar(data=None):
+    """Answer in Arabic? The request's own `language` field decides; otherwise
+    (auto / missing / malformed) the browser's Accept-Language."""
+    lang = data.get("language") if isinstance(data, dict) else None
+    if lang in ("ar", "en"):
+        return lang == "ar"
+    try:
+        return request.accept_languages.best_match(("en", "ar")) == "ar"
+    except Exception:
+        return False
+
+def _bad_request(en, ar, data=None, **extra):
+    """400 for malformed input: code 'bad_request', text in the caller's language."""
+    body = {"error": ar if _wants_ar(data) else en, "code": "bad_request"}
+    body.update(extra)
+    return jsonify(body), 400
+
+_BAD_FIELD_EN = "Something in this request was malformed — please refresh the page and try again."
+_BAD_FIELD_AR = "بعض بيانات هذا الطلب غير صالحة — يُرجى تحديث الصفحة والمحاولة مرة أخرى."
+
+def _bad_field(exc, data=None):
+    """400 for a _BadField; `field` names the offending input (for debugging)."""
+    return _bad_request(_BAD_FIELD_EN, _BAD_FIELD_AR, data, field=exc.field)
+
+_NO_TEXT_EN = "No text or URL provided"
+_NO_TEXT_AR = "لم يتم إدخال أي نص أو رابط."
+
+
 # ── SSE streaming endpoint ─────────────────────────────────────────────────────
 
 def _sse(data):
@@ -3652,6 +3773,15 @@ def summarize_stream():
         return _auth_rejected()
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
+    f     = request.files["file"]
+    fname = f.filename or ""
+    # Validate BEFORE the charge: a rejected type used to be charged and then
+    # refunded — and a refund can fail (e.g. the durable device quota before
+    # migration 012), silently costing an anonymous visitor a free preview.
+    # (Multipart form fields are always strings, so no type checks are needed.)
+    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
+    if not fname.lower().endswith(_ALLOWED_EXT):
+        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     # ── Credit gate: signed-in users spend a token; anonymous users get a
     #    small free quota per device/IP so they can try without an account. ────
@@ -3661,18 +3791,12 @@ def summarize_stream():
     tok_left = charge.tok_left
 
     _log_usage_async("user" if uid else "anon", "file")
-    f            = request.files["file"]
     lang_param   = request.form.get("language", "auto")
-    out_name     = _safe_name(request.form.get("filename", f.filename.rsplit(".", 1)[0]))
+    out_name     = _safe_name(request.form.get("filename", fname.rsplit(".", 1)[0]))
     detail_level = request.form.get("detail", "standard")
     dcfg         = DETAIL.get(detail_level, DETAIL["standard"])
     include_quiz = request.form.get("mode", "full") != "summary"
     include_mcq  = str(request.form.get("quiz", "true")).lower() != "false"
-
-    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
-    if not f.filename.lower().endswith(_ALLOWED_EXT):
-        charge.refund()
-        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     if not ollama_running():
         charge.refund()
@@ -3927,7 +4051,8 @@ def share_guide(job_id):
     sb = _get_sb()
     if sb is None:
         return jsonify({"error": "Sharing is temporarily unavailable."}), 503
-    guide = job.get("guide") or {}
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
     # Sharing works signed out too: a rejected token (False) just shares anonymously,
     # and created_by must never be False.
     uid   = _auth_optional(request) or None
@@ -3938,7 +4063,11 @@ def share_guide(job_id):
         "mcqs":       guide.get("mcqs",       []), "keywords":   guide.get("keywords",   []),
         "objectives": guide.get("objectives", []), "language":   lang,
     }
-    base = {"guide": payload, "title": (guide.get("title") or "Study Guide")[:200],
+    # The title column is text: a number title (1984) used to 500 on [:200], and a
+    # list/object one was stored as-is. Numbers become text; others the default.
+    t = guide.get("title")
+    title = (t if isinstance(t, str) else _scalar_text(t)) or "Study Guide"
+    base = {"guide": payload, "title": title[:200],
             "language": lang, "created_by": uid}
     for _ in range(6):
         slug = _new_slug()
@@ -3957,14 +4086,16 @@ def share_guide(job_id):
 
 def _sg_bullet(b):
     if isinstance(b, str):  return _debullet(b)
-    if isinstance(b, dict): return _debullet(b.get("text") or b.get("fact") or "")
-    return _debullet(b)
+    if isinstance(b, dict): return _debullet(_scalar_text(b.get("text") or b.get("fact")))
+    return _debullet(_scalar_text(b))   # a number → its text; None / list → "" (skipped, not "None")
 
 def _sg_desc(g):
-    parts = [o for o in (g.get("objectives") or []) if isinstance(o, str) and o.strip()]
+    parts = [o for o in _as_list(g.get("objectives")) if isinstance(o, str) and o.strip()]
     if not parts:
-        for sec in (g.get("sections") or []):
-            for b in (sec.get("bullets") or []):
+        for sec in _as_list(g.get("sections")):
+            if not isinstance(sec, dict):
+                continue
+            for b in _as_list(sec.get("bullets")):
                 t = _sg_bullet(b).strip()
                 if t:
                     parts.append(t); break
@@ -4046,7 +4177,11 @@ def _shared_404():
     return _shared_shell("Guide not found · Alimne", "", body)
 
 def _render_shared_guide(row):
-    g      = row.get("guide") or {}
+    # Every field read here tolerates loose shapes (see _as_list / _scalar_text):
+    # this is a PUBLIC page, and a stored guide with e.g. a number for bullets or
+    # options, or a string section, used to answer 500.
+    g      = row.get("guide")
+    g      = g if isinstance(g, dict) else {}
     is_ar  = (row.get("language") or g.get("language")) == "ar"
     L = {
         "tag":   "دليل دراسة" if is_ar else "Study guide",
@@ -4060,13 +4195,14 @@ def _render_shared_guide(row):
                  if is_ar else "Upload a lecture — PowerPoint, PDF, or a YouTube link — and get notes, flashcards and a quiz in seconds.",
         "pbtn":  "ابدأ مجاناً" if is_ar else "Start free",
     }
-    title_raw = g.get("title") or "Study Guide"
+    title_raw = _scalar_text(g.get("title")) or "Study Guide"
     title = _he(title_raw)
     desc  = _sg_desc(g)
-    sub   = ("<p class=\"sub\">%s</p>" % _he(g.get("subtitle"))) if g.get("subtitle") else ""
+    sub_raw = _scalar_text(g.get("subtitle"))
+    sub   = ("<p class=\"sub\">%s</p>" % _he(sub_raw)) if sub_raw else ""
 
-    flashcards = [f for f in (g.get("flashcards") or []) if isinstance(f, dict)]
-    mcqs       = [m for m in (g.get("mcqs") or []) if isinstance(m, dict)]
+    flashcards = [f for f in _as_list(g.get("flashcards")) if isinstance(f, dict)]
+    mcqs       = [m for m in _as_list(g.get("mcqs")) if isinstance(m, dict)]
     meta_bits = []
     if flashcards: meta_bits.append(("%d بطاقة" % len(flashcards)) if is_ar else "%d flashcards" % len(flashcards))
     if mcqs:       meta_bits.append(("%d سؤال" % len(mcqs)) if is_ar else "%d quiz questions" % len(mcqs))
@@ -4074,19 +4210,20 @@ def _render_shared_guide(row):
     meta = "<div class=\"meta\">%s</div>" % _he(" · ".join(meta_bits))
 
     parts = []
-    objs = [o for o in (g.get("objectives") or []) if isinstance(o, str) and o.strip()]
+    objs = [o for o in _as_list(g.get("objectives")) if isinstance(o, str) and o.strip()]
     if objs:
         parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (
             _he(L["learn"]), "".join("<li>%s</li>" % _he(o) for o in objs)))
-    for sec in (g.get("sections") or []):
+    for sec in _as_list(g.get("sections")):
         if not isinstance(sec, dict): continue
         lis = "".join("<li>%s</li>" % _he(_sg_bullet(b).strip())
-                      for b in (sec.get("bullets") or []) if _sg_bullet(b).strip())
+                      for b in _as_list(sec.get("bullets")) if _sg_bullet(b).strip())
         if lis:
-            parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (_he(sec.get("title", "")), lis))
-    kws = [k for k in (g.get("keywords") or []) if isinstance(k, dict) and k.get("term")]
+            parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (_he(_scalar_text(sec.get("title"))), lis))
+    kws = [k for k in _as_list(g.get("keywords")) if isinstance(k, dict) and _scalar_text(k.get("term")).strip()]
     if kws:
-        dl = "".join("<div class=\"kw\"><dt>%s</dt><dd>%s</dd></div>" % (_he(k.get("term", "")), _he(k.get("definition", ""))) for k in kws)
+        dl = "".join("<div class=\"kw\"><dt>%s</dt><dd>%s</dd></div>" % (
+            _he(_scalar_text(k.get("term"))), _he(_scalar_text(k.get("definition")))) for k in kws)
         parts.append("<section class=\"sec\"><h2>%s</h2>%s</section>" % (_he(L["keys"]), dl))
     if flashcards:
         cards = "".join("<div class=\"fc\"><div class=\"fc-q\">%s</div><div class=\"fc-a\">%s</div></div>" % (
@@ -4100,7 +4237,7 @@ def _render_shared_guide(row):
             opts = "".join("<li class=\"opt%s\">%s%s</li>" % (
                 " correct" if _mcq_correct(o, ans) else "",
                 "✓ " if _mcq_correct(o, ans) else "",
-                _he(o if isinstance(o, str) else str(o))) for o in (m.get("options") or []))
+                _he(o if isinstance(o, str) else str(o))) for o in _as_list(m.get("options")))
             expl = m.get("explanation") or m.get("rationale") or ""
             ex = ("<div class=\"expl\">%s</div>" % _he(expl)) if expl else ""
             qz.append("<div class=\"qz\"><div class=\"qz-q\">%s</div><ul class=\"opts\">%s</ul>%s</div>" % (qt, opts, ex))
@@ -4156,6 +4293,60 @@ def shared_guide_page(slug):
     return _render_shared_guide(row)
 
 
+def _chat_context(guide):
+    """The study material for the chat prompt (title, objectives, section notes,
+    key terms) — rather than raw slide chunks. Tolerates loose guide shapes: a
+    keyword dict without 'term', a string where a list belongs, non-string
+    entries… are str()'d or skipped, never a 500."""
+    guide = guide if isinstance(guide, dict) else {}
+    parts = []
+    title = _scalar_text(guide.get("title"))
+    if title.strip():
+        parts.append(f"Title: {title}")
+    objs = [t for t in (_scalar_text(o) for o in _as_list(guide.get("objectives"))) if t.strip()]
+    if objs:
+        parts.append("Objectives:\n" + "\n".join(f"- {o}" for o in objs))
+    for sec in _as_list(guide.get("sections")):
+        if not isinstance(sec, dict):
+            continue
+        lines = []
+        for b in _as_list(sec.get("bullets")):
+            if isinstance(b, dict):
+                b = b.get("text") or b.get("fact")
+            t = _scalar_text(b)
+            if t.strip():
+                lines.append(f"- {t}")
+        if lines:
+            parts.append(f"\n[{_scalar_text(sec.get('title'))}]\n" + "\n".join(lines))
+    kw_lines = []
+    for k in _as_list(guide.get("keywords"))[:30]:
+        if isinstance(k, dict):
+            term, defn = _scalar_text(k.get("term")), _scalar_text(k.get("definition"))
+            line = f"{term}: {defn}" if term.strip() else defn
+        else:
+            line = _scalar_text(k)
+        if line.strip():
+            kw_lines.append(line)
+    if kw_lines:
+        parts.append("Key terms:\n" + "\n".join(kw_lines))
+    return "\n\n".join(parts) or "No material available."
+
+def _chat_answer(result):
+    """The model's answer as a string, whatever JSON shape came back: a list
+    ([{"answer": …}]), a bare JSON string, an answer that is a list of lines…
+    An unusable answer is '' (the client then shows its own localized
+    'no answer' text, as it did for null); no 'answer' key at all keeps the
+    historical default text."""
+    if isinstance(result, str):
+        return result.strip()
+    res = _as_dict(result)
+    if "answer" not in res:
+        return "No answer found in the material."
+    ans = res.get("answer")
+    if isinstance(ans, list):
+        ans = "\n".join(t for t in (_scalar_text(a) for a in ans) if t.strip())
+    return _scalar_text(ans)
+
 @app.route("/api/chat/<job_id>", methods=["POST"])
 def chat_with_slides(job_id):
     if not _check_rate_limit(_client_ip(), scope="chat", limit=20):
@@ -4165,37 +4356,24 @@ def chat_with_slides(job_id):
         return err
     if not _valid_job(job_id):
         return jsonify({"error": "Invalid job ID"}), 400
-    data     = request.json or {}
-    question = data.get("question", "")[:500].strip()
+    # A non-string question (a number, list, object, null) or a non-object body
+    # used to 500 on [:500]; it is a 400 'bad_request' now.
+    data = {}
+    try:
+        data     = _json_object()
+        question = _str_field(data, "question")[:500].strip()
+    except _BadField as e:
+        return _bad_field(e, data)
     language = "ar" if data.get("language") == "ar" else "en"
     if not question:
-        return jsonify({"error": "No question provided"}), 400
+        return _bad_request("No question provided",
+                            "لم يتم إدخال أي سؤال — اكتب سؤالك أولاً.", data)
     with _jobs_lock:
         job = get_job(job_id)
     if not job:
         return _job_expired_json()
 
-    # Build rich context from guide (sections + keywords) rather than raw slide chunks
-    guide   = job.get("guide") or {}
-    context_parts = []
-    if guide.get("title"):
-        context_parts.append(f"Title: {guide['title']}")
-    if guide.get("objectives"):
-        context_parts.append("Objectives:\n" + "\n".join(f"- {o}" for o in guide["objectives"]))
-    for sec in (guide.get("sections") or []):
-        bullets = sec.get("bullets") or []
-        if bullets:
-            context_parts.append(f"\n[{sec.get('title','')}]\n" + "\n".join(
-                f"- {b}" if isinstance(b, str) else f"- {b.get('text') or b.get('fact','')}"
-                for b in bullets
-            ))
-    if guide.get("keywords"):
-        kw_lines = [
-            f"{k['term']}: {k.get('definition','')}" if isinstance(k, dict) else str(k)
-            for k in guide["keywords"][:30]
-        ]
-        context_parts.append("Key terms:\n" + "\n".join(kw_lines))
-    context = "\n\n".join(context_parts) or "No material available."
+    context = _chat_context(job.get("guide"))
 
     lang = "in Arabic" if language == "ar" else "in English"
     try:
@@ -4214,7 +4392,7 @@ Rules:
 - If genuinely not covered, say so briefly
 - Be helpful and detailed; include facts, definitions, examples from the material
 - JSON only""", num_predict=1024)
-        return jsonify({"answer": result.get("answer", "No answer found in the material.")})
+        return jsonify({"answer": _chat_answer(result)})
     except Exception as e:
         return jsonify({"error": _safe_err(e)}), 500
 
@@ -4251,9 +4429,11 @@ def view_md(job_id):
         job = get_job(job_id)
     if not job:
         return _VIEW_EXPIRED_HTML, 404, {"Content-Type": "text/html; charset=utf-8"}
-    is_ar = (job.get("guide") or {}).get("language") == "ar"
-    title = _he(job["guide"].get("title", "Study Guide"))
-    md = job["md"]
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
+    is_ar = guide.get("language") == "ar"
+    title = _he(_scalar_text(guide.get("title", "Study Guide")) or "Study Guide")
+    md = job.get("md") or ""
 
     def _md_to_html(text):
         lines, out = text.split('\n'), []
@@ -4349,9 +4529,10 @@ def view_cards(job_id):
         job = get_job(job_id)
     if not job:
         return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
-    guide = job["guide"]
-    title = _he(guide.get("title", "Flash Cards"))
-    cards = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
+    title = _he(_scalar_text(guide.get("title", "Flash Cards")) or "Flash Cards")
+    cards = [f for f in _as_list(guide.get("flashcards")) if isinstance(f, dict)]
     if not cards:
         return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No flash cards available.</p>")
 
@@ -4421,6 +4602,20 @@ render();
     return _page_shell(f"Flash Cards — {title}", css, html, script)
 
 
+def _quiz_items(mcqs):
+    """Quiz questions the view script can render: dicts whose `options` is a
+    non-empty list of strings. q.options.map() crashed the page on a string or
+    number, and a question with no options can never be answered (its Next
+    button only appears after a pick), so such questions are left out."""
+    out = []
+    for m in _as_list(mcqs):
+        if not isinstance(m, dict):
+            continue
+        opts = [t for t in (_scalar_text(o) for o in _as_list(m.get("options"))) if t.strip()]
+        if opts:
+            out.append({**m, "options": opts})
+    return out
+
 @app.route("/api/view/quiz/<job_id>")
 def view_quiz(job_id):
     if not _valid_job(job_id):
@@ -4429,9 +4624,10 @@ def view_quiz(job_id):
         job = get_job(job_id)
     if not job:
         return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
-    guide = job["guide"]
-    title = _he(guide.get("title", "Quiz"))
-    mcqs = [m for m in guide.get("mcqs", []) if isinstance(m, dict)]
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
+    title = _he(_scalar_text(guide.get("title", "Quiz")) or "Quiz")
+    mcqs = _quiz_items(guide.get("mcqs"))
     if not mcqs:
         return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No quiz questions available.</p>")
 
@@ -4825,13 +5021,19 @@ def youtube_transcript():
     if uid is False:
         return _auth_rejected()   # a sent-but-rejected token is never 'anonymous'
 
-    data = request.get_json(silent=True) or {}
-    url = (data.get("url") or "").strip()
-    lang_param = data.get("language", "auto")
-    detail_level = data.get("detail", "standard")
+    # Type-check every field first: a number/list url or a list detail used to
+    # crash here with a 500 (.strip() / unhashable dict key).
+    data = {}
+    try:
+        data = _json_object()
+        url          = _str_field(data, "url").strip()
+        lang_param   = _str_field(data, "language", "auto")
+        detail_level = _str_field(data, "detail", "standard")
+        include_quiz = _str_field(data, "mode", "full") != "summary"
+        include_mcq  = _flag_field(data, "quiz", True)
+    except _BadField as e:
+        return _bad_field(e, data)
     yt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
-    include_quiz = data.get("mode", "full") != "summary"
-    include_mcq  = str(data.get("quiz", True)).lower() != "false"
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not ollama_running():
@@ -5022,13 +5224,19 @@ def summarize_text():
     # taps "Try a sample" → a real guide on a FIXED server-side lecture. No credit
     # consumed; separate tighter rate limit; fixed text can't be abused as a free
     # generator. This is the activation unlock — the point is that they SEE it work.
-    _peek = request.get_json(silent=True) or {}
-    if _peek.get("demo"):
+    # The body is read ONCE, here, before anything can be spent. silent=True: a
+    # non-JSON body is {} (→ "No text or URL" below); a JSON array/string/number
+    # body is a 400 (it used to 500 on .get()).
+    try:
+        data = _json_object()
+    except _BadField as e:
+        return _bad_field(e)
+    if data.get("demo"):
         if not _check_rate_limit(_client_ip(), scope="demo", limit=8):
             return jsonify({"error": "Too many demo runs — please wait a moment."}), 429
         if not ollama_running():
             return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
-        d_lang = "ar" if _peek.get("language") == "ar" else "en"
+        d_lang = "ar" if data.get("language") == "ar" else "en"
         d_text = _DEMO_TEXT_AR if d_lang == "ar" else _DEMO_TEXT_EN
         _log_usage_async("demo", "demo")
         gen = _stream_text_as_sse(d_text, d_lang, "sample_lecture", "text",
@@ -5042,24 +5250,30 @@ def summarize_text():
     uid = _auth_optional(request)
     if uid is False:
         return _auth_rejected()   # a sent-but-rejected token is never 'anonymous'
+
+    # Validate and normalise every field BEFORE the charge: {"text": 123} (or a
+    # number/list url, filename, language, detail…) used to spend a credit and
+    # then 500 with no refund. Missing/null → the default.
+    try:
+        text         = _str_field(data, "text").strip()
+        url          = _str_field(data, "url").strip()
+        lang_param   = _str_field(data, "language", "auto")
+        filename     = _safe_name(_str_field(data, "filename") or "pasted_text")
+        detail_level = _str_field(data, "detail", "standard")
+        include_quiz = _str_field(data, "mode", "full") != "summary"
+        include_mcq  = _flag_field(data, "quiz", True)
+    except _BadField as e:
+        return _bad_field(e, data)
+    txt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
+    if not text and not url:
+        return _bad_request(_NO_TEXT_EN, _NO_TEXT_AR, data)
+
     charge, err = _charge_credit(uid, request)
     if err:
         return err
     tok_left = charge.tok_left
 
     _log_usage_async("user" if uid else "anon", "text")
-    # silent=True: a non-JSON body must not raise here (it would 415/500 AFTER
-    # the token was already consumed above, with no refund). Empty body → {} →
-    # falls through to the "No text or URL" refund path below.
-    data = request.get_json(silent=True) or {}
-    text = (data.get("text") or "").strip()
-    url  = (data.get("url")  or "").strip()
-    lang_param   = data.get("language", "auto")
-    filename     = _safe_name(data.get("filename") or "pasted_text")
-    detail_level = data.get("detail", "standard")
-    txt_dcfg     = DETAIL.get(detail_level, DETAIL["standard"])
-    include_quiz = data.get("mode", "full") != "summary"
-    include_mcq  = str(data.get("quiz", True)).lower() != "false"
 
     if not ollama_running():
         charge.refund()
@@ -5075,9 +5289,9 @@ def summarize_text():
             charge.refund()
             raise
 
-    if not text:
+    if not text:   # the page had no readable text
         charge.refund()
-        return jsonify({"error": "No text or URL provided"}), 400
+        return _bad_request(_NO_TEXT_EN, _NO_TEXT_AR, data)
 
     # Cap total input so a huge paste / large fetched page can't amplify Groq cost.
     text = text[:500_000]
