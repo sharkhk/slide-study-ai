@@ -3635,6 +3635,75 @@ def capture_lead():
     return jsonify({"ok": True})
 
 
+# ── Request-field validation ───────────────────────────────────────────────────
+# Runs BEFORE _charge_credit: a malformed field is a cheap 400 'bad_request' —
+# never a spent credit followed by a 500 (e.g. {"text": 123} on /api/summarize-text
+# charged, crashed on .strip() and was never refunded).
+class _BadField(ValueError):
+    """A request field (or the whole JSON body) has the wrong type."""
+    def __init__(self, field):
+        super().__init__(field)
+        self.field = field
+
+def _json_object():
+    """The JSON body as a dict: no / unparsable body → {} (callers then report
+    what is missing); a JSON array, string, number or bool → _BadField('body')."""
+    data = request.get_json(silent=True)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise _BadField("body")
+    return data
+
+def _str_field(data, key, default=""):
+    """data[key] as a str. Missing or null → `default`; a number, bool, list or
+    object → _BadField (never silently str()'d)."""
+    v = data.get(key)
+    if v is None:
+        return default
+    if not isinstance(v, str):
+        raise _BadField(key)
+    return v
+
+def _flag_field(data, key, default=True):
+    """An on/off option sent as a bool or a string. Keeps the historical rule
+    str(v).lower() != 'false' for any scalar; null → `default`; a list or
+    object → _BadField."""
+    v = data.get(key)
+    if v is None:
+        return default
+    if isinstance(v, (list, dict)):
+        raise _BadField(key)
+    return str(v).lower() != "false"
+
+def _wants_ar(data=None):
+    """Answer in Arabic? The request's own `language` field decides; otherwise
+    (auto / missing / malformed) the browser's Accept-Language."""
+    lang = data.get("language") if isinstance(data, dict) else None
+    if lang in ("ar", "en"):
+        return lang == "ar"
+    try:
+        return request.accept_languages.best_match(("en", "ar")) == "ar"
+    except Exception:
+        return False
+
+def _bad_request(en, ar, data=None, **extra):
+    """400 for malformed input: code 'bad_request', text in the caller's language."""
+    body = {"error": ar if _wants_ar(data) else en, "code": "bad_request"}
+    body.update(extra)
+    return jsonify(body), 400
+
+_BAD_FIELD_EN = "Something in this request was malformed — please refresh the page and try again."
+_BAD_FIELD_AR = "بعض بيانات هذا الطلب غير صالحة — يُرجى تحديث الصفحة والمحاولة مرة أخرى."
+
+def _bad_field(exc, data=None):
+    """400 for a _BadField; `field` names the offending input (for debugging)."""
+    return _bad_request(_BAD_FIELD_EN, _BAD_FIELD_AR, data, field=exc.field)
+
+_NO_TEXT_EN = "No text or URL provided"
+_NO_TEXT_AR = "لم يتم إدخال أي نص أو رابط."
+
+
 # ── SSE streaming endpoint ─────────────────────────────────────────────────────
 
 def _sse(data):
@@ -3681,6 +3750,15 @@ def summarize_stream():
         return _auth_rejected()
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
+    f     = request.files["file"]
+    fname = f.filename or ""
+    # Validate BEFORE the charge: a rejected type used to be charged and then
+    # refunded — and a refund can fail (e.g. the durable device quota before
+    # migration 012), silently costing an anonymous visitor a free preview.
+    # (Multipart form fields are always strings, so no type checks are needed.)
+    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
+    if not fname.lower().endswith(_ALLOWED_EXT):
+        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     # ── Credit gate: signed-in users spend a token; anonymous users get a
     #    small free quota per device/IP so they can try without an account. ────
@@ -3690,18 +3768,12 @@ def summarize_stream():
     tok_left = charge.tok_left
 
     _log_usage_async("user" if uid else "anon", "file")
-    f            = request.files["file"]
     lang_param   = request.form.get("language", "auto")
-    out_name     = _safe_name(request.form.get("filename", f.filename.rsplit(".", 1)[0]))
+    out_name     = _safe_name(request.form.get("filename", fname.rsplit(".", 1)[0]))
     detail_level = request.form.get("detail", "standard")
     dcfg         = DETAIL.get(detail_level, DETAIL["standard"])
     include_quiz = request.form.get("mode", "full") != "summary"
     include_mcq  = str(request.form.get("quiz", "true")).lower() != "false"
-
-    _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
-    if not f.filename.lower().endswith(_ALLOWED_EXT):
-        charge.refund()
-        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     if not ollama_running():
         charge.refund()
@@ -4854,13 +4926,19 @@ def youtube_transcript():
     if uid is False:
         return _auth_rejected()   # a sent-but-rejected token is never 'anonymous'
 
-    data = request.get_json(silent=True) or {}
-    url = (data.get("url") or "").strip()
-    lang_param = data.get("language", "auto")
-    detail_level = data.get("detail", "standard")
+    # Type-check every field first: a number/list url or a list detail used to
+    # crash here with a 500 (.strip() / unhashable dict key).
+    data = {}
+    try:
+        data = _json_object()
+        url          = _str_field(data, "url").strip()
+        lang_param   = _str_field(data, "language", "auto")
+        detail_level = _str_field(data, "detail", "standard")
+        include_quiz = _str_field(data, "mode", "full") != "summary"
+        include_mcq  = _flag_field(data, "quiz", True)
+    except _BadField as e:
+        return _bad_field(e, data)
     yt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
-    include_quiz = data.get("mode", "full") != "summary"
-    include_mcq  = str(data.get("quiz", True)).lower() != "false"
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not ollama_running():
@@ -5051,13 +5129,19 @@ def summarize_text():
     # taps "Try a sample" → a real guide on a FIXED server-side lecture. No credit
     # consumed; separate tighter rate limit; fixed text can't be abused as a free
     # generator. This is the activation unlock — the point is that they SEE it work.
-    _peek = request.get_json(silent=True) or {}
-    if _peek.get("demo"):
+    # The body is read ONCE, here, before anything can be spent. silent=True: a
+    # non-JSON body is {} (→ "No text or URL" below); a JSON array/string/number
+    # body is a 400 (it used to 500 on .get()).
+    try:
+        data = _json_object()
+    except _BadField as e:
+        return _bad_field(e)
+    if data.get("demo"):
         if not _check_rate_limit(_client_ip(), scope="demo", limit=8):
             return jsonify({"error": "Too many demo runs — please wait a moment."}), 429
         if not ollama_running():
             return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
-        d_lang = "ar" if _peek.get("language") == "ar" else "en"
+        d_lang = "ar" if data.get("language") == "ar" else "en"
         d_text = _DEMO_TEXT_AR if d_lang == "ar" else _DEMO_TEXT_EN
         _log_usage_async("demo", "demo")
         gen = _stream_text_as_sse(d_text, d_lang, "sample_lecture", "text",
@@ -5071,24 +5155,30 @@ def summarize_text():
     uid = _auth_optional(request)
     if uid is False:
         return _auth_rejected()   # a sent-but-rejected token is never 'anonymous'
+
+    # Validate and normalise every field BEFORE the charge: {"text": 123} (or a
+    # number/list url, filename, language, detail…) used to spend a credit and
+    # then 500 with no refund. Missing/null → the default.
+    try:
+        text         = _str_field(data, "text").strip()
+        url          = _str_field(data, "url").strip()
+        lang_param   = _str_field(data, "language", "auto")
+        filename     = _safe_name(_str_field(data, "filename") or "pasted_text")
+        detail_level = _str_field(data, "detail", "standard")
+        include_quiz = _str_field(data, "mode", "full") != "summary"
+        include_mcq  = _flag_field(data, "quiz", True)
+    except _BadField as e:
+        return _bad_field(e, data)
+    txt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
+    if not text and not url:
+        return _bad_request(_NO_TEXT_EN, _NO_TEXT_AR, data)
+
     charge, err = _charge_credit(uid, request)
     if err:
         return err
     tok_left = charge.tok_left
 
     _log_usage_async("user" if uid else "anon", "text")
-    # silent=True: a non-JSON body must not raise here (it would 415/500 AFTER
-    # the token was already consumed above, with no refund). Empty body → {} →
-    # falls through to the "No text or URL" refund path below.
-    data = request.get_json(silent=True) or {}
-    text = (data.get("text") or "").strip()
-    url  = (data.get("url")  or "").strip()
-    lang_param   = data.get("language", "auto")
-    filename     = _safe_name(data.get("filename") or "pasted_text")
-    detail_level = data.get("detail", "standard")
-    txt_dcfg     = DETAIL.get(detail_level, DETAIL["standard"])
-    include_quiz = data.get("mode", "full") != "summary"
-    include_mcq  = str(data.get("quiz", True)).lower() != "false"
 
     if not ollama_running():
         charge.refund()
@@ -5104,9 +5194,9 @@ def summarize_text():
             charge.refund()
             raise
 
-    if not text:
+    if not text:   # the page had no readable text
         charge.refund()
-        return jsonify({"error": "No text or URL provided"}), 400
+        return _bad_request(_NO_TEXT_EN, _NO_TEXT_AR, data)
 
     # Cap total input so a huge paste / large fetched page can't amplify Groq cost.
     text = text[:500_000]
