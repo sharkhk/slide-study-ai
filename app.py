@@ -5,8 +5,6 @@ import uuid
 import json
 import os
 import time
-import hmac
-import hashlib
 import secrets
 import threading
 import traceback as _tb
@@ -30,8 +28,7 @@ logging.basicConfig(
     handlers=_log_handlers,
 )
 _log = logging.getLogger("app")
-from flask import Flask, request, jsonify, send_file, send_from_directory, Response, stream_with_context, redirect, has_request_context
-from flask import g as _req_g   # per-request scratch (auth reason/payload); aliased so local `g` vars can't shadow it
+from flask import Flask, request, jsonify, send_file, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 from pptx import Presentation
 from reportlab.lib import colors
@@ -162,16 +159,7 @@ def _get_sb():
         if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
             try:
                 from supabase import create_client
-                # postgrest's default timeout is 120s — a slow Supabase would pin a
-                # gunicorn thread (and /api/auth/me) for minutes. Cap it at 10s.
-                try:
-                    from supabase import ClientOptions
-                    _opts = ClientOptions(postgrest_client_timeout=10)
-                except Exception:
-                    _opts = None   # older supabase-py without ClientOptions
-                _sb_client = (create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, options=_opts)
-                              if _opts is not None else
-                              create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY))
+                _sb_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
             except Exception as e:
                 print(f"Supabase init error: {e}", flush=True)
     return _sb_client
@@ -191,92 +179,35 @@ def _get_bearer(req):
     auth = req.headers.get("Authorization", "")
     return auth[7:] if auth.startswith("Bearer ") else None
 
-_jwks_client     = None
-_jwks_lock       = threading.Lock()
-_jwks_last_good  = {}   # kid -> key; used ONLY while the JWKS endpoint is unreachable
-_JWT_LEEWAY      = 10   # seconds of clock skew tolerated on iat/exp
-
+_jwks_client = None
 def _get_jwks_client():
     global _jwks_client
     if _jwks_client is None and SUPABASE_URL:
-        with _jwks_lock:
-            if _jwks_client is None:
-                import jwt as _pyjwt
-                # 10-min JWK-set cache, 5s fetch timeout (default 30s blocks a thread).
-                # cache_keys stays False so a revoked kid is never trusted forever.
-                _jwks_client = _pyjwt.PyJWKClient(
-                    SUPABASE_URL.rstrip("/") + "/auth/v1/.well-known/jwks.json",
-                    lifespan=600, timeout=5)
+        import jwt as _pyjwt
+        _jwks_client = _pyjwt.PyJWKClient(SUPABASE_URL.rstrip("/") + "/auth/v1/.well-known/jwks.json")
     return _jwks_client
 
-def _warm_jwks():
-    """Fetch the JWKS once at boot so the first sign-in doesn't pay for it, and
-    seed the last-good keys used during a JWKS outage."""
-    try:
-        client = _get_jwks_client()
-        if client is None:
-            return
-        for k in client.get_signing_keys():
-            if k.key_id:
-                _jwks_last_good[k.key_id] = k.key
-        _log.info("JWKS warmed (%d key(s)); HS256 fallback %s", len(_jwks_last_good),
-                  "configured" if SUPABASE_JWT_SECRET else "NOT configured")
-    except Exception as exc:
-        _log.warning("JWKS warm-up failed: %s", type(exc).__name__)
-
-if SUPABASE_URL:
-    threading.Thread(target=_warm_jwks, daemon=True, name="jwks-warm").start()
-
-def _jwt_verify(token):
-    """Verify a Supabase-issued JWT → (payload, reason). reason is "" on success,
-    else "missing" | "expired" | "invalid" | "unavailable" (JWKS unreachable and no
-    cached key — a server problem, not a sign-out). Asymmetric (ES/RS/PS/Ed)
-    tokens verify against the project JWKS; HS256 against the shared secret."""
+def _jwt_payload(token):
+    """Verify a Supabase-issued JWT and return the full decoded payload dict,
+    or None. Asymmetric (ES/RS/PS/Ed) tokens verify against the project JWKS;
+    HS256 against the shared secret."""
     if not token:
-        return None, "missing"
-    import jwt as _pyjwt
+        return None
     try:
-        hdr = _pyjwt.get_unverified_header(token)
-        alg = hdr.get("alg", "")
+        import jwt as _pyjwt
+        alg = _pyjwt.get_unverified_header(token).get("alg", "")
         if alg.startswith(("ES", "RS", "PS", "Ed")):
             client = _get_jwks_client()
             if client is None:
-                return None, "invalid"
-            kid = hdr.get("kid")
-            try:
-                key = client.get_signing_key_from_jwt(token).key
-                if kid:
-                    _jwks_last_good[kid] = key
-            except _pyjwt.PyJWKClientConnectionError:
-                key = _jwks_last_good.get(kid)
-                if key is None:
-                    raise
-                _log.warning("JWKS unreachable — verifying with last-good key %s", kid)
-            payload = _pyjwt.decode(token, key, algorithms=[alg], audience="authenticated",
-                                    leeway=_JWT_LEEWAY)
+                return None
+            key = client.get_signing_key_from_jwt(token).key
+            return _pyjwt.decode(token, key, algorithms=[alg], audience="authenticated")
         elif SUPABASE_JWT_SECRET:
-            payload = _pyjwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"],
-                                    audience="authenticated", leeway=_JWT_LEEWAY)
-        else:
-            if alg.startswith("HS"):
-                _log.error("JWT alg %s but SUPABASE_JWT_SECRET unset — rejecting", alg)
-            return None, "invalid"
-        if not isinstance(payload, dict) or not payload.get("sub"):
-            return None, "invalid"
-        return payload, ""
-    except (_pyjwt.ExpiredSignatureError, _pyjwt.ImmatureSignatureError) as e:
-        reason, ename = "expired", type(e).__name__
-    except _pyjwt.PyJWKClientConnectionError as e:
-        reason, ename = "unavailable", type(e).__name__
-    except Exception as e:
-        reason, ename = "invalid", type(e).__name__
-    _log.warning("JWT verify failed: %s on %s", ename,
-                 request.path if has_request_context() else "-")
-    return None, reason
-
-def _jwt_payload(token):
-    """Verified payload dict or None (see _jwt_verify for the failure reason)."""
-    return _jwt_verify(token)[0]
+            return _pyjwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated")
+        return None
+    except Exception as _e:
+        _log.warning("JWT verify failed: %s", type(_e).__name__)
+        return None
 
 def _verify_jwt(token):
     """Return the verified user_id (str) or None."""
@@ -284,12 +215,9 @@ def _verify_jwt(token):
     return payload.get("sub") if payload else None
 
 def _identity_from_jwt(token):
-    """Pull email / display name / avatar from a Google (or other) OAuth JWT."""
-    return _identity_from_payload(_jwt_payload(token))
-
-def _identity_from_payload(p):
-    """Supabase puts these under user_metadata (full_name/name, avatar_url/picture)."""
-    p = p or {}
+    """Pull email / display name / avatar from a Google (or other) OAuth JWT.
+    Supabase puts these under user_metadata (full_name/name, avatar_url/picture)."""
+    p = _jwt_payload(token) or {}
     meta = p.get("user_metadata") or {}
     return {
         "email":  p.get("email") or meta.get("email") or "",
@@ -309,9 +237,6 @@ def _consume_token(user_id):
     try:
         r = sb.rpc("consume_token", {"p_user_id": user_id}).execute()
         d = r.data if isinstance(r.data, dict) else {}
-        if "success" not in d:
-            _log.error("consume_token: unexpected RPC response %r", r.data)
-            return False, 0, "db_error"   # never report a malformed reply as 'no tokens'
         ok = d.get("success", False)
         return ok, d.get("tokens_remaining", 0), d.get("reason", "")
     except Exception as exc:
@@ -363,53 +288,31 @@ def _refund_token(user_id):
         _log.info("Refunded 1 token to %s (-> %s)", user_id, new_bal)
 
 def _get_user(user_id):
-    """Fetch the full user row → dict, or None when the row does NOT exist.
-    A DB error RAISES (callers answer 503 retry) — it must never look like a
-    missing row, or a paying user is shown '0 tokens, Free'."""
+    """Fetch full user row from Supabase."""
     sb = _get_sb()
     if not sb:
         return None
-    r = sb.table("users").select("*").eq("id", user_id).limit(1).execute()
-    rows = r.data if isinstance(r.data, list) else []
-    return rows[0] if rows else None
-
-def _ensure_user_row(user_id, payload=None):
-    """Create a missing users row from the JWT identity (INSERT … ON CONFLICT DO
-    NOTHING — never overwrites an existing row). → True if the insert ran."""
-    sb = _get_sb()
-    if not sb or not user_id:
-        return False
-    if payload is None:
-        payload = getattr(_req_g, "auth_payload", None) if has_request_context() else None
-    ident = _identity_from_payload(payload)
     try:
-        sb.table("users").upsert({
-            "id": user_id, "email": ident["email"],
-            "name": ident["name"] or None, "avatar_url": ident["avatar"] or None,
-        }, ignore_duplicates=True).execute()
-        return True
-    except Exception as exc:
-        _log.error("ensure user row failed for %s: %s", user_id, exc)
-        return False
+        r = sb.table("users").select("*").eq("id", user_id).single().execute()
+        return r.data
+    except Exception:
+        return None
 
 def _get_or_create_referral_code(user_id):
     """Return this user's referral code, generating one if not yet set."""
+    import hashlib
     sb = _get_sb()
     if not sb:
         return None
     try:
-        r = sb.table("users").select("referral_code").eq("id", user_id).limit(1).execute()
-        code = ((r.data or [{}])[0] or {}).get("referral_code")
+        r = sb.table("users").select("referral_code").eq("id", user_id).single().execute()
+        code = (r.data or {}).get("referral_code")
         if code:
             return code
         code = hashlib.sha256(user_id.encode()).hexdigest()[:8].upper()
-        res = sb.table("users").update({"referral_code": code}).eq("id", user_id).execute()
-        if not res.data:   # nothing was stored — don't hand out a code that doesn't exist
-            _log.warning("referral code not stored for %s", user_id)
-            return None
+        sb.table("users").update({"referral_code": code}).eq("id", user_id).execute()
         return code
-    except Exception as exc:
-        _log.error("referral code error for %s: %s", user_id, exc)
+    except Exception:
         return None
 
 def _award_referral(new_subscriber_id, sb):
@@ -430,59 +333,27 @@ def _award_referral(new_subscriber_id, sb):
     except Exception as exc:
         _log.error(f"_award_referral error: {exc}")
 
-# Distinct auth failure codes so the client can refresh its session silently
-# (token_expired / token_invalid), retry later (auth_unavailable) or ask the user
-# to sign in (auth_required) — instead of treating every failure as a sign-out.
-_AUTH_ERRORS = {
-    "missing":     ("Sign in required", "auth_required", 401),
-    "expired":     ("Your session expired — please sign in again.", "token_expired", 401),
-    "invalid":     ("Your session is no longer valid — please sign in again.", "token_invalid", 401),
-    "unavailable": ("Sign-in check is temporarily unavailable — please try again in a moment.",
-                    "auth_unavailable", 503),
-}
-
-def _auth_error(reason):
-    msg, code, status = _AUTH_ERRORS.get(reason) or _AUTH_ERRORS["invalid"]
-    return jsonify({"error": msg, "code": code}), status
-
-def _auth_payload(req):
-    """Verify the request's JWT ONCE → (user_id, payload, error_response | None).
-    When _AUTH_ENABLED is False (local dev), returns ('dev', {}, None)."""
-    if not _AUTH_ENABLED:
-        return "dev", {}, None
-    payload, reason = _jwt_verify(_get_bearer(req))
-    if not payload:
-        return None, None, _auth_error(reason or "invalid")
-    return payload["sub"], payload, None
-
 def _auth_check(req):
     """
     Extract + verify JWT from request.
     Returns (user_id, error_response_tuple | None).
     When _AUTH_ENABLED is False (local dev), always returns ('dev', None).
     """
-    uid, _payload, err = _auth_payload(req)
-    return uid, err
+    if not _AUTH_ENABLED:
+        return "dev", None
+    tok = _get_bearer(req)
+    uid = _verify_jwt(tok)
+    if not uid:
+        return None, (jsonify({"error": "Sign in required", "code": "auth_required"}), 401)
+    return uid, None
 
 def _auth_optional(req):
-    """Tri-state, for endpoints that also allow signed-out users a free quota:
-      user id → token verified;  None → NO token sent (anonymous);
-      False   → a token WAS sent but failed verification. Callers must answer
-                _auth_rejected() — never silently downgrade a signed-in user to
-                the anonymous quota (that showed paying users the sign-up wall)."""
+    """Return a verified user id, or None for anonymous callers (no / invalid token).
+    Used by endpoints that also allow signed-out users a small free quota."""
     if not _AUTH_ENABLED:
         return "dev"
     tok = _get_bearer(req)
-    if not tok:
-        return None
-    payload, reason = _jwt_verify(tok)
-    if has_request_context():
-        _req_g.auth_reason, _req_g.auth_payload = reason, payload
-    return payload["sub"] if payload else False
-
-def _auth_rejected():
-    """Response for a Bearer token that _auth_optional rejected (uid is False)."""
-    return _auth_error(getattr(_req_g, "auth_reason", "") or "invalid")
+    return _verify_jwt(tok) if tok else None
 
 # ── Anonymous (no-login) free credits ──────────────────────────────────────────
 # Let visitors try the product a few times without an account. Tracked per-IP in
@@ -563,100 +434,17 @@ def _anon_durable_remaining(dev):
     except Exception:
         return None
 
-def _anon_durable_refund(dev):
-    """Give back one durable device preview (anon_refund, migration 012).
-    Best-effort: if the RPC isn't installed yet, log and carry on — a refund
-    failure must never break the error path that called it."""
-    if not dev:
-        return
-    sb = _get_sb()
-    if sb is None:
-        return
-    try:
-        sb.rpc("anon_refund", {"p_key": f"dev:{dev}"}).execute()
-    except Exception as exc:
-        _log.warning("anon durable refund failed (migration 012 applied?): %s", exc)
-
-def _refund_credit(uid, ip, dev=None):
-    """Refund one credit to the store that was charged: the account (uid), the
-    durable device quota (dev) or the in-memory per-IP quota (ip)."""
+def _refund_credit(uid, ip):
+    """Refund one credit to whoever was charged — signed-in user or anon IP."""
     if uid:
         _refund_token(uid)
-    elif dev:
-        _anon_durable_refund(dev)   # the per-IP list was never charged — leave it
     elif ip:
         _anon_refund(ip)
-
-class _Charge:
-    """One credit spent before a generation, and the store it came from.
-    refund() is idempotent, so an exception plus a client disconnect (or the
-    youtube → text delegation) can never refund the same credit twice."""
-    def __init__(self, uid=None, ip=None, dev=None, tok_left=None):
-        self.uid, self.ip, self.dev, self.tok_left = uid, ip, dev, tok_left
-        self._settled = False
-        self._lock = threading.Lock()
-
-    def settle(self):
-        """The guide was delivered — the credit stays spent."""
-        with self._lock:
-            self._settled = True
-
-    def refund(self):
-        with self._lock:
-            if self._settled:
-                return False
-            self._settled = True
-        _refund_credit(self.uid, self.ip, self.dev)
-        return True
-
-def _charge_credit(uid, req):
-    """Spend one credit before a generation → (_Charge, None) or (None, response).
-    Signed-in: one account token — a DB error is 503 'retry' (never a fake
-    'no tokens'), a missing users row is created and the charge retried once,
-    and only a real 'no_tokens' is 402. Anonymous: the durable device quota,
-    falling back to the in-memory per-IP quota."""
-    if uid:
-        ok, tok_left, reason = _consume_token(uid)
-        if not ok and reason == "user_not_found":
-            _ensure_user_row(uid)
-            ok, tok_left, reason = _consume_token(uid)
-            if not ok and reason == "user_not_found":
-                reason = "db_error"   # row still missing → retryable, not 'pay up'
-        if ok:
-            return _Charge(uid=uid, tok_left=tok_left), None
-        if reason == "no_tokens":
-            return None, (jsonify({
-                "error": "You have no tokens left. Upgrade to continue.",
-                "code": "no_tokens", "tokens_remaining": 0
-            }), 402)
-        return None, (jsonify({
-            "error": "Couldn't reach your account — please try again in a moment.",
-            "code": "retry"
-        }), 503)
-    ip  = _client_ip()
-    dev = _device_id(req)
-    dur = _anon_durable_consume(dev)
-    if dur is not None:
-        ok, tok_left = dur
-    else:
-        dev = None    # durable store unavailable → the per-IP list is what gets charged
-        ok, tok_left = _anon_consume(ip)
-    if not ok:
-        return None, (jsonify({
-            "error": "You've used your free previews. Sign up free to get more.",
-            "code": "signin_for_more", "tokens_remaining": 0
-        }), 402)
-    return _Charge(ip=ip, dev=dev, tok_left=tok_left), None
 
 app = Flask(__name__, static_folder=DIST, static_url_path="")
 app.config['SECRET_KEY'] = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload limit
 CORS(app, origins=[APP_URL, "http://localhost:5173", "http://127.0.0.1:5173"])
-
-@app.errorhandler(413)
-def _too_large(_e):
-    # Werkzeug's default is an HTML page the client shows as "Server error 413".
-    return jsonify({"error": "File is over 50 MB — compress or split it.", "code": "too_large"}), 413
 
 # Security headers on every response
 @app.after_request
@@ -851,27 +639,6 @@ def _bump_visit_async():
         except Exception as exc:
             _log.error("visit bump failed: %s", exc)
     threading.Thread(target=_do, daemon=True).start()
-
-_CANONICAL_ORIGIN   = "https://alimne.app"
-# Escape hatch: CANONICAL_REDIRECT=0 turns the redirect off without a code change.
-_CANONICAL_REDIRECT = os.environ.get("CANONICAL_REDIRECT", "1") != "0"
-
-@app.before_request
-def _canonical_host():
-    # The raw Render origin must not serve the app: its session/localStorage is
-    # separate from alimne.app's and OAuth returns to a different origin. Only
-    # GET/HEAD page loads move (a 301 would turn API POSTs into GETs); /healthz
-    # stays reachable for Render's probe. Registered first so it runs first.
-    if not _CANONICAL_REDIRECT or request.method not in ("GET", "HEAD") \
-            or request.path == "/healthz" or request.path.startswith("/api/"):
-        return None
-    host = (request.host or "").split(":")[0].lower()
-    if host.endswith(".onrender.com"):
-        from urllib.parse import quote
-        qs = request.query_string.decode("latin-1")
-        path = quote(request.path, safe="/%:@!$&'()*+,;=-._~")
-        return redirect(_CANONICAL_ORIGIN + path + ("?" + qs if qs else ""), 301)
-    return None
 
 @app.before_request
 def track_visitor():
@@ -1675,16 +1442,16 @@ def _groq_pace(est_tokens):
         time.sleep(max(1.0, min(wait, 35)))
 
 def store_job(job_id, pdf_bytes, md_text, guide, slides, filename):
-    # `slides` (the raw extracted upload text) is never read back — don't keep
-    # it in memory at all. The parameter stays for call-site compatibility.
     ts = time.time()
     with _jobs_lock:
         _jobs[job_id] = {
             "pdf": pdf_bytes, "md": md_text,
-            "guide": guide,   "slides": None,
+            "guide": guide,   "slides": slides,
             "filename": filename, "ts": ts
         }
-    _purge_expired_jobs()
+        stale = [k for k, v in list(_jobs.items()) if time.time() - v["ts"] > _JOB_TTL]
+        for k in stale:
+            del _jobs[k]
 
 def get_job(job_id):
     with _jobs_lock:
@@ -1693,75 +1460,6 @@ def get_job(job_id):
             del _jobs[job_id]
             return None
     return job
-
-def _job_expires_in(job):
-    """Seconds left before this job is purged (TTL counts from creation)."""
-    return max(0, int(_JOB_TTL - (time.time() - job["ts"])))
-
-def _purge_expired_jobs():
-    now = time.time()
-    with _jobs_lock:
-        for k in [k for k, v in _jobs.items() if now - v["ts"] > _JOB_TTL]:
-            _jobs.pop(k, None)
-
-def _job_sweeper():
-    # Without traffic nothing called store_job/get_job, so expired guides sat in
-    # RAM long past the promised 15 minutes. Sweep every minute.
-    while True:
-        time.sleep(60)
-        try:
-            _purge_expired_jobs()
-        except Exception:
-            _log.error("job sweeper error:\n%s", _tb.format_exc())
-
-threading.Thread(target=_job_sweeper, daemon=True, name="job-sweeper").start()
-
-def _job_expired_json():
-    """Contract: every job-dependent JSON endpoint answers 404 code 'expired'."""
-    return jsonify({"error": "This guide has expired (guides are kept for 15 minutes) — "
-                             "restore or regenerate it.", "code": "expired"}), 404
-
-# ── Signed guide copies (client-held restore) ───────────────────────────────────
-# GET /api/guide returns the guide as a canonical JSON string (guide_blob) plus
-# an HMAC (sig). The browser keeps that copy in its own tab; after the 15-minute
-# job expires (or a deploy wipes memory) POST /api/rehydrate verifies the HMAC
-# and rebuilds the PDF under a NEW job id — no LLM call, no credit, and nothing
-# kept server-side beyond the usual in-memory 15-minute job.
-_GUIDE_KEYS     = ("title", "subtitle", "sections", "flashcards", "mcqs",
-                   "keywords", "objectives", "language")
-_GUIDE_BLOB_MAX = 600 * 1024   # bytes (UTF-8)
-
-def _guide_signing_key():
-    k = os.environ.get("GUIDE_SIGNING_KEY", "")
-    if k:
-        return k.encode("utf-8")
-    base = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_JWT_SECRET
-    if base:   # stable across deploys without a new env var
-        return hashlib.sha256(b"alimne-guide-v1|" + base.encode("utf-8")).digest()
-    return b""   # no key → rehydrate disabled (503) and no sig is issued
-
-_GUIDE_KEY = _guide_signing_key()
-
-def _guide_public(guide):
-    """The guide fields the client may hold (same defaults as /api/guide)."""
-    guide = guide or {}
-    return {
-        "title":      guide.get("title", "") or "",
-        "subtitle":   guide.get("subtitle", "") or "",
-        "sections":   guide.get("sections",   []) or [],
-        "flashcards": guide.get("flashcards", []) or [],
-        "mcqs":       guide.get("mcqs",       []) or [],
-        "keywords":   guide.get("keywords",   []) or [],
-        "objectives": guide.get("objectives", []) or [],
-        "language":   guide.get("language", "en") or "en",
-    }
-
-def _guide_blob(guide, filename):
-    return json.dumps({"v": 1, "filename": filename, "guide": _guide_public(guide)},
-                      sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-
-def _guide_sig(blob):
-    return hmac.new(_GUIDE_KEY, blob.encode("utf-8"), hashlib.sha256).hexdigest()
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY        = colors.HexColor('#0a1628')
@@ -3013,115 +2711,45 @@ def build_pdf(guide, language, out_filename="study_guide"):
 
 
 # ── Public config endpoint ────────────────────────────────────────────────────
-# /api/config gates the whole sign-in UI, so it must never wait on the DB. The
-# durable anon counter runs on a small pool with a short deadline; a slow or
-# down Supabase just falls back to the in-memory count (the free limit for a
-# fresh visitor). In-flight lookups are capped so a hung DB can't pile up work.
-_cfg_pool          = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cfg")
-_cfg_inflight      = [0]
-_cfg_inflight_lock = threading.Lock()
-_CFG_RPC_TIMEOUT   = 1.5
-_CFG_MAX_INFLIGHT  = 8
-
-def _anon_durable_remaining_fast(dev):
-    if not dev or _get_sb() is None:
-        return None
-    with _cfg_inflight_lock:
-        if _cfg_inflight[0] >= _CFG_MAX_INFLIGHT:
-            return None
-        _cfg_inflight[0] += 1
-    def _run():
-        try:
-            return _anon_durable_remaining(dev)
-        finally:
-            with _cfg_inflight_lock:
-                _cfg_inflight[0] -= 1
-    try:
-        fut = _cfg_pool.submit(_run)
-    except Exception:
-        with _cfg_inflight_lock:
-            _cfg_inflight[0] -= 1
-        return None
-    try:
-        return fut.result(timeout=_CFG_RPC_TIMEOUT)
-    except Exception:
-        return None   # timeout/error → caller falls back
-
 @app.route("/api/config")
 def api_config():
     """Return public keys the frontend needs to initialise Supabase and Stripe."""
-    d = _anon_durable_remaining_fast(_device_id(request))
     return jsonify({
         "supabase_url":          SUPABASE_URL,
         "supabase_anon_key":     SUPABASE_ANON_KEY,
         "stripe_publishable_key": STRIPE_PUBLISHABLE_KEY,
         "auth_enabled":          _AUTH_ENABLED,
         "anon_free_limit":       ANON_FREE_LIMIT,
-        "anon_remaining":        d if d is not None else _anon_remaining(_client_ip()),
+        "anon_remaining":        (lambda d: d if d is not None else _anon_remaining(_client_ip()))(
+                                     _anon_durable_remaining(_device_id(request))),
     })
 
 
 # ── Auth — current user ────────────────────────────────────────────────────────
-def _parse_ts(v):
-    """ISO timestamp from Supabase → aware datetime (UTC if naive), or None."""
-    from datetime import datetime, timezone
-    if not v:
-        return None
-    s = str(v).strip().replace("Z", "+00:00").replace(" ", "T", 1)
-    try:
-        d = datetime.fromisoformat(s)
-    except ValueError:
-        try:   # Python < 3.11 only takes 3 or 6 fractional digits — drop them
-            d = datetime.fromisoformat(re.sub(r"\.\d+", "", s, count=1))
-        except ValueError:
-            return None
-    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
-
-def _effective_plan_tokens(user, now=None):
-    """(plan, tokens) as the consume_token RPC would see them (migrations 006/010):
-    Pro = status 'active' and period_end unset or in the future; on a new UTC
-    month the balance resets to 30 (Pro) or 3 (free). auth_me only READS this —
-    the RPC still owns the actual reset on the next generation."""
-    from datetime import datetime, timezone
-    now = now or datetime.now(timezone.utc)
-    pe = _parse_ts(user.get("subscription_period_end"))
-    active = user.get("subscription_status") == "active" and (pe is None or pe > now)
-    tokens = user.get("tokens_remaining") or 0
-    if user.get("tokens_month") != now.strftime("%Y-%m"):
-        tokens = 30 if active else 3
-    return ("pro" if active else "free"), tokens
-
-def _retry_503(msg="Couldn't load your account — please try again in a moment."):
-    return jsonify({"error": msg, "code": "retry"}), 503
-
 @app.route("/api/auth/me")
 def auth_me():
-    uid, payload, err = _auth_payload(request)   # verify the token once
+    uid, err = _auth_check(request)
     if err:
         return err
     if uid == "dev":
         return jsonify({"email": "dev@local", "name": "Dev", "tokens_remaining": 999,
-                        "subscription_status": "active", "plan": "pro",
-                        "referral_code": "DEVLOCAL"})
-    ident = _identity_from_payload(payload)
+                        "subscription_status": "active", "referral_code": "DEVLOCAL"})
+    ident = _identity_from_jwt(_get_bearer(request))
+    user  = _get_user(uid)
     sb    = _get_sb()
-    try:
-        user = _get_user(uid)
-        if not user and sb:
-            # Row missing (signup trigger didn't run) — create it from the token.
-            # ON CONFLICT DO NOTHING: never overwrite a row we merely failed to read.
-            sb.table("users").upsert({
-                "id": uid, "email": ident["email"],
-                "name": ident["name"] or None, "avatar_url": ident["avatar"] or None,
-            }, ignore_duplicates=True).execute()
-            user = _get_user(uid)
-    except Exception as exc:
-        _log.error("auth_me account read failed for %s: %s", uid, exc)
-        return _retry_503()
     if not user:
-        # Never answer with a field-less row (it showed paying users '0 · Free').
-        return _retry_503()
-    if sb:
+        # Row missing (signup trigger didn't run) — create it from the token.
+        if sb:
+            try:
+                sb.table("users").upsert({
+                    "id": uid, "email": ident["email"],
+                    "name": ident["name"], "avatar_url": ident["avatar"],
+                }).execute()
+            except Exception as exc:
+                _log.error("auth_me create-user failed: %s", exc)
+        user = _get_user(uid) or {"id": uid, "email": ident["email"],
+                                  "name": ident["name"], "avatar_url": ident["avatar"]}
+    elif sb:
         # Backfill name/avatar/email from Google if we don't have them yet.
         patch = {}
         if ident["name"]   and not user.get("name"):       patch["name"]       = ident["name"]
@@ -3134,16 +2762,12 @@ def auth_me():
             except Exception as exc:
                 _log.error("auth_me backfill failed: %s", exc)
     ref_code = user.get("referral_code") or _get_or_create_referral_code(uid)
-    plan, tokens = _effective_plan_tokens(user)
     return jsonify({
         "id":                      user["id"],
-        "email":                   user.get("email") or "",
+        "email":                   user["email"],
         "name":                    user.get("name") or "",
         "avatar_url":              user.get("avatar_url") or "",
-        # Effective balance: applies the month-rollover reset the consume_token
-        # RPC would apply, so the badge isn't '0' on the 1st of the month.
-        "tokens_remaining":        tokens,
-        "plan":                    plan,   # 'pro' only while the paid period is current
+        "tokens_remaining":        user.get("tokens_remaining", 0),
         "subscription_status":     user.get("subscription_status", "free"),
         "subscription_period_end": str(user.get("subscription_period_end") or ""),
         # Lets the Account panel offer "Manage / cancel subscription" to anyone
@@ -3211,11 +2835,7 @@ def stripe_checkout():
     if not _stripe or not STRIPE_PRICE_ID:
         return jsonify({"error": "Payments not configured"}), 503
 
-    try:
-        user = _get_user(uid)
-    except Exception as exc:
-        _log.error("checkout account read failed for %s: %s", uid, exc)
-        return _retry_503("Couldn't reach your account — please try again in a moment.")
+    user = _get_user(uid)
     if not user:
         return jsonify({"error": "User not found"}), 404
 
@@ -3271,11 +2891,7 @@ def stripe_portal():
     if not _stripe:
         return jsonify({"error": "Payments not configured"}), 503
 
-    try:
-        user = _get_user(uid)
-    except Exception as exc:
-        _log.error("portal account read failed for %s: %s", uid, exc)
-        return _retry_503("Couldn't reach your account — please try again in a moment.")
+    user = _get_user(uid)
     if not user or not user.get("stripe_customer_id"):
         return jsonify({"error": "No billing account found"}), 404
 
@@ -3455,40 +3071,33 @@ def capture_lead():
 def _sse(data):
     return f"data: {json.dumps(data)}\n\n"
 
-def _require_notes(sections, charged=True):
-    """If every section came back without notes (pass2 failed throughout), the
-    guide is hollow: raise a user-facing error so the caller refunds it instead
-    of reporting a charged 'Ready'."""
-    if not any(isinstance(s, dict) and s.get("bullets") for s in sections):
-        raise ValueError(
-            "The AI couldn't build notes for this file right now — your credit was "
-            "returned, please try again." if charged else
-            "The AI couldn't build notes right now — please try again.")
-
-def _is_partial(overview, include_quiz, include_mcq):
-    """Flash cards / quiz were requested but came back empty."""
-    return bool((include_quiz and not overview.get("flashcards")) or
-                (include_quiz and include_mcq and not overview.get("mcqs")))
-
 @app.route("/api/summarize-stream", methods=["POST"])
 def summarize_stream():
     if not _check_rate_limit(_client_ip(), scope="summarize", limit=_RATE_MAX):
         return jsonify({"error": "Too many requests. Please wait a minute before trying again."}), 429
-    # Verify the token BEFORE parsing the (possibly long) upload, so a token that
-    # was fresh at click time is judged now — and a rejected token is a 401, not
-    # a silent downgrade to the anonymous quota.
-    uid = _auth_optional(request)
-    if uid is False:
-        return _auth_rejected()
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
     # ── Credit gate: signed-in users spend a token; anonymous users get a
-    #    small free quota per device/IP so they can try without an account. ────
-    charge, err = _charge_credit(uid, request)
-    if err:
-        return err
-    tok_left = charge.tok_left
+    #    small free quota per IP so they can try without an account. ───────────
+    uid = _auth_optional(request)
+    anon_ip = None
+    if uid:
+        ok, tok_left, reason = _consume_token(uid)
+        if not ok:
+            return jsonify({
+                "error": "You have no tokens left. Upgrade to continue.",
+                "code": "no_tokens", "tokens_remaining": 0
+            }), 402
+    else:
+        anon_ip = _client_ip()
+        _dur = _anon_durable_consume(_device_id(request))
+        ok, tok_left = _dur if _dur is not None else _anon_consume(anon_ip)
+        if not ok:
+            return jsonify({
+                "error": "You've used your free previews. Sign up free to get more.",
+                "code": "signin_for_more", "tokens_remaining": 0
+            }), 402
 
     _log_usage_async("user" if uid else "anon", "file")
     f            = request.files["file"]
@@ -3501,26 +3110,21 @@ def summarize_stream():
 
     _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
     if not f.filename.lower().endswith(_ALLOWED_EXT):
-        charge.refund()
+        _refund_credit(uid, anon_ip)
         return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
 
     if not ollama_running():
-        charge.refund()
+        _refund_credit(uid, anon_ip)
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
 
     file_bytes = f.read()
 
     def generate():
-        # Single-owner refund guard: every exit either delivers 'done' (settled)
-        # or refunds exactly once — including a client disconnect, which arrives
-        # as GeneratorExit (a BaseException the `except Exception` never sees).
-        settled = False
         try:
             yield _sse({"step": "extract", "msg": "Extracting content…"})
             slides = extract_slides(io.BytesIO(file_bytes), filename=f.filename)
             if not any(s["content"] or s["title"] for s in slides):
-                settled = True
-                charge.refund()
+                _refund_credit(uid, anon_ip)
                 yield _sse({"error": "No readable content in this file"}); return
 
             total = len([s for s in slides if s["content"].strip()])
@@ -3562,7 +3166,6 @@ def summarize_stream():
 
             for evt in _sections_parallel(sections, content_slides, language, dcfg):
                 yield _sse(evt)
-            _require_notes(sections)   # no notes at all → refunded error, not a hollow 'Ready'
 
             for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz, include_mcq):
                 yield _sse(evt)
@@ -3575,29 +3178,19 @@ def summarize_stream():
             md_text   = build_markdown(overview)
 
             job_id = uuid.uuid4().hex
-            store_job(job_id, pdf_bytes, md_text, overview, None, f"{out_name}_study_guide.pdf")
+            store_job(job_id, pdf_bytes, md_text, overview, slides, f"{out_name}_study_guide.pdf")
 
-            done = {"step": "done", "job_id": job_id,
-                    "tokens_remaining": tok_left,
-                    "sections":   len(sections),
-                    "keywords":   len(overview.get("keywords",   [])),
-                    "flashcards": len(overview.get("flashcards", [])),
-                    "mcqs":       len(overview.get("mcqs",       []))}
-            if _is_partial(overview, include_quiz, include_mcq):
-                done["partial"] = True
-            yield _sse(done)
-            settled = True
-            charge.settle()
+            yield _sse({"step": "done", "job_id": job_id,
+                        "tokens_remaining": tok_left,
+                        "sections":   len(sections),
+                        "keywords":   len(overview.get("keywords",   [])),
+                        "flashcards": len(overview.get("flashcards", [])),
+                        "mcqs":       len(overview.get("mcqs",       []))})
 
         except Exception as e:
-            settled = True
             _log.error("GENERATE_ERROR: %s\n%s", e, _tb.format_exc())
-            charge.refund()
+            _refund_credit(uid, anon_ip)
             yield _sse({"error": _safe_err(e)})
-        finally:
-            if not settled:
-                _log.info("summarize stream closed early (client gone) — refunding")
-                charge.refund()
 
     return Response(
         stream_with_context(generate()),
@@ -3614,7 +3207,7 @@ def download_job(job_id):
     filename = _safe_name(request.args.get("filename", "study_guide"))
     job = get_job(job_id)
     if not job:
-        return _job_expired_json()
+        return jsonify({"error": "File not found or expired"}), 404
     if fmt == "md":
         content = (job.get("md") or "").encode("utf-8")
         return send_file(io.BytesIO(content), mimetype="text/markdown",
@@ -3640,10 +3233,9 @@ def get_guide(job_id):
     with _jobs_lock:
         job = get_job(job_id)
     if not job:
-        return _job_expired_json()
-    guide    = job.get("guide", {})
-    filename = job.get("filename") or "study_guide.pdf"
-    out = {
+        return jsonify({"error": "Session expired — re-upload the file"}), 404
+    guide = job.get("guide", {})
+    return jsonify({
         "title":      guide.get("title", ""),
         "subtitle":   guide.get("subtitle", ""),
         "sections":   guide.get("sections",   []),
@@ -3652,68 +3244,7 @@ def get_guide(job_id):
         "keywords":   guide.get("keywords",   []),
         "objectives": guide.get("objectives", []),
         "language":   guide.get("language", "en"),
-        # Client-held, HMAC-signed copy for POST /api/rehydrate after expiry.
-        "guide_blob": _guide_blob(guide, filename),
-        "filename":   filename,
-        "expires_in": _job_expires_in(job),
-    }
-    if _GUIDE_KEY:
-        out["sig"] = _guide_sig(out["guide_blob"])
-    return jsonify(out)
-
-
-@app.route("/api/rehydrate", methods=["POST"])
-def rehydrate_guide():
-    """Rebuild an expired guide from the browser's own signed copy (see
-    _guide_blob). Free — never consumes a credit — and it stores nothing beyond
-    the usual 15-minute in-memory job, under a NEW job id."""
-    if not _GUIDE_KEY:
-        return jsonify({"error": "Restoring guides is unavailable right now.", "code": "unavailable"}), 503
-    if not _check_rate_limit(_client_ip(), scope="rehydrate", limit=20):
-        return jsonify({"error": "Too many requests. Please wait a moment.", "code": "rate_limited"}), 429
-    # Cheap pre-check before parsing: JSON-escaping can at most ~double the blob.
-    if (request.content_length or 0) > 3 * _GUIDE_BLOB_MAX:
-        return jsonify({"error": "This guide is too large to restore.", "code": "too_large"}), 413
-    data = request.get_json(silent=True)
-    blob = data.get("guide_blob") if isinstance(data, dict) else None
-    sig  = data.get("sig") if isinstance(data, dict) else None
-    if not isinstance(blob, str) or not isinstance(sig, str) or not blob or not sig:
-        return jsonify({"error": "Missing guide data.", "code": "bad_request"}), 400
-    raw = blob.encode("utf-8")
-    if len(raw) > _GUIDE_BLOB_MAX:
-        return jsonify({"error": "This guide is too large to restore.", "code": "too_large"}), 413
-    # HMAC over the EXACT received string; compare bytes so a non-ASCII sig
-    # can't make compare_digest raise.
-    expected = hmac.new(_GUIDE_KEY, raw, hashlib.sha256).hexdigest().encode("ascii")
-    if not hmac.compare_digest(expected, sig.encode("utf-8")):
-        return jsonify({"error": "This guide copy could not be verified.", "code": "bad_signature"}), 403
-    try:
-        obj = json.loads(blob)
-        src = obj.get("guide") if isinstance(obj, dict) else None
-        if obj.get("v") != 1 or not isinstance(src, dict):
-            raise ValueError("bad shape")
-    except Exception:
-        return jsonify({"error": "Unreadable guide data.", "code": "bad_request"}), 400
-
-    guide = _guide_public(src)
-    for k in ("sections", "flashcards", "mcqs", "keywords", "objectives"):
-        if not isinstance(guide[k], list):
-            guide[k] = []
-    lang = "ar" if guide.get("language") == "ar" else "en"
-    guide["language"] = lang
-    fname = _safe_name(str(obj.get("filename") or "study_guide.pdf"), 120)
-    if not fname.lower().endswith(".pdf"):
-        fname += ".pdf"
-    try:
-        pdf_bytes = build_pdf(guide, lang).read()
-        md_text   = build_markdown(guide)
-    except Exception:
-        _log.error("rehydrate rebuild failed:\n%s", _tb.format_exc())
-        return jsonify({"error": "Couldn't restore this guide — please regenerate it.",
-                        "code": "rebuild_failed"}), 500
-    job_id = uuid.uuid4().hex
-    store_job(job_id, pdf_bytes, md_text, guide, None, fname)
-    return jsonify({"job_id": job_id, "expires_in": _JOB_TTL, "filename": fname})
+    })
 
 
 # ── Shareable public guides ────────────────────────────────────────────────────
@@ -3737,14 +3268,12 @@ def share_guide(job_id):
     with _jobs_lock:
         job = get_job(job_id)
     if not job:
-        return _job_expired_json()
+        return jsonify({"error": "Session expired — re-generate the guide to share it."}), 404
     sb = _get_sb()
     if sb is None:
         return jsonify({"error": "Sharing is temporarily unavailable."}), 503
     guide = job.get("guide") or {}
-    # Sharing works signed out too: a rejected token (False) just shares anonymously,
-    # and created_by must never be False.
-    uid   = _auth_optional(request) or None
+    uid   = _auth_optional(request)
     lang  = "ar" if guide.get("language") == "ar" else "en"
     payload = {
         "title":      guide.get("title", ""),      "subtitle":   guide.get("subtitle", ""),
@@ -3987,7 +3516,7 @@ def chat_with_slides(job_id):
     with _jobs_lock:
         job = get_job(job_id)
     if not job:
-        return _job_expired_json()
+        return jsonify({"error": "Session expired — re-upload the file"}), 404
 
     # Build rich context from guide (sections + keywords) rather than raw slide chunks
     guide   = job.get("guide") or {}
@@ -4033,29 +3562,21 @@ Rules:
         return jsonify({"error": _safe_err(e)}), 500
 
 
-# (/api/download-zip was removed: the shipped frontend never called it, and it
-# read _jobs directly — serving expired guides past the 15-minute TTL.)
+@app.route("/api/download-zip", methods=["POST"])
+def download_zip():
+    import zipfile as zf
+    job_ids = [jid for jid in (request.json or {}).get("job_ids", []) if _valid_job(jid)]
+    buf = io.BytesIO()
+    with zf.ZipFile(buf, "w", zf.ZIP_DEFLATED) as z:
+        with _jobs_lock:
+            for jid in job_ids:
+                job = _jobs.get(jid)
+                if job and job.get("pdf"):
+                    z.writestr(job["filename"], job["pdf"])
+    buf.seek(0)
+    return send_file(buf, mimetype="application/zip", as_attachment=True,
+                     download_name="study_guides.zip")
 
-_VIEW_EXPIRED_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Guide expired · Alimne</title>
-<style>
-  body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#f8faff;color:#0a1628;
-       margin:0;padding:2rem 1.25rem;line-height:1.7}
-  .box{max-width:560px;margin:3rem auto;background:#fff;border:1px solid #c5d8ff;border-radius:14px;padding:1.5rem 1.6rem}
-  h1{font-size:1.25rem;color:#1a3a6e;margin:0 0 .4rem}
-  p{margin:.2rem 0 1rem;color:#4a5f80}
-  .ar{direction:rtl;text-align:right;border-top:1px solid #dde8ff;padding-top:1rem;margin-top:1rem}
-  a.btn{display:inline-block;background:#4f8ef7;color:#fff;text-decoration:none;padding:.6rem 1.1rem;border-radius:10px;font-weight:600}
-</style></head><body><div class="box">
-<h1>This guide has expired</h1>
-<p>For your privacy, guides are kept for 15 minutes. Go back to Alimne to restore or regenerate it.</p>
-<div class="ar" lang="ar" dir="rtl">
-<h1>انتهت صلاحية هذا الدليل</h1>
-<p>حفاظًا على خصوصيتك نحتفظ بالأدلة لمدة 15 دقيقة فقط. ارجع إلى علّمني لاستعادته أو إنشائه من جديد.</p>
-</div>
-<p style="margin-top:1.2rem"><a class="btn" href="https://alimne.app/">Back to Alimne · العودة إلى علّمني</a></p>
-</div></body></html>"""
 
 @app.route("/api/view/md/<job_id>")
 def view_md(job_id):
@@ -4064,8 +3585,7 @@ def view_md(job_id):
     with _jobs_lock:
         job = get_job(job_id)
     if not job:
-        return _VIEW_EXPIRED_HTML, 404, {"Content-Type": "text/html; charset=utf-8"}
-    is_ar = (job.get("guide") or {}).get("language") == "ar"
+        return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired (10 min TTL)</h2>", 404
     title = _he(job["guide"].get("title", "Study Guide"))
     md = job["md"]
 
@@ -4083,18 +3603,14 @@ def view_md(job_id):
             elif l.startswith('- ') or l.startswith('* '):
                 out.append(f'<li>{_inline(_he(l[2:]))}</li>')
             elif l.startswith('| ') and '|' in l[2:]:
-                # Collect the whole table and wrap it — bare <tr> outside a
-                # <table> is dropped by the HTML parser. th only for the header.
-                rows = []
+                rows, align = [], l
                 while i < len(lines) and lines[i].startswith('|'):
                     if not re.match(r'^\|[-| :]+\|$', lines[i]):
                         cells = [c.strip() for c in lines[i].strip('|').split('|')]
-                        tag = 'th' if not rows else 'td'
-                        rows.append('<tr>' + ''.join(f'<{tag}>{_inline(_he(c))}</{tag}>' for c in cells) + '</tr>')
+                        tag = 'th' if rows == [] else 'td'
+                        out.append('<tr>' + ''.join(f'<{tag}>{_inline(_he(c))}</{tag}>' for c in cells) + '</tr>')
                     i += 1
                 i -= 1
-                if rows:
-                    out.append('<table>' + ''.join(rows) + '</table>')
             elif l.strip() == '':
                 out.append('<br>')
             else:
@@ -4109,21 +3625,17 @@ def view_md(job_id):
         return t
 
     body = _md_to_html(md)
-    lang, dirn = ("ar", "rtl") if is_ar else ("en", "ltr")
-    return f"""<!DOCTYPE html><html lang="{lang}" dir="{dirn}"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>{title}</title>
 <style>
   body{{font-family:'Segoe UI',system-ui,sans-serif;max-width:820px;margin:0 auto;padding:2rem;
        background:#f8faff;color:#0a1628;line-height:1.7}}
-  @media (max-width:600px){{body{{padding:1rem}} table{{display:block;overflow-x:auto}}}}
   h1{{font-size:1.7rem;color:#1a3a6e;border-bottom:2px solid #c5d8ff;padding-bottom:.5rem}}
   h2{{font-size:1.2rem;color:#2e5ca8;margin-top:1.8rem;border-left:4px solid #4f8ef7;padding-left:.75rem}}
-  [dir=rtl] h2{{border-left:0;border-right:4px solid #4f8ef7;padding-left:0;padding-right:.75rem}}
   h3{{font-size:1rem;color:#1a3a6e}}
   li{{margin-bottom:.35rem}}
   table{{border-collapse:collapse;width:100%;margin:1rem 0}}
-  th{{background:#1a3a6e;color:#fff;padding:8px 12px;text-align:start}}
+  th{{background:#1a3a6e;color:#fff;padding:8px 12px;text-align:left}}
   td{{padding:7px 12px;border-bottom:1px solid #dde8ff}}
   tr:nth-child(even) td{{background:#f0f5ff}}
   code{{background:#e8f0ff;padding:1px 5px;border-radius:4px;font-size:.9em}}
@@ -4507,25 +4019,15 @@ def _extract_video_id(url):
     return None
 
 
-def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True, include_mcq=True, uid=None, anon_ip=None, charge=None):
-    """Shared SSE generator for YouTube/text endpoints. `charge` is the credit
-    spent for this run (None for the free demo); it is refunded exactly once on
-    any failure or early disconnect (_Charge.refund is idempotent, so the
-    youtube wrapper's own guard can never double-refund)."""
+def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True, include_mcq=True, uid=None, anon_ip=None):
+    """Shared SSE generator for YouTube/text endpoints."""
     _dcfg = dcfg or DETAIL["standard"]
-    if charge is None and (uid or anon_ip):
-        charge = _Charge(uid=uid, ip=anon_ip, tok_left=tok_left)
-    def _refund():
-        if charge is not None:
-            charge.refund()
     def generate():
-        settled = False
         try:
             yield _sse({"step": "extract", "msg": "Preparing content…"})
             slides = _text_to_slides(text)
             if not slides:
-                settled = True
-                _refund()
+                _refund_credit(uid, anon_ip)
                 yield _sse({"error": "No content extracted"}); return
             yield _sse({"step": "extract", "msg": f"Split into {len(slides)} segments — analysing…"})
 
@@ -4553,7 +4055,6 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             sections = overview["sections"]
             for evt in _sections_parallel(sections, slides, language, dcfg):
                 yield _sse(evt)
-            _require_notes(sections, charged=charge is not None)
 
             for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz, include_mcq):
                 yield _sse(evt)
@@ -4565,7 +4066,7 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             md_text = build_markdown(overview)
 
             job_id = uuid.uuid4().hex
-            store_job(job_id, pdf_bytes, md_text, overview, None, f"{out_name}_study_guide.pdf")
+            store_job(job_id, pdf_bytes, md_text, overview, slides, f"{out_name}_study_guide.pdf")
 
             done_data = {"step": "done", "job_id": job_id,
                          "sections":   len(sections),
@@ -4574,37 +4075,13 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
                          "mcqs":       len(overview.get("mcqs",       []))}
             if tok_left is not None:
                 done_data["tokens_remaining"] = tok_left
-            if _is_partial(overview, include_quiz, include_mcq):
-                done_data["partial"] = True
             yield _sse(done_data)
-            settled = True
-            if charge is not None:
-                charge.settle()
 
         except Exception as e:
-            settled = True
             _log.error("STREAM_TEXT_ERROR: %s\n%s", e, _tb.format_exc())
-            _refund()
+            _refund_credit(uid, anon_ip)
             yield _sse({"error": _safe_err(e)})
-        finally:
-            if not settled:
-                _log.info("text stream closed early (client gone) — refunding")
-                _refund()
     return generate
-
-
-def _yt_friendly_err(e):
-    """User-facing text for a YouTube-phase failure — never raw yt-dlp/HTTP text
-    (it leaked internal URLs and 'sign in to confirm you're not a bot')."""
-    try:
-        from yt_dlp.utils import DownloadError
-        if isinstance(e, DownloadError):
-            _log.warning("yt-dlp download error: %s", e)
-            return ("YouTube blocked this video — try one with captions, or paste the "
-                    "transcript in the Text tab.")
-    except ImportError:
-        pass
-    return _safe_err(e)
 
 
 def _yt_duration(video_id):
@@ -4625,8 +4102,7 @@ def youtube_transcript():
     if not _check_rate_limit(_client_ip(), scope="youtube", limit=_RATE_MAX):
         return jsonify({"error": "Too many requests — please wait a moment and try again."}), 429
     uid = _auth_optional(request)
-    if uid is False:
-        return _auth_rejected()   # a sent-but-rejected token is never 'anonymous'
+    anon_ip = None
 
     data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
@@ -4649,19 +4125,27 @@ def youtube_transcript():
     if _dur and _dur > 3000:
         return jsonify({"error": "This video is too long. Maximum supported length is 50 minutes."}), 400
 
-    charge, err = _charge_credit(uid, request)
-    if err:
-        return err
-    tok_left = charge.tok_left
+    if uid:
+        ok, tok_left, reason = _consume_token(uid)
+        if not ok:
+            return jsonify({
+                "error": "You have no tokens left. Upgrade to continue.",
+                "code": "no_tokens", "tokens_remaining": 0
+            }), 402
+    else:
+        anon_ip = _client_ip()
+        _dur = _anon_durable_consume(_device_id(request))
+        ok, tok_left = _dur if _dur is not None else _anon_consume(anon_ip)
+        if not ok:
+            return jsonify({
+                "error": "You've used your free previews. Sign up free to get more.",
+                "code": "signin_for_more", "tokens_remaining": 0
+            }), 402
 
     _log_usage_async("user" if uid else "anon", "youtube")
     out_name = _safe_name(f"youtube_{video_id}")
 
     def generate():
-        # This guard owns the caption/Whisper phase only. Once the text pipeline
-        # takes over (`yield from`, so close() reaches it) its own guard owns the
-        # refund; the shared _Charge makes a double refund impossible anyway.
-        settled = delegated = False
         try:
             yield _sse({"step": "transcript", "msg": "Looking for captions…"})
             try:
@@ -4669,38 +4153,28 @@ def youtube_transcript():
                 yield _sse({"step": "transcript", "msg": "Captions found — processing…"})
             except ValueError as e:
                 if str(e) != "no_captions":
-                    settled = True
-                    charge.refund()
+                    _refund_credit(uid, anon_ip)
                     yield _sse({"error": _safe_err(e)}); return
                 if not GROQ_API_KEY:
-                    settled = True
-                    charge.refund()
+                    _refund_credit(uid, anon_ip)
                     yield _sse({"error": "No captions found and GROQ_API_KEY not set."}); return
                 yield _sse({"step": "transcript", "msg": "No captions — downloading audio for Whisper transcription…"})
                 try:
                     transcript_text = _transcribe_with_whisper(video_id)
                     yield _sse({"step": "transcript", "msg": "Audio transcribed — processing…"})
                 except ValueError as we:
-                    settled = True
-                    charge.refund()
-                    yield _sse({"error": _safe_err(we)}); return
+                    _refund_credit(uid, anon_ip)
+                    yield _sse({"error": str(we)}); return
 
             language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
             lang_label = "Arabic" if language == "ar" else "English"
             yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language})
-            delegated = True
-            yield from _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left,
-                                           include_quiz, include_mcq=include_mcq, charge=charge)()
-            settled = True
+            for event in _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left, include_quiz, include_mcq=include_mcq, uid=uid, anon_ip=anon_ip)():
+                yield event
         except Exception as ex:
-            settled = True
-            _log.error("youtube SSE error: %s\n%s", ex, _tb.format_exc())
-            charge.refund()
-            yield _sse({"error": _yt_friendly_err(ex)})
-        finally:
-            if not settled and not delegated:
-                _log.info("youtube stream closed early (client gone) — refunding")
-                charge.refund()
+            _log.error("youtube SSE error: %s", ex)
+            _refund_credit(uid, anon_ip)
+            yield _sse({"error": str(ex)})
 
     return Response(
         stream_with_context(generate()),
@@ -4843,12 +4317,23 @@ def summarize_text():
     if not _check_rate_limit(_client_ip(), scope="text", limit=_RATE_MAX):
         return jsonify({"error": "Too many requests — please wait a moment and try again."}), 429
     uid = _auth_optional(request)
-    if uid is False:
-        return _auth_rejected()   # a sent-but-rejected token is never 'anonymous'
-    charge, err = _charge_credit(uid, request)
-    if err:
-        return err
-    tok_left = charge.tok_left
+    anon_ip = None
+    if uid:
+        ok, tok_left, reason = _consume_token(uid)
+        if not ok:
+            return jsonify({
+                "error": "You have no tokens left. Upgrade to continue.",
+                "code": "no_tokens", "tokens_remaining": 0
+            }), 402
+    else:
+        anon_ip = _client_ip()
+        _dur = _anon_durable_consume(_device_id(request))
+        ok, tok_left = _dur if _dur is not None else _anon_consume(anon_ip)
+        if not ok:
+            return jsonify({
+                "error": "You've used your free previews. Sign up free to get more.",
+                "code": "signin_for_more", "tokens_remaining": 0
+            }), 402
 
     _log_usage_async("user" if uid else "anon", "text")
     # silent=True: a non-JSON body must not raise here (it would 415/500 AFTER
@@ -4865,32 +4350,25 @@ def summarize_text():
     include_mcq  = str(data.get("quiz", True)).lower() != "false"
 
     if not ollama_running():
-        charge.refund()
+        _refund_credit(uid, anon_ip)
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
 
     if not text and url:
         try:
             text = _fetch_url_text(url)
         except ValueError as e:
-            charge.refund()
+            _refund_credit(uid, anon_ip)
             return jsonify({"error": str(e)}), 400
-        except Exception:
-            charge.refund()
-            raise
 
     if not text:
-        charge.refund()
+        _refund_credit(uid, anon_ip)
         return jsonify({"error": "No text or URL provided"}), 400
 
     # Cap total input so a huge paste / large fetched page can't amplify Groq cost.
     text = text[:500_000]
 
-    try:
-        language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
-    except Exception:
-        charge.refund()
-        raise
-    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz, include_mcq=include_mcq, charge=charge)
+    language = lang_param if lang_param in ("ar", "en") else _detect_language(text)
+    gen = _stream_text_as_sse(text, language, filename, "text", txt_dcfg, tok_left, include_quiz, include_mcq=include_mcq, uid=uid, anon_ip=anon_ip)
     return Response(
         stream_with_context(gen()),
         mimetype="text/event-stream",
@@ -4906,11 +4384,11 @@ def export_anki(job_id):
         return jsonify({"error": "Invalid job ID"}), 400
     job = get_job(job_id)
     if not job:
-        return _job_expired_json()
+        return jsonify({"error": "Job not found or expired"}), 404
     guide = job.get("guide", {})
     flashcards = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
     if not flashcards:
-        return jsonify({"error": "This guide has no flash cards to export.", "code": "no_flashcards"}), 404
+        return jsonify({"error": "No flashcards available for this job"}), 404
 
     import csv
     buf = io.StringIO()

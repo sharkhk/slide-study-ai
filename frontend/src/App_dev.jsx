@@ -30,7 +30,7 @@ const T = {
     langAuto: 'Auto-detect language',
     langEn: 'English output',
     langAr: 'Arabic output (عربي)',
-    privacy: 'Your files are processed in memory only — never written to disk or seen by anyone. The server wipes everything automatically within 15 minutes; this tab keeps a copy of your guide until you close it or tap Delete now.',
+    privacy: 'Your files are processed in memory only — never written to disk or seen by anyone. Everything is wiped automatically within 15 minutes.',
     generateAll: 'Generate All',
     generating: 'Processing…',
     download: 'Download PDF',
@@ -84,11 +84,11 @@ const T = {
     tokensLeft: 'tokens',
     manageBtn: 'Manage / cancel subscription',
     loginTitleSignup: 'Create your account',
-    loginSubSignup: 'Create a free account — 3 more study guides on us',
+    loginSubSignup: 'Sign in to subscribe and unlock unlimited study guides',
     emailBtnSignup: 'Create free account',
     noAccount: 'New here? Create a free account',
     haveAccount: 'Already have an account? Sign in',
-    wrongPassword: 'Incorrect email or password. Signed up with Google? Use Continue with Google.',
+    wrongPassword: 'Incorrect email or password.',
     accountExists: 'An account already exists for this email. Sign in instead.',
     freeLeft: (n) => `${n} free ${n === 1 ? 'preview' : 'previews'} left`,
     freeTry: 'Try free, no sign-up',
@@ -145,93 +145,6 @@ const T = {
     sampleQuizOpts: ['G1 → S → G2', 'S → G1 → G2', 'G2 → S → G1'],
     sampleQuizAnswer: 0,
     trust: ['No sign-up to try', 'Files wiped in 15 min', 'English & العربية'],
-    // Status / recovery
-    expired: 'Expired',
-    expiredNote: 'Expired on the server — guides are kept for 15 minutes.',
-    restore: 'Restore (free)',
-    regenerate: 'Regenerate',
-    retry: 'Retry',
-    usesCredit: 'This uses 1 guide credit. Continue?',
-    reselectFile: 'Re-select your file to generate it again.',
-    repasteText: 'Paste your text again to regenerate it.',
-    partialNote: "Some flashcards or quiz questions couldn't be generated.",
-    restored: 'Guide restored',
-    restoreFailed: "Couldn't restore this guide — try again, or regenerate it.",
-    guideExpired: 'This guide expired on the server.',
-    guideExpiredLong: 'This guide expired on the server (guides are kept for 15 minutes). Restore or regenerate it to keep studying.',
-    loadFailed: "Couldn't load this guide — check your connection.",
-    inAppBanner: 'Downloads may not work inside Instagram/TikTok — open alimne.app in Safari/Chrome (⋯ → Open in browser).',
-    items: (n) => `${n} item${n !== 1 ? 's' : ''}`,
-    readyCount: (n) => `${n} ready`,
-    starting: 'Starting…',
-    fetchingTranscript: 'Fetching transcript…',
-    processingText: 'Processing text…',
-    // Action bar + toasts
-    pdf: 'PDF', anki: 'Anki', deleteNow: 'Delete now', cards: 'Cards', quiz: 'Quiz',
-    overview: 'Overview', print: 'Print', chat: 'Chat',
-    ankiTip: 'Export Anki CSV', deleteTip: 'Delete my data from the server now', cardsTip: 'Flash Cards',
-    quizTip: 'Quiz', overviewTip: 'Overview', printTip: 'Print / View', chatTip: 'Ask the guide',
-    pdfSaved: 'PDF saved',
-    ankiSaved: 'Anki CSV saved',
-    noFlashcards: 'This guide has no flashcards.',
-    downloadFailed: 'Download failed — check your connection and try again.',
-    slowNetwork: 'This is taking too long — check your connection and try again.',
-    popupBlocked: 'Allow pop-ups to open the print view.',
-    deleted: 'Your data was deleted from the server.',
-    deleteFailed: 'Could not delete — it is auto-wiped within 15 minutes.',
-    paymentError: 'Payment error — please try again.',
-    billingError: 'Billing error — please try again.',
-    proUsedUp: "You've used this month's guides — they renew at the start of next month.",
-    freeUsedUp: 'Free guides used — subscribe to continue.',
-    // Errors
-    errNetwork: 'Connection lost — check your internet and tap Retry.',
-    streamLost: 'Connection lost before your guide finished — tap Retry.',
-    errTooBig: 'File is over 50 MB — compress or split it.',
-    errRateLimit: 'Too many requests — please wait a minute and try again.',
-    errUpdating: 'Alimne is updating — try again in a minute.',
-    errRetry: 'Temporary problem — please try again in a moment.',
-    errGeneric: 'Something went wrong — please try again.',
-    fileTooBig: (n) => `${n} is over 50 MB — compress or split it.`,
-    maxFiles: 'You can process up to 3 files at a time.',
-    unsupportedFile: 'Unsupported file — use .pptx, .ppt, .pdf, .docx, .doc or .txt.',
-    // Auth (login modal, session, account)
-    close: 'Close',
-    sessionExpired: 'Your session expired — please sign in again.',
-    linkExpired: 'That link has expired or was already used. If you just signed up, your email may already be confirmed — try signing in with your password, or request a new link.',
-    authLinkError: "Sign-in didn't complete — please try again.",
-    authUnavailable: 'Sign-in is unavailable right now — please reload the page.',
-    authTimeout: 'This is taking too long — check your connection and try again.',
-    emailNotConfirmed: 'Please confirm your email first — check your inbox for our link.',
-    resendConfirm: 'Resend confirmation email',
-    resent: 'Sent — check your inbox (and spam folder).',
-    emailRateLimit: 'Too many emails sent — please wait a few minutes and try again.',
-    authRateLimit: 'Too many attempts — please wait a minute and try again.',
-    weakPassword: 'That password is too weak — use at least 6 characters, mixing letters and numbers.',
-    samePassword: 'Choose a password different from your old one.',
-    forgotPw: 'Forgot password?',
-    resetSent: (e) => `Password reset link sent to ${e} — check your inbox.`,
-    enterEmailFirst: 'Enter your email above first.',
-    checkInboxTitle: 'Check your inbox',
-    checkInbox: (e) => `We sent a confirmation link to ${e}. Open it on this device to finish signing up.`,
-    resendEmail: 'Resend email',
-    backToSignIn: 'Back to sign in',
-    inAppGoogle: "Google sign-in doesn't work inside this app. Open alimne.app in Safari/Chrome (⋯ → Open in browser), or use email below.",
-    copyLink: 'Copy link',
-    newPwTitle: 'Set a new password',
-    newPwSub: 'Choose a new password for your account.',
-    newPwPh: 'New password (min 6 characters)',
-    newPwBtn: 'Save password',
-    pwUpdated: 'Password updated — you are signed in.',
-    pwTooShort: 'Use at least 6 characters.',
-    accountLoadFailed: "Couldn't load your account.",
-    // Chat
-    chatTitle: 'Ask the Guide',
-    chatIntro: 'Ask me anything — definitions, hints, explanations, key points.',
-    chatPh: 'Ask a question…',
-    chatSend: 'Send',
-    chatSuggest: ['Summarize the key points', 'What are the main topics?', 'What should I focus on for the exam?', 'Give me the most important definitions'],
-    chatSignIn: 'Sign in to chat with your guide',
-    chatNoAnswer: 'No answer — please try again.',
   },
   ar: {
     brand: 'علّمني',
@@ -244,7 +157,7 @@ const T = {
     langAuto: 'اكتشاف اللغة تلقائياً',
     langEn: 'الإخراج بالإنجليزية',
     langAr: 'الإخراج بالعربية',
-    privacy: 'ملفاتك تُعالَج في الذاكرة فقط — لا تُكتب على القرص ولا يراها أحد. يمسح الخادم كل شيء تلقائياً خلال 15 دقيقة، وتحتفظ هذه النافذة بنسخة من دليلك حتى تغلقها أو تضغط «احذف الآن».',
+    privacy: 'ملفاتك تُعالَج في الذاكرة فقط — لا تُكتب على القرص ولا يراها أحد. يُمسح كل شيء تلقائياً خلال 15 دقيقة.',
     generateAll: 'توليد الكل',
     generating: 'جارٍ المعالجة…',
     download: 'تحميل PDF',
@@ -298,11 +211,11 @@ const T = {
     tokensLeft: 'رموز متبقية',
     manageBtn: 'إدارة / إلغاء الاشتراك',
     loginTitleSignup: 'أنشئ حسابك',
-    loginSubSignup: 'أنشئ حساباً مجانياً — 3 أدلة دراسة إضافية هدية منّا',
+    loginSubSignup: 'سجّل الدخول للاشتراك وفتح أدلة دراسة غير محدودة',
     emailBtnSignup: 'إنشاء حساب مجاني',
     noAccount: 'جديد هنا؟ أنشئ حساباً مجانياً',
     haveAccount: 'لديك حساب بالفعل؟ سجّل الدخول',
-    wrongPassword: 'البريد أو كلمة المرور غير صحيحة. سجّلت عبر Google؟ استخدم «المتابعة عبر Google».',
+    wrongPassword: 'البريد أو كلمة المرور غير صحيحة.',
     accountExists: 'يوجد حساب بهذا البريد بالفعل. سجّل الدخول بدلاً من ذلك.',
     freeLeft: (n) => `${n} ${n === 1 ? 'معاينة' : 'معاينات'} مجانية متبقية`,
     freeTry: 'جرّب مجاناً، بدون تسجيل',
@@ -358,93 +271,6 @@ const T = {
     sampleQuizOpts: ['G1 ← S ← G2', 'S ← G1 ← G2', 'G2 ← S ← G1'],
     sampleQuizAnswer: 0,
     trust: ['بدون تسجيل للتجربة', 'تُمسح الملفات خلال 15 دقيقة', 'الإنجليزية والعربية'],
-    // الحالة / الاستعادة
-    expired: 'منتهي الصلاحية',
-    expiredNote: 'انتهت صلاحيته على الخادم — تُحفظ الأدلة 15 دقيقة.',
-    restore: 'استعادة (مجاناً)',
-    regenerate: 'إعادة الإنشاء',
-    retry: 'إعادة المحاولة',
-    usesCredit: 'سيستهلك هذا رصيد دليل واحد. هل تريد المتابعة؟',
-    reselectFile: 'اختر ملفك مجدداً لإعادة إنشائه.',
-    repasteText: 'الصق النص مجدداً لإعادة إنشائه.',
-    partialNote: 'تعذّر إنشاء بعض البطاقات أو أسئلة الاختبار.',
-    restored: 'تمت استعادة الدليل',
-    restoreFailed: 'تعذّرت استعادة الدليل — حاول مجدداً أو أعد إنشاءه.',
-    guideExpired: 'انتهت صلاحية هذا الدليل على الخادم.',
-    guideExpiredLong: 'انتهت صلاحية هذا الدليل على الخادم (تُحفظ الأدلة 15 دقيقة). استعِده أو أعد إنشاءه لمتابعة المذاكرة.',
-    loadFailed: 'تعذّر تحميل الدليل — تحقّق من اتصالك.',
-    inAppBanner: 'قد لا يعمل التحميل داخل Instagram/TikTok — افتح alimne.app في Safari أو Chrome (⋯ ← فتح في المتصفح).',
-    items: (n) => n === 1 ? 'عنصر واحد' : n === 2 ? 'عنصران' : n <= 10 ? `${n} عناصر` : `${n} عنصراً`,
-    readyCount: (n) => `${n} جاهز`,
-    starting: 'جارٍ البدء…',
-    fetchingTranscript: 'جارٍ جلب نص الفيديو…',
-    processingText: 'جارٍ معالجة النص…',
-    // شريط الإجراءات + الإشعارات
-    pdf: 'PDF', anki: 'Anki', deleteNow: 'احذف الآن', cards: 'البطاقات', quiz: 'اختبار',
-    overview: 'نظرة عامة', print: 'طباعة', chat: 'دردشة',
-    ankiTip: 'تصدير ملف CSV لـ Anki', deleteTip: 'احذف بياناتي من الخادم الآن', cardsTip: 'بطاقات المراجعة',
-    quizTip: 'اختبار', overviewTip: 'نظرة عامة', printTip: 'طباعة / عرض', chatTip: 'اسأل الدليل',
-    pdfSaved: 'تم حفظ ملف PDF',
-    ankiSaved: 'تم حفظ ملف Anki',
-    noFlashcards: 'لا يحتوي هذا الدليل على بطاقات.',
-    downloadFailed: 'فشل التحميل — تحقّق من اتصالك وحاول مجدداً.',
-    slowNetwork: 'يستغرق الأمر وقتاً طويلاً — تحقّق من اتصالك وحاول مجدداً.',
-    popupBlocked: 'اسمح بالنوافذ المنبثقة لفتح صفحة الطباعة.',
-    deleted: 'تم حذف بياناتك من الخادم.',
-    deleteFailed: 'تعذّر الحذف — سيُمسح تلقائياً خلال 15 دقيقة.',
-    paymentError: 'خطأ في الدفع — حاول مجدداً.',
-    billingError: 'خطأ في الفوترة — حاول مجدداً.',
-    proUsedUp: 'استخدمت أدلة هذا الشهر — تتجدد في بداية الشهر القادم.',
-    freeUsedUp: 'استُخدمت الأدلة المجانية — اشترك للمتابعة.',
-    // الأخطاء
-    errNetwork: 'انقطع الاتصال — تحقّق من الإنترنت واضغط «إعادة المحاولة».',
-    streamLost: 'انقطع الاتصال قبل اكتمال دليلك — اضغط «إعادة المحاولة».',
-    errTooBig: 'حجم الملف أكبر من 50 ميغابايت — اضغطه أو قسّمه.',
-    errRateLimit: 'طلبات كثيرة — انتظر دقيقة ثم حاول مجدداً.',
-    errUpdating: 'يجري تحديث علّمني — حاول مجدداً بعد دقيقة.',
-    errRetry: 'مشكلة مؤقتة — حاول مجدداً بعد لحظات.',
-    errGeneric: 'حدث خطأ ما — حاول مجدداً.',
-    fileTooBig: (n) => `حجم ${n} أكبر من 50 ميغابايت — اضغطه أو قسّمه.`,
-    maxFiles: 'يمكنك معالجة 3 ملفات كحد أقصى في كل مرة.',
-    unsupportedFile: 'ملف غير مدعوم — استخدم .pptx أو .ppt أو .pdf أو .docx أو .doc أو .txt.',
-    // تسجيل الدخول والحساب
-    close: 'إغلاق',
-    sessionExpired: 'انتهت جلستك — يرجى تسجيل الدخول مجدداً.',
-    linkExpired: 'انتهت صلاحية هذا الرابط أو سبق استخدامه. إن كنت سجّلت للتو فقد يكون بريدك مؤكَّداً بالفعل — جرّب تسجيل الدخول بكلمة المرور، أو اطلب رابطاً جديداً.',
-    authLinkError: 'لم يكتمل تسجيل الدخول — حاول مجدداً.',
-    authUnavailable: 'تسجيل الدخول غير متاح الآن — يرجى إعادة تحميل الصفحة.',
-    authTimeout: 'يستغرق الأمر وقتاً طويلاً — تحقّق من اتصالك وحاول مجدداً.',
-    emailNotConfirmed: 'يرجى تأكيد بريدك أولاً — ابحث عن رابطنا في صندوق الوارد.',
-    resendConfirm: 'إعادة إرسال رسالة التأكيد',
-    resent: 'تم الإرسال — تحقّق من صندوق الوارد (ومجلد الرسائل غير المرغوب فيها).',
-    emailRateLimit: 'أُرسلت رسائل كثيرة — انتظر بضع دقائق ثم حاول مجدداً.',
-    authRateLimit: 'محاولات كثيرة — انتظر دقيقة ثم حاول مجدداً.',
-    weakPassword: 'كلمة المرور ضعيفة — استخدم 6 أحرف على الأقل تجمع بين الحروف والأرقام.',
-    samePassword: 'اختر كلمة مرور مختلفة عن القديمة.',
-    forgotPw: 'نسيت كلمة المرور؟',
-    resetSent: (e) => `أرسلنا رابط إعادة تعيين كلمة المرور إلى ${e} — تحقّق من بريدك.`,
-    enterEmailFirst: 'أدخل بريدك في الأعلى أولاً.',
-    checkInboxTitle: 'تحقّق من بريدك',
-    checkInbox: (e) => `أرسلنا رابط تأكيد إلى ${e}. افتحه على هذا الجهاز لإكمال التسجيل.`,
-    resendEmail: 'إعادة الإرسال',
-    backToSignIn: 'العودة لتسجيل الدخول',
-    inAppGoogle: 'تسجيل الدخول عبر Google لا يعمل داخل هذا التطبيق. افتح alimne.app في Safari أو Chrome (⋯ ← فتح في المتصفح)، أو استخدم البريد الإلكتروني بالأسفل.',
-    copyLink: 'نسخ الرابط',
-    newPwTitle: 'عيّن كلمة مرور جديدة',
-    newPwSub: 'اختر كلمة مرور جديدة لحسابك.',
-    newPwPh: 'كلمة المرور الجديدة (6 أحرف على الأقل)',
-    newPwBtn: 'حفظ كلمة المرور',
-    pwUpdated: 'تم تحديث كلمة المرور — أنت مسجّل الدخول الآن.',
-    pwTooShort: 'استخدم 6 أحرف على الأقل.',
-    accountLoadFailed: 'تعذّر تحميل حسابك.',
-    // الدردشة
-    chatTitle: 'اسأل الدليل',
-    chatIntro: 'اسألني أي شيء — تعريفات، تلميحات، شروحات، نقاط رئيسية.',
-    chatPh: 'اكتب سؤالك…',
-    chatSend: 'إرسال',
-    chatSuggest: ['لخّص النقاط الرئيسية', 'ما المواضيع الأساسية؟', 'على ماذا أركّز للامتحان؟', 'أعطني أهم التعريفات'],
-    chatSignIn: 'سجّل الدخول للدردشة مع دليلك',
-    chatNoAnswer: 'لا توجد إجابة — حاول مجدداً.',
   }
 }
 
@@ -453,132 +279,10 @@ const STATUS_COLOR = {
   processing: { bg: 'rgba(251,191,36,0.12)', color: '#fbbf24',  border: 'rgba(251,191,36,0.3)' },
   done:       { bg: 'rgba(34,197,94,0.12)',  color: '#22c55e',  border: 'rgba(34,197,94,0.3)'  },
   error:      { bg: 'rgba(239,68,68,0.12)',  color: '#ef4444',  border: 'rgba(239,68,68,0.3)'  },
-  expired:    { bg: 'rgba(148,163,184,0.12)', color: '#94a3b8', border: 'rgba(148,163,184,0.3)' },
 }
 
 let _id = 0
 const uid = () => ++_id
-
-// ── Supabase — public project values (the same ones /api/config serves) ───────
-// Created once at load, so session restore and the OAuth return never wait on
-// /api/config. Implicit flow (supabase-js default).
-const SB_URL  = 'https://ufwurywcozlpadzaobug.supabase.co'
-const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVmd3VyeXdjb3pscGFkemFvYnVnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc3NDc4MDIsImV4cCI6MjEwMzMyMzgwMn0.mpARaiN5gvZzQN2eoOCtlSOAeNTVLzjB78E-P6vTXXI'
-// Read auth errors from the URL BEFORE the client parses it (shown on mount).
-const AUTH_URL_ERR = (() => {
-  try {
-    const q = new URLSearchParams(window.location.search)
-    const h = new URLSearchParams(window.location.hash.replace(/^#/, ''))
-    const g = k => q.get(k) || h.get(k)
-    const e = { code: g('error_code'), err: g('error'), desc: g('error_description') }
-    return (e.code || e.err || e.desc) ? e : null
-  } catch { return null }
-})()
-const RECOVERY_IN_URL = (() => { try { return /(^#|&)type=recovery(&|$)/.test(window.location.hash) } catch { return false } })()
-const sb = (() => { try { return createClient(SB_URL, SB_ANON) } catch (e) { console.error('supabase init', e); return null } })()
-
-// Instagram / Facebook / TikTok / Snapchat / LINE / Android WebViews: Google OAuth
-// is blocked and <a download> is usually ignored.
-const IN_APP = (() => { try { return /Instagram|FBAN|FBAV|FB_IAB|TikTok|musical_ly|Snapchat|Line\/|; wv\)/i.test(navigator.userAgent || '') } catch { return false } })()
-const NAV_AR = (() => { try { return String(navigator.language || '').toLowerCase().startsWith('ar') } catch { return false } })()
-const MAX_UPLOAD = 50 * 1024 * 1024
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
-const isProUser = u => u?.plan ? u.plan === 'pro' : u?.subscription_status === 'active'
-
-// localStorage can throw (private mode, blocked site data, in-app browsers).
-const ls = {
-  get: k => { try { return localStorage.getItem(k) } catch { return null } },
-  set: (k, v) => { try { localStorage.setItem(k, v) } catch { /* best-effort */ } },
-  del: k => { try { localStorage.removeItem(k) } catch { /* best-effort */ } },
-}
-
-const sleep = ms => new Promise(r => setTimeout(r, ms))
-// fetch with a timeout (rejects with AbortError)
-function fetchT(url, opts = {}, ms = 30000) {
-  const c = new AbortController()
-  const tm = setTimeout(() => c.abort(), ms)
-  return fetch(url, { ...opts, signal: c.signal }).finally(() => clearTimeout(tm))
-}
-
-// Filename from Content-Disposition (RFC 5987 first), else the fallback
-function filenameFrom(r, fb) {
-  const cd = r.headers.get('Content-Disposition') || ''
-  const star = cd.match(/filename\*=UTF-8''([^;]+)/i)
-  if (star) { try { return decodeURIComponent(star[1]) } catch { /* fall through */ } }
-  const plain = cd.match(/filename="?([^";]+)"?/i)
-  return plain ? plain[1] : fb
-}
-// Save a blob through a temporary <a download> in the DOM (iOS reads the URL late → revoke after 60s)
-function saveBlob(blob, name) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url; a.download = name; a.rel = 'noopener'; a.style.display = 'none'
-  document.body.appendChild(a); a.click(); a.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 60000)
-}
-
-// One mapper for request / stream failures → plain-language, localized text
-function friendlyErr(t, msg, status, data) {
-  const code = data?.code
-  if (status === 0) return msg || t.errNetwork
-  if (status === 413 || code === 'too_large') return t.errTooBig
-  if (status === 429 || code === 'rate_limited') return t.errRateLimit
-  if (code === 'retry' || code === 'auth_unavailable') return t.errRetry
-  if (status === 502 || status === 503 || status === 504) return t.errUpdating
-  if (status >= 500 && (!msg || /^Server error/i.test(msg))) return t.errUpdating
-  return msg || t.errGeneric
-}
-
-// Supabase auth error → localized text (by error.code, then by message)
-const AUTH_ERR_KEYS = {
-  invalid_credentials: 'wrongPassword', email_not_confirmed: 'emailNotConfirmed',
-  over_email_send_rate_limit: 'emailRateLimit', over_request_rate_limit: 'authRateLimit',
-  weak_password: 'weakPassword', user_already_exists: 'accountExists', email_exists: 'accountExists',
-  email_address_invalid: 'emailInvalid', same_password: 'samePassword', otp_expired: 'linkExpired',
-}
-function authErrText(t, err) {
-  const k = AUTH_ERR_KEYS[err?.code]
-  if (k && t[k]) return t[k]
-  const m = String(err?.message || '').toLowerCase()
-  if (m.includes('invalid login') || m.includes('credentials')) return t.wrongPassword
-  if (m.includes('not confirmed')) return t.emailNotConfirmed
-  if (m.includes('already') || m.includes('registered')) return t.accountExists
-  if (m.includes('rate limit')) return t.authRateLimit
-  if (err?.name === 'AuthRetryableFetchError' || m.includes('fetch') || m.includes('network')) return t.errNetwork
-  return t.authError
-}
-
-// ── Queue persistence (this tab only) ─────────────────────────────────────────
-// Finished guides survive the Google / Stripe round trips and reloads. Never the
-// File, a Blob or pasted text.
-const QKEY = 'alimne_queue_v1'
-const guideOf = d => ({
-  title: d?.title || '', subtitle: d?.subtitle || '', sections: d?.sections || [],
-  flashcards: d?.flashcards || [], mcqs: d?.mcqs || [], keywords: d?.keywords || [],
-  objectives: d?.objectives || [], language: d?.language || 'en',
-})
-function loadSavedQueue() {
-  try {
-    const q = JSON.parse(sessionStorage.getItem(QKEY) || '[]')
-    if (!Array.isArray(q)) return []
-    const out = q.filter(i => i && i.id && i.jobId && (i.status === 'done' || i.status === 'expired')).map(i => {
-      let guide = null
-      if (i.guideBlob) { try { guide = guideOf(JSON.parse(i.guideBlob).guide) } catch { /* unreadable copy */ } }
-      return { ...i, file: null, guide, busy: null, sharing: false, error: null, step: null, msg: null }
-    })
-    _id = Math.max(_id, ...out.map(i => +i.id || 0))
-    return out
-  } catch { return [] }
-}
-// Spaced-repetition progress key: stable across restores (sig), else the job id
-const srKeyOf = it => 'sr_' + (it.sig ? String(it.sig).slice(0, 32) : it.jobId)
-const pdfNameOf = it => it.filename || (String(it.name || 'study_guide').replace(/\.(pptx?|pdf|docx?|txt)$/i, '') + '_study_guide.pdf')
-// Same formula-injection guard as the server's Anki export
-const csvCell = v => {
-  let s = String(v ?? '')
-  if (/^[ \t\r\n]*[=+\-@]/.test(s)) s = "'" + s
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-}
 
 // ── Toast notifications ────────────────────────────────────────────────────
 function ToastContainer() {
@@ -587,19 +291,18 @@ function ToastContainer() {
     window._addToast = (msg, type = 'success') => {
       const id = uid()
       setToasts(p => [...p, { id, msg, type }])
-      setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), type === 'error' ? 5500 : 3000)
+      setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 2500)
     }
     return () => { delete window._addToast }
   }, [])
   if (!toasts.length) return null
   return (
-    <div role="status" aria-live="polite" style={{position:'fixed',bottom:'1.5rem',left:16,right:16,zIndex:9999,display:'flex',flexDirection:'column',gap:'0.4rem',alignItems:'center',pointerEvents:'none'}}>
+    <div style={{position:'fixed',bottom:'1.5rem',left:'50%',transform:'translateX(-50%)',zIndex:9999,display:'flex',flexDirection:'column',gap:'0.4rem',alignItems:'center',pointerEvents:'none'}}>
       {toasts.map(t => (
         <div key={t.id} style={{
           background: t.type==='error' ? '#ef4444' : t.type==='info' ? '#4f8ef7' : '#22c55e',
-          color:'#fff',padding:'0.5rem 1.1rem',borderRadius:8,fontSize:'0.82rem',fontWeight:600,lineHeight:1.4,
-          boxShadow:'0 4px 20px rgba(0,0,0,0.3)',whiteSpace:'normal',maxWidth:'calc(100vw - 32px)',textAlign:'center',
-          animation:'toastIn 0.18s ease'
+          color:'#fff',padding:'0.45rem 1.1rem',borderRadius:8,fontSize:'0.82rem',fontWeight:600,
+          boxShadow:'0 4px 20px rgba(0,0,0,0.3)',whiteSpace:'nowrap',animation:'toastIn 0.18s ease'
         }}>{t.msg}</div>
       ))}
     </div>
@@ -633,27 +336,12 @@ function getDeviceId() {
 }
 
 // ── SSE stream helper ─────────────────────────────────────────────────────────
-// onError receives (message, httpStatus, rawData). Exactly one terminal callback:
-// events after done/error are ignored, and a stream that ends without one reports
-// a localized "connection lost" (status 0). Returns the AbortController.
-function streamSSE(url, options, onEvent, onError, t = T.en) {
-  const ctrl = new AbortController()
-  let settled = false
-  const fail = (msg, status = 0, data = {}) => { if (settled) return; settled = true; onError(msg, status, data) }
-  const handle = part => {
-    if (settled) return
-    const line = part.replace(/^data:\s*/, '').trim()
-    if (!line) return
-    let ev
-    try { ev = JSON.parse(line) } catch { return }   // keep-alive comments etc.
-    if (!ev || typeof ev !== 'object') return
-    if (ev.error || ev.step === 'done') settled = true
-    try { onEvent(ev) } catch (e) { console.error(e) }
-  }
-  fetch(url, { ...options, signal: ctrl.signal }).then(async res => {
+// onError receives (message, httpStatus, rawData)
+function streamSSE(url, options, onEvent, onError) {
+  fetch(url, options).then(async res => {
     if (!res.ok) {
       const data = await res.json().catch(() => ({}))
-      fail(data.error || `Server error ${res.status}`, res.status, data)
+      onError(data.error || `Server error ${res.status}`, res.status, data)
       return
     }
     const reader = res.body.getReader()
@@ -665,64 +353,34 @@ function streamSSE(url, options, onEvent, onError, t = T.en) {
       buf += decoder.decode(value, { stream: true })
       const parts = buf.split('\n\n')
       buf = parts.pop()
-      parts.forEach(handle)
+      for (const part of parts) {
+        const line = part.replace(/^data:\s*/, '').trim()
+        if (!line) continue
+        try { onEvent(JSON.parse(line)) } catch {}
+      }
     }
-    if (buf.trim()) handle(buf)
-    fail(t.streamLost, 0, { code: 'incomplete' })
-  }).catch(() => fail(t.errNetwork, 0, { code: 'network' }))
-  return ctrl
-}
-
-// Guide for a study modal: the cached copy, else one load via loadGuide().
-// → [guide, error ('expired' | 'failed' | null), retry]
-function useGuideLoader(initial, loadGuide) {
-  const [g, setG] = useState(initial || null)
-  const [err, setErr] = useState(null)
-  const [n, setN] = useState(0)
-  useEffect(() => {
-    if (g || !loadGuide) return
-    let live = true
-    setErr(null)
-    loadGuide().then(d => { if (live) setG(d) })
-      .catch(e => { if (live) setErr(e?.message === 'expired' ? 'expired' : 'failed') })
-    return () => { live = false }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [n])
-  return [g, err, () => setN(x => x + 1)]
-}
-
-// Study modal fallback: expired → Restore / Regenerate, network → Retry
-function GuideUnavailable({ t, err, canRestore, onRecover, onRetry }) {
-  const expired = err === 'expired'
-  const act = expired ? onRecover : onRetry
-  return (
-    <div role="alert" style={{padding:'2rem 1.25rem',textAlign:'center',color:'var(--text-secondary)'}}>
-      <AlertCircle size={20} style={{marginBottom:8,color: expired ? '#94a3b8' : '#ef4444'}} />
-      <div style={{fontSize:'0.86rem',lineHeight:1.55,marginBottom:'1rem'}}>{expired ? t.guideExpiredLong : t.loadFailed}</div>
-      {act && (
-        <button className="submit-btn" style={{flex:'none',padding:'0.55rem 1.1rem',margin:'0 auto',fontSize:'0.85rem'}} onClick={act}>
-          <RotateCcw size={14} /> {expired ? (canRestore ? t.restore : t.regenerate) : t.retry}
-        </button>
-      )}
-    </div>
-  )
+    // flush leftover
+    if (buf.trim()) {
+      const line = buf.replace(/^data:\s*/, '').trim()
+      if (line) try { onEvent(JSON.parse(line)) } catch {}
+    }
+  }).catch(err => onError(String(err), 0, {}))
 }
 
 // ── FlashCard Modal ────────────────────────────────────────────────────────────
-function FlashCardModal({ jobId, srKey, guide, loadGuide, lang, t, canRestore, onRecover, onClose }) {
-  const [g, loadErr, retryLoad] = useGuideLoader(guide, loadGuide)
-  const [cards, setCards]       = useState(() => guide ? (guide.flashcards || []) : null)
+function FlashCardModal({ jobId, onClose }) {
+  const [cards, setCards]       = useState(null)
   const [idx, setIdx]           = useState(0)
   const [flipped, setFlipped]   = useState(false)
-  const keyRef = useRef(srKey || `sr_${jobId}`)   // fixed for this session of the modal
   const [known, setKnown]       = useState(() => {
-    try { return JSON.parse(localStorage.getItem(keyRef.current) || localStorage.getItem(`sr_${jobId}`) || '{}') || {} } catch { return {} }
+    try { return JSON.parse(localStorage.getItem(`sr_${jobId}`) || '{}') } catch { return {} }
   })
   const [reviewMode, setReviewMode] = useState(false)
   const [roundDone, setRoundDone]   = useState(false)
+  const [error, setError]           = useState(null)
   const [speaking, setSpeaking]     = useState(false)
-  const isAr = (g?.language || lang) === 'ar'
-  useEffect(() => { if (g && !cards) setCards(g.flashcards || []) }, [g, cards])
+  const [glang, setGlang]           = useState('en')
+  const isAr = glang === 'ar'
   const FL = isAr ? {
     title:'بطاقات المراجعة', reviewMissed:'مراجعة الأخطاء', shuffle:'خلط', reset:'إعادة',
     known:(k,t)=>`${k}/${t} معروفة`, complete:'اكتمل', roundDone:'انتهت الجولة!',
@@ -747,9 +405,20 @@ function FlashCardModal({ jobId, srKey, guide, loadGuide, lang, t, canRestore, o
   }
 
   const saveKnown = (k) => {
-    ls.set(keyRef.current, JSON.stringify(k))
+    localStorage.setItem(`sr_${jobId}`, JSON.stringify(k))
     setKnown(k)
   }
+
+  useEffect(() => {
+    fetch(`/api/guide/${jobId}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) { setError(d.error); return }
+        setCards(d.flashcards || [])
+        setGlang(d.language || 'en')
+      })
+      .catch(() => setError('Failed to load flashcards'))
+  }, [jobId])
 
   // Key "known" by a stable card identity (the question text), NOT array index,
   // so shuffling / review-mode filtering can't misalign the known map.
@@ -826,9 +495,9 @@ function FlashCardModal({ jobId, srKey, guide, loadGuide, lang, t, canRestore, o
           <span style={{fontWeight:600,color:'var(--text-primary)'}}>{FL.title}</span>
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
-        {loadErr
-          ? <GuideUnavailable t={t} err={loadErr} canRestore={canRestore} onRecover={onRecover} onRetry={retryLoad} />
-          : <div style={{padding:'2rem',textAlign:'center',color:'var(--text-secondary)'}}><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>{FL.loading}</div></div>}
+        <div style={{padding:'2rem',textAlign:'center',color:'var(--text-secondary)'}}>
+          {error ? <><AlertCircle size={20} style={{marginBottom:8,color:'#ef4444'}}/><div style={{color:'#ef4444'}}>{error}</div></> : <><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>{FL.loading}</div></>}
+        </div>
       </div>
     </div>
   )
@@ -892,7 +561,7 @@ function FlashCardModal({ jobId, srKey, guide, loadGuide, lang, t, canRestore, o
                   </div>
                   <div className="fc-back">
                     <div style={{fontSize:'0.92rem',lineHeight:1.6}}>{currentCard.a}</div>
-                    <button onClick={e => { e.stopPropagation(); navigator.clipboard?.writeText(currentCard.a).then(() => toast(t.referCopied), () => {}) }}
+                    <button onClick={e => { e.stopPropagation(); navigator.clipboard.writeText(currentCard.a); toast('Copied!') }}
                       style={{position:'absolute',top:8,right:8,background:'none',border:'none',cursor:'pointer',color:'var(--text-muted)',padding:4,borderRadius:5,opacity:0.7}}>
                       <Copy size={12} />
                     </button>
@@ -930,16 +599,17 @@ function FlashCardModal({ jobId, srKey, guide, loadGuide, lang, t, canRestore, o
 }
 
 // ── Quiz Modal ────────────────────────────────────────────────────────────────
-function QuizModal({ jobId, filename, guide, loadGuide, lang, t, canRestore, onRecover, onClose }) {
-  const [g, loadErr, retryLoad] = useGuideLoader(guide, loadGuide)
-  const mcqs = g ? (g.mcqs || []) : null
+function QuizModal({ jobId, filename, onClose }) {
+  const [mcqs, setMcqs]       = useState(null)
   const [idx, setIdx]         = useState(0)
   const [score, setScore]     = useState(0)
   const [answered, setAnswered] = useState(false)
   const [selected, setSelected] = useState(null)
   const [done, setDone]       = useState(false)
+  const [error, setError]     = useState(null)
   const [wrongs, setWrongs]   = useState([])
-  const isAr = (g?.language || lang) === 'ar'
+  const [glang, setGlang]     = useState('en')
+  const isAr = glang === 'ar'
   const QL = isAr ? {
     title:'اختبار', loading:'جارٍ تحميل الاختبار…', perfect:'🎉 درجة كاملة!', complete:'انتهى الاختبار!',
     toReview:(n)=>`${n} ${n===1?'سؤال':'أسئلة'} للمراجعة`, reviewMissed:'مراجعة الأخطاء',
@@ -951,6 +621,17 @@ function QuizModal({ jobId, filename, guide, loadGuide, lang, t, canRestore, onR
   }
 
   useEscapeKey(onClose)
+
+  useEffect(() => {
+    fetch(`/api/guide/${jobId}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) { setError(d.error); return }
+        setMcqs(d.mcqs || [])
+        setGlang(d.language || 'en')
+      })
+      .catch(() => setError('Failed to load quiz'))
+  }, [jobId])
 
   const pick = (letter) => {
     if (answered) return
@@ -990,9 +671,9 @@ function QuizModal({ jobId, filename, guide, loadGuide, lang, t, canRestore, onR
           <span style={{fontWeight:600,color:'var(--text-primary)'}}>{QL.title}</span>
           <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
-        {loadErr
-          ? <GuideUnavailable t={t} err={loadErr} canRestore={canRestore} onRecover={onRecover} onRetry={retryLoad} />
-          : <div style={{padding:'2rem',textAlign:'center',color:'var(--text-secondary)'}}><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>{QL.loading}</div></div>}
+        <div style={{padding:'2rem',textAlign:'center',color:'var(--text-secondary)'}}>
+          {error ? <div style={{color:'#ef4444'}}>{error}</div> : <><Loader2 size={20} className="spin" style={{marginBottom:8}}/><div style={{fontSize:'0.82rem'}}>{QL.loading}</div></>}
+        </div>
       </div>
     </div>
   )
@@ -1097,12 +778,10 @@ function QuizModal({ jobId, filename, guide, loadGuide, lang, t, canRestore, onR
 
 // ── Quiz History Modal ─────────────────────────────────────────────────────────
 function HistoryModal({ onClose }) {
-  const [hist, setHist] = useState(() => {
-    try { const h = JSON.parse(localStorage.getItem('quizHistory') || '[]'); return Array.isArray(h) ? h : [] } catch { return [] }
-  })
+  const [hist, setHist] = useState(() => JSON.parse(localStorage.getItem('quizHistory') || '[]'))
 
   const clearAll = () => {
-    ls.del('quizHistory')
+    localStorage.removeItem('quizHistory')
     setHist([])
   }
 
@@ -1159,15 +838,23 @@ function HistoryModal({ onClose }) {
 }
 
 // ── Overview Modal ─────────────────────────────────────────────────────────────
-function OverviewModal({ guide: cached, loadGuide, lang, t, canRestore, onRecover, onClose }) {
-  const [guide, loadErr, retryLoad] = useGuideLoader(cached, loadGuide)
+function OverviewModal({ jobId, onClose }) {
+  const [guide, setGuide]         = useState(null)
+  const [error, setError]         = useState(null)
   const [openSections, setOpen]   = useState({})
 
   useEscapeKey(onClose)
 
+  useEffect(() => {
+    fetch(`/api/guide/${jobId}`)
+      .then(r => r.json())
+      .then(d => { if (d.error) { setError(d.error); return } setGuide(d) })
+      .catch(() => setError('Failed to load guide'))
+  }, [jobId])
+
   const toggle = (i) => setOpen(s => ({ ...s, [i]: !s[i] }))
 
-  const isAr = (guide?.language || lang) === 'ar'
+  const isAr = guide?.language === 'ar'
   const GL = isAr ? {
     overview:'نظرة عامة', title:'دليل الدراسة', objectives:'الأهداف التعليمية',
     sections:'الأقسام', keywords:'المصطلحات',
@@ -1191,9 +878,9 @@ function OverviewModal({ guide: cached, loadGuide, lang, t, canRestore, onRecove
         </div>
         <div style={{padding:'1.25rem',flex:1,overflowY:'auto'}}>
           {!guide ? (
-            loadErr
-              ? <GuideUnavailable t={t} err={loadErr} canRestore={canRestore} onRecover={onRecover} onRetry={retryLoad} />
-              : <div style={{textAlign:'center',padding:'2rem'}}><Loader2 size={20} className="spin" /></div>
+            <div style={{textAlign:'center',padding:'2rem'}}>
+              {error ? <div style={{color:'#ef4444'}}>{error}</div> : <Loader2 size={20} className="spin" />}
+            </div>
           ) : (
             <div>
               {/* Title */}
@@ -1313,10 +1000,15 @@ function OverviewModal({ guide: cached, loadGuide, lang, t, canRestore, onRecove
 }
 
 // ── Chat Modal ─────────────────────────────────────────────────────────────────
-// `ask(q)` (from App) handles auth refresh + expired-guide restore; it rejects
-// with 'handled' when it already opened sign-in, 'expired', or a friendly message.
-function ChatModal({ onClose, t, isAr, needsSignIn, onSignIn, ask }) {
-  const [msgs, setMsgs] = useState([{ role: 'ai', text: t.chatIntro }])
+const CHAT_SUGGESTIONS = [
+  'Summarize the key points',
+  'What are the main topics?',
+  'What should I focus on for the exam?',
+  'Give me the most important definitions',
+]
+
+function ChatModal({ jobId, onClose, lang, getAuthHeaders }) {
+  const [msgs, setMsgs] = useState([{ role: 'ai', text: 'Ask me anything — definitions, hints, explanations, key points.' }])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const endRef = useRef()
@@ -1329,15 +1021,15 @@ function ChatModal({ onClose, t, isAr, needsSignIn, onSignIn, ask }) {
     setMsgs(m => [...m, { role: 'user', text: q }])
     setLoading(true)
     try {
-      const a = await ask(q)
-      setMsgs(m => [...m, { role: 'ai', text: a || t.chatNoAnswer }])
-    } catch (e) {
-      if (e?.message !== 'handled') {
-        const text = e?.message === 'expired' ? t.guideExpiredLong
-          : (e?.name === 'TypeError' || e?.name === 'AbortError') ? t.errNetwork
-          : (e?.message || t.errGeneric)
-        setMsgs(m => [...m, { role: 'ai', text }])
-      }
+      const r = await fetch(`/api/chat/${jobId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ question: q, language: lang })
+      })
+      const d = await r.json()
+      setMsgs(m => [...m, { role: 'ai', text: d.answer || d.error || 'No response' }])
+    } catch {
+      setMsgs(m => [...m, { role: 'ai', text: 'Error — could not reach server.' }])
     }
     setLoading(false)
   }
@@ -1349,16 +1041,16 @@ function ChatModal({ onClose, t, isAr, needsSignIn, onSignIn, ask }) {
     sendMsg(q)
   }
 
-  const showSuggestions = msgs.length === 1 && !loading && !needsSignIn
+  const showSuggestions = msgs.length === 1 && !loading
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box chat-box" style={{maxWidth:520,direction:isAr?'rtl':'ltr'}} onClick={e => e.stopPropagation()}>
+      <div className="modal-box chat-box" style={{maxWidth:520}} onClick={e => e.stopPropagation()}>
         <div className="modal-header">
           <span style={{fontWeight:600,color:'var(--text-primary)',display:'flex',alignItems:'center',gap:'0.5rem'}}>
-            <MessageSquare size={15} /> {t.chatTitle}
+            <MessageSquare size={15} /> Ask the Guide
           </span>
-          <button className="modal-close" onClick={onClose} aria-label={t.close}><X size={16} /></button>
+          <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
         <div className="chat-msgs">
           {msgs.map((m, i) => (
@@ -1366,8 +1058,8 @@ function ChatModal({ onClose, t, isAr, needsSignIn, onSignIn, ask }) {
               <div className="chat-bubble" style={{position:'relative'}}>
                 {m.text}
                 {m.role === 'ai' && i > 0 && (
-                  <button onClick={() => navigator.clipboard?.writeText(m.text).then(() => toast(t.referCopied), () => {})}
-                    style={{position:'absolute',top:4,insetInlineEnd:4,background:'none',border:'none',cursor:'pointer',color:'var(--text-muted)',padding:3,borderRadius:4,opacity:0.6,lineHeight:1}}>
+                  <button onClick={() => { navigator.clipboard.writeText(m.text); toast('Copied!') }}
+                    style={{position:'absolute',top:4,right:4,background:'none',border:'none',cursor:'pointer',color:'var(--text-muted)',padding:3,borderRadius:4,opacity:0.6,lineHeight:1}}>
                     <Copy size={11} />
                   </button>
                 )}
@@ -1376,7 +1068,7 @@ function ChatModal({ onClose, t, isAr, needsSignIn, onSignIn, ask }) {
           ))}
           {showSuggestions && (
             <div style={{padding:'0.5rem 0.75rem 0.25rem',display:'flex',flexWrap:'wrap',gap:'0.35rem'}}>
-              {t.chatSuggest.map(q => (
+              {CHAT_SUGGESTIONS.map(q => (
                 <button key={q} onClick={() => sendMsg(q)} style={{
                   padding:'0.3rem 0.7rem',borderRadius:50,fontSize:'0.76rem',fontWeight:500,
                   border:'1px solid var(--glass-border)',background:'var(--glass-light)',
@@ -1397,27 +1089,19 @@ function ChatModal({ onClose, t, isAr, needsSignIn, onSignIn, ask }) {
           )}
           <div ref={endRef} />
         </div>
-        {needsSignIn ? (
-          <div className="chat-input-row" style={{justifyContent:'center'}}>
-            <button className="submit-btn" style={{flex:'none',padding:'0.6rem 1.1rem',fontSize:'0.85rem'}} onClick={onSignIn}>
-              <LogIn size={14} /> {t.chatSignIn}
-            </button>
-          </div>
-        ) : (
-          <div className="chat-input-row">
-            <input
-              className="chat-input"
-              placeholder={t.chatPh}
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && send()}
-              autoFocus
-            />
-            <button className="submit-btn" style={{flex:'none',padding:'0.55rem 1rem',fontSize:'0.85rem'}} onClick={send} disabled={loading}>
-              {loading ? <Loader2 size={14} className="spin" /> : t.chatSend}
-            </button>
-          </div>
-        )}
+        <div className="chat-input-row">
+          <input
+            className="chat-input"
+            placeholder="Ask a question…"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && send()}
+            autoFocus
+          />
+          <button className="submit-btn" style={{flex:'none',padding:'0.55rem 1rem',fontSize:'0.85rem'}} onClick={send} disabled={loading}>
+            {loading ? <Loader2 size={14} className="spin" /> : 'Send'}
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -1594,113 +1278,50 @@ function TermsModal({ lang, onClose }) {
 }
 
 // ── Login Modal ────────────────────────────────────────────────────────────────
-// Inline role=alert messages (not toasts), confirm-email panel with resend,
-// forgot password, and an in-app-browser notice instead of a Google button that
-// can't work there.
-function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice }) {
+function LoginModal({ onClose, onLogin, lang, sbClient, toast, initialMode }) {
   const t = T[lang] || T['en']
   const isAr = lang === 'ar'
   const [mode, setMode]         = useState(initialMode === 'signup' ? 'signup' : 'signin')
-  const [email, setEmail]       = useState(initialEmail || '')
+  const [email, setEmail]       = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy]         = useState(false)
-  const [gBusy, setGBusy]       = useState(false)
-  const [msg, setMsg]           = useState(notice || null)   // { type: 'error' | 'ok', text }
-  const [needConfirm, setNeedConfirm] = useState(false)     // email_not_confirmed → offer resend
-  const [sentTo, setSentTo]     = useState('')              // sign-up sent → "check your inbox"
-  const [copied, setCopied]     = useState(false)
-  const timers = useRef([])
-  useEffect(() => () => timers.current.forEach(clearTimeout), [])
-  useEscapeKey(onClose)
   const isSignup = mode === 'signup'
-  const later = (fn, ms) => { const id = setTimeout(fn, ms); timers.current.push(id); return id }
-
-  // Runs an auth call with a 20s guard so a hung request never leaves the button spinning.
-  const guarded = async (fn) => {
-    if (!sbClient) { setMsg({ type: 'error', text: t.authUnavailable }); return }
-    setBusy(true)
-    const tm = later(() => { setBusy(false); setMsg({ type: 'error', text: t.authTimeout }) }, 20000)
-    try { await fn() }
-    catch (err) { setMsg({ type: 'error', text: authErrText(t, err) }) }
-    finally { clearTimeout(tm); setBusy(false) }
-  }
-
-  const emailAuth = (e) => {
-    e?.preventDefault?.()
-    if (busy) return
+  const emailAuth = async () => {
     const em = email.trim()
-    if (!EMAIL_RE.test(em) || password.length < 6) { setMsg({ type: 'error', text: t.authWeak }); return }
-    setMsg(null); setNeedConfirm(false)
-    return guarded(async () => {
+    if (!sbClient) { toast && toast(t.authError, 'error'); return }
+    if (!/.+@.+\..+/.test(em) || password.length < 6) { toast && toast(t.authWeak, 'error'); return }
+    setBusy(true)
+    try {
       if (isSignup) {
-        const { data, error } = await sbClient.auth.signUp({ email: em, password, options: { emailRedirectTo: window.location.origin } })
+        const { data, error } = await sbClient.auth.signUp({ email: em, password })
         if (error) {
-          if (error.code === 'user_already_exists' || error.code === 'email_exists') setMode('signin')
+          const m = (error.message || '').toLowerCase()
+          if (m.includes('already') || m.includes('registered') || m.includes('exists')) {
+            toast && toast(t.accountExists, 'error'); setMode('signin'); setBusy(false); return
+          }
           throw error
         }
-        // Email confirmation on + address already registered → a user with no identities
-        if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
-          setMode('signin'); setMsg({ type: 'error', text: t.accountExists }); return
-        }
-        if (!data?.session) { setSentTo(em); return }
+        if (!data.session) { toast && toast(t.authCheckEmail, 'success'); setBusy(false); return }
         onClose()
       } else {
         const { error } = await sbClient.auth.signInWithPassword({ email: em, password })
-        if (error) { if (error.code === 'email_not_confirmed') setNeedConfirm(true); throw error }
+        if (error) {
+          const m = (error.message || '').toLowerCase()
+          toast && toast(m.includes('invalid') || m.includes('credentials') ? t.wrongPassword : (error.message || t.authError), 'error')
+          setBusy(false); return
+        }
         onClose()
       }
-    })
+    } catch (e) {
+      toast && toast((e && e.message) || t.authError, 'error')
+      setBusy(false)
+    }
   }
-
-  const resend = (em) => guarded(async () => {
-    const { error } = await sbClient.auth.resend({ type: 'signup', email: em, options: { emailRedirectTo: window.location.origin } })
-    if (error) throw error
-    setMsg({ type: 'ok', text: t.resent })
-  })
-
-  const forgot = () => {
-    if (busy) return
-    const em = email.trim()
-    if (!EMAIL_RE.test(em)) { setMsg({ type: 'error', text: t.enterEmailFirst }); return }
-    setMsg(null); setNeedConfirm(false)
-    return guarded(async () => {
-      const { error } = await sbClient.auth.resetPasswordForEmail(em, { redirectTo: window.location.origin })
-      if (error) throw error
-      setMsg({ type: 'ok', text: t.resetSent(em) })
-    })
-  }
-
-  const google = async () => {
-    if (gBusy) return
-    if (!sbClient) { setMsg({ type: 'error', text: t.authUnavailable }); return }
-    setGBusy(true); setMsg(null)
-    const tm = later(() => setGBusy(false), 20000)
-    try {
-      const { error } = await sbClient.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } })
-      if (error) throw error      // success: the browser is on its way to Google
-    } catch (err) { clearTimeout(tm); setGBusy(false); setMsg({ type: 'error', text: authErrText(t, err) }) }
-  }
-
-  const copyLink = async () => {
-    try { await navigator.clipboard.writeText(window.location.origin); setCopied(true); later(() => setCopied(false), 2000) }
-    catch { setMsg({ type: 'ok', text: window.location.origin }) }   // clipboard blocked → show it to copy by hand
-  }
-
-  const inputStyle = {width:'100%', padding:'0.7rem 0.9rem', marginBottom:'0.6rem', borderRadius:10,
-    border:'1px solid var(--border, rgba(120,140,180,0.3))', background:'var(--input-bg, rgba(255,255,255,0.04))',
-    color:'var(--text-primary)', fontSize:'0.9rem', textAlign: isAr ? 'right' : 'left', direction:'ltr'}
-  const linkBtn = {background:'none', border:'none', color:'var(--accent)', fontSize:'0.8rem', cursor:'pointer', padding:'0.25rem', fontFamily:'inherit'}
-  const alertBox = msg && (
-    <div role="alert" style={{color: msg.type === 'error' ? '#ef4444' : '#22c55e', fontSize:'0.82rem', lineHeight:1.5,
-      margin:'0 0 0.7rem', whiteSpace:'normal', textAlign: isAr ? 'right' : 'left', wordBreak:'break-word'}}>{msg.text}</div>
-  )
   return (
     <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
-      <div className="modal-box" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}
-        style={{maxWidth:380, width:'92vw', direction: isAr ? 'rtl' : 'ltr', padding:'2rem', textAlign:'center', position:'relative', overflowY:'auto'}}>
-        <button className="modal-close" onClick={onClose} aria-label={t.close}
-          style={{position:'absolute', top:10, insetInlineEnd:10}}><X size={16} /></button>
-        <div style={{marginBottom:'1.5rem'}}>
+      <div className="modal-box" onClick={e => e.stopPropagation()}
+        style={{maxWidth:380, width:'92vw', direction: isAr ? 'rtl' : 'ltr', padding:'2rem', textAlign:'center'}}>
+        <div style={{marginBottom:'1.75rem'}}>
           <div style={{
             width:52, height:52, borderRadius:16, margin:'0 auto 1rem',
             background:'linear-gradient(135deg,var(--navy-600),var(--navy-400))',
@@ -1710,164 +1331,65 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
             <AlimneGlyph size={26} />
           </div>
           <div style={{fontWeight:700, fontSize:'1.15rem', color:'var(--text-primary)', marginBottom:'0.4rem'}}>
-            {sentTo ? t.checkInboxTitle : isSignup ? t.loginTitleSignup : t.loginTitle}
+            {isSignup ? t.loginTitleSignup : t.loginTitle}
           </div>
-          {!sentTo && (
-            <div style={{fontSize:'0.82rem', color:'var(--text-muted)', lineHeight:1.55}}>
-              {isSignup ? t.loginSubSignup : t.loginSub}
-            </div>
-          )}
-        </div>
-
-        {sentTo ? (
-          <div>
-            <Mail size={26} color="var(--accent)" style={{marginBottom:'0.6rem'}} />
-            <div style={{fontSize:'0.86rem', color:'var(--text-secondary)', lineHeight:1.55, marginBottom:'1rem', wordBreak:'break-word'}}>
-              {t.checkInbox(sentTo)}
-            </div>
-            {alertBox}
-            <button className="submit-btn" disabled={busy} onClick={() => resend(sentTo)}
-              style={{width:'100%', justifyContent:'center', padding:'0.7rem 1.25rem', fontSize:'0.88rem', marginBottom:'0.6rem', opacity: busy ? 0.7 : 1}}>
-              {busy ? <Loader2 size={15} className="spin" /> : <><Mail size={14} /> {t.resendEmail}</>}
-            </button>
-            <button type="button" style={linkBtn} onClick={() => { setSentTo(''); setMode('signin'); setMsg(null) }}>
-              {t.backToSignIn}
-            </button>
+          <div style={{fontSize:'0.82rem', color:'var(--text-muted)', lineHeight:1.55}}>
+            {isSignup ? t.loginSubSignup : t.loginSub}
           </div>
-        ) : (
-          <>
-            {IN_APP && (
-              <div role="note" style={{padding:'0.7rem 0.8rem', borderRadius:10, marginBottom:'1rem',
-                background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.3)',
-                fontSize:'0.78rem', lineHeight:1.5, color:'var(--text-secondary)', textAlign: isAr ? 'right' : 'left'}}>
-                {t.inAppGoogle}
-                <button type="button" className="ctrl-btn" onClick={copyLink}
-                  style={{marginTop:'0.55rem', width:'100%', justifyContent:'center'}}>
-                  {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? t.referCopied : t.copyLink}
-                </button>
-              </div>
-            )}
-            <form onSubmit={emailAuth} noValidate>
-              <input
-                type="email" value={email} onChange={e => setEmail(e.target.value)}
-                placeholder={t.emailPh} autoComplete="username" inputMode="email" style={inputStyle}
-              />
-              <input
-                type="password" value={password} onChange={e => setPassword(e.target.value)}
-                placeholder={t.passwordPh} autoComplete={isSignup ? 'new-password' : 'current-password'}
-                style={{...inputStyle, marginBottom: isSignup ? '0.8rem' : '0.3rem'}}
-              />
-              {!isSignup && (
-                <div style={{textAlign: isAr ? 'left' : 'right', marginBottom:'0.5rem'}}>
-                  <button type="button" onClick={forgot} style={{...linkBtn, fontSize:'0.75rem'}}>{t.forgotPw}</button>
-                </div>
-              )}
-              {alertBox}
-              {needConfirm && (
-                <button type="button" className="ctrl-btn" disabled={busy} onClick={() => resend(email.trim())}
-                  style={{width:'100%', justifyContent:'center', marginBottom:'0.7rem'}}>
-                  <Mail size={13} /> {t.resendConfirm}
-                </button>
-              )}
-              <button
-                type="submit"
-                className="submit-btn"
-                disabled={busy}
-                style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', marginBottom:'0.75rem', opacity: busy ? 0.7 : 1}}
-              >
-                {busy ? <Loader2 size={15} className="spin" /> : (isSignup ? t.emailBtnSignup : t.emailBtn)}
-              </button>
-            </form>
-            <button
-              type="button"
-              onClick={() => { setMode(isSignup ? 'signin' : 'signup'); setMsg(null); setNeedConfirm(false) }}
-              style={{...linkBtn, marginBottom:'1rem'}}
-            >
-              {isSignup ? t.haveAccount : t.noAccount}
-            </button>
-            {!IN_APP && (
-              <>
-                <div style={{display:'flex', alignItems:'center', gap:'0.75rem', margin:'0 0 1rem', color:'var(--text-muted)', fontSize:'0.75rem'}}>
-                  <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
-                  {t.orDivider}
-                  <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
-                </div>
-                <button
-                  type="button"
-                  className="submit-btn"
-                  disabled={gBusy}
-                  style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', gap:'0.65rem', opacity: gBusy ? 0.7 : 1}}
-                  onClick={google}
-                >
-                  {gBusy ? <Loader2 size={18} className="spin" /> : (
-                    /* Google logo */
-                    <svg width="18" height="18" viewBox="0 0 48 48" style={{flexShrink:0}}>
-                      <path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 2.9l5.7-5.7C34.5 6.6 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.9z"/>
-                      <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 8 2.9l5.7-5.7C34.5 6.6 29.6 4 24 4 16.3 4 9.7 8.4 6.3 14.7z"/>
-                      <path fill="#4CAF50" d="M24 44c5.4 0 10.3-2 14-5.3l-6.5-5.5C29.6 35 26.9 36 24 36c-5.3 0-9.7-3.3-11.3-8H6.3C9.7 35.6 16.3 40 24 44z"/>
-                      <path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.3 4.1-4.3 5.5l6.5 5.5C37.2 35.8 44 30.6 44 24c0-1.3-.1-2.6-.4-3.9z"/>
-                    </svg>
-                  )}
-                  {t.loginBtn}
-                </button>
-              </>
-            )}
-            <div style={{marginTop:'1rem', fontSize:'0.73rem', color:'var(--text-muted)'}}>
-              {isAr
-                ? 'بالمتابعة، أنت توافق على شروطنا وأحكامنا'
-                : 'By continuing, you agree to our Terms & Conditions'}
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ── Set-new-password Modal (opened by a password-recovery link) ───────────────
-function SetPasswordModal({ onClose, lang, sbClient }) {
-  const t = T[lang] || T['en']
-  const isAr = lang === 'ar'
-  const [pw, setPw]     = useState('')
-  const [busy, setBusy] = useState(false)
-  const [msg, setMsg]   = useState(null)
-  const [done, setDone] = useState(false)
-  useEscapeKey(onClose)
-  useEffect(() => { if (!done) return; const id = setTimeout(onClose, 1800); return () => clearTimeout(id) }, [done, onClose])
-  const submit = async (e) => {
-    e.preventDefault()
-    if (busy || done) return
-    if (pw.length < 6) { setMsg({ type: 'error', text: t.pwTooShort }); return }
-    setBusy(true); setMsg(null)
-    const tm = setTimeout(() => { setBusy(false); setMsg({ type: 'error', text: t.authTimeout }) }, 20000)
-    try {
-      const { error } = await sbClient.auth.updateUser({ password: pw })
-      if (error) throw error
-      setMsg({ type: 'ok', text: t.pwUpdated }); setDone(true)
-    } catch (err) { setMsg({ type: 'error', text: authErrText(t, err) }) }
-    finally { clearTimeout(tm); setBusy(false) }
-  }
-  return (
-    <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
-      <div className="modal-box" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}
-        style={{maxWidth:380, width:'92vw', direction: isAr ? 'rtl' : 'ltr'}}>
-        <div className="modal-header">
-          <span style={{fontWeight:700, color:'var(--text-primary)'}}>{t.newPwTitle}</span>
-          <button className="modal-close" onClick={onClose} aria-label={t.close}><X size={16} /></button>
         </div>
-        <form onSubmit={submit} style={{padding:'1.25rem'}}>
-          <div style={{fontSize:'0.84rem', color:'var(--text-muted)', marginBottom:'0.9rem', lineHeight:1.5}}>{t.newPwSub}</div>
-          <input type="password" value={pw} autoFocus autoComplete="new-password" placeholder={t.newPwPh}
-            onChange={e => { setPw(e.target.value); setMsg(null) }}
-            style={{width:'100%', padding:'0.7rem 0.9rem', borderRadius:10, marginBottom:'0.7rem',
-              border:'1px solid var(--border, rgba(120,140,180,0.3))', background:'var(--input-bg, rgba(255,255,255,0.04))',
-              color:'var(--text-primary)', fontSize:'0.9rem', direction:'ltr', textAlign: isAr ? 'right' : 'left'}} />
-          {msg && <div role="alert" style={{color: msg.type === 'error' ? '#ef4444' : '#22c55e', fontSize:'0.82rem', marginBottom:'0.7rem', lineHeight:1.5}}>{msg.text}</div>}
-          <button type="submit" className="submit-btn" disabled={busy || done}
-            style={{width:'100%', justifyContent:'center', padding:'0.75rem', opacity: busy ? 0.7 : 1}}>
-            {busy ? <Loader2 size={15} className="spin" /> : t.newPwBtn}
-          </button>
-        </form>
+        <input
+          type="email" value={email} onChange={e => setEmail(e.target.value)}
+          placeholder={t.emailPh} autoComplete="email"
+          style={{width:'100%', padding:'0.7rem 0.9rem', marginBottom:'0.6rem', borderRadius:10,
+                  border:'1px solid var(--border, rgba(120,140,180,0.3))', background:'var(--input-bg, rgba(255,255,255,0.04))',
+                  color:'var(--text-primary)', fontSize:'0.9rem', textAlign: isAr ? 'right' : 'left', direction:'ltr'}}
+        />
+        <input
+          type="password" value={password} onChange={e => setPassword(e.target.value)}
+          placeholder={t.passwordPh} autoComplete={isSignup ? 'new-password' : 'current-password'}
+          onKeyDown={e => { if (e.key === 'Enter') emailAuth() }}
+          style={{width:'100%', padding:'0.7rem 0.9rem', marginBottom:'0.8rem', borderRadius:10,
+                  border:'1px solid var(--border, rgba(120,140,180,0.3))', background:'var(--input-bg, rgba(255,255,255,0.04))',
+                  color:'var(--text-primary)', fontSize:'0.9rem', textAlign: isAr ? 'right' : 'left', direction:'ltr'}}
+        />
+        <button
+          className="submit-btn"
+          disabled={busy}
+          style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', marginBottom:'0.75rem', opacity: busy ? 0.7 : 1}}
+          onClick={emailAuth}
+        >
+          {busy ? '…' : (isSignup ? t.emailBtnSignup : t.emailBtn)}
+        </button>
+        <button
+          onClick={() => setMode(isSignup ? 'signin' : 'signup')}
+          style={{background:'none', border:'none', color:'var(--accent)', fontSize:'0.8rem', cursor:'pointer', marginBottom:'1rem', padding:'0.25rem'}}
+        >
+          {isSignup ? t.haveAccount : t.noAccount}
+        </button>
+        <div style={{display:'flex', alignItems:'center', gap:'0.75rem', margin:'0 0 1rem', color:'var(--text-muted)', fontSize:'0.75rem'}}>
+          <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
+          {t.orDivider}
+          <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
+        </div>
+        <button
+          className="submit-btn"
+          style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', gap:'0.65rem'}}
+          onClick={onLogin}
+        >
+          {/* Google logo */}
+          <svg width="18" height="18" viewBox="0 0 48 48" style={{flexShrink:0}}>
+            <path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 2.9l5.7-5.7C34.5 6.6 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.9z"/>
+            <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 8 2.9l5.7-5.7C34.5 6.6 29.6 4 24 4 16.3 4 9.7 8.4 6.3 14.7z"/>
+            <path fill="#4CAF50" d="M24 44c5.4 0 10.3-2 14-5.3l-6.5-5.5C29.6 35 26.9 36 24 36c-5.3 0-9.7-3.3-11.3-8H6.3C9.7 35.6 16.3 40 24 44z"/>
+            <path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.3 4.1-4.3 5.5l6.5 5.5C37.2 35.8 44 30.6 44 24c0-1.3-.1-2.6-.4-3.9z"/>
+          </svg>
+          {t.loginBtn}
+        </button>
+        <div style={{marginTop:'1rem', fontSize:'0.73rem', color:'var(--text-muted)'}}>
+          {lang === 'ar'
+            ? 'بالمتابعة، أنت توافق على شروطنا وأحكامنا'
+            : 'By continuing, you agree to our Terms & Conditions'}
+        </div>
       </div>
     </div>
   )
@@ -1926,7 +1448,7 @@ function UpgradeModal({ onClose, onUpgrade, onManage, isSubscribed, lang }) {
 }
 
 // ── Account Modal ──────────────────────────────────────────────────────────────
-function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSubscribed, lang, loadErr, onRetry }) {
+function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSubscribed, lang }) {
   const t = T[lang] || T['en']
   const isAr = lang === 'ar'
   const status = String(userInfo?.subscription_status || 'free').toLowerCase()
@@ -1953,7 +1475,7 @@ function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSub
           <span style={{fontWeight:700, color:'var(--text-primary)', display:'flex', alignItems:'center', gap:'0.4rem'}}>
             <User size={15} /> {t.accountTitle}
           </span>
-          <button className="modal-close" onClick={onClose} aria-label={t.close}><X size={16} /></button>
+          <button className="modal-close" onClick={onClose}><X size={16} /></button>
         </div>
         <div style={{padding:'1.25rem'}}>
           <div style={{display:'flex', alignItems:'center', gap:'0.75rem', marginBottom:'1rem'}}>
@@ -1967,16 +1489,6 @@ function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSub
               </div>
             </div>
           </div>
-          {loadErr && (
-            <div role="alert" style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:'0.5rem',
-              padding:'0.55rem 0.7rem', marginBottom:'0.6rem', borderRadius:9, fontSize:'0.8rem', color:'#ef4444',
-              background:'rgba(239,68,68,0.08)', border:'1px solid rgba(239,68,68,0.25)'}}>
-              <span>{t.accountLoadFailed}</span>
-              <button className="ctrl-btn" style={{padding:'0.25rem 0.6rem', fontSize:'0.75rem', flexShrink:0}} onClick={onRetry}>
-                <RotateCcw size={12} /> {t.retry}
-              </button>
-            </div>
-          )}
           {row(t.accountPlan, isSubscribed ? t.planPro : t.planFree)}
           {row(t.accountStatus, statusLabel)}
           {isSubscribed && periodEnd && row(t.renewsOn, periodEnd)}
@@ -2061,9 +1573,9 @@ function EmailCaptureModal({ onClose, onSubmit, onSkip, lang }) {
 
 // ── Main App ───────────────────────────────────────────────────────────────────
 export default function App() {
-  const [theme, setTheme]   = useState(() => ls.get('alimne_theme') === 'light' ? 'light' : 'dark')
-  const [lang, setLang]     = useState(() => { const v = ls.get('alimne_lang'); return v === 'en' || v === 'ar' ? v : 'auto' })
-  const [queue, setQueue]   = useState(loadSavedQueue)
+  const [theme, setTheme]   = useState('dark')
+  const [lang, setLang]     = useState('auto')
+  const [queue, setQueue]   = useState([])
   const [drag, setDrag]     = useState(false)
   const [running, setRunning] = useState(false)
 
@@ -2077,7 +1589,7 @@ export default function App() {
   const [summaryOnly, setSummaryOnly] = useState(false)
   const [includeQuiz, setIncludeQuiz] = useState(true)
 
-  // Modals (they hold a queue item id)
+  // Modals
   const [flashModal, setFlashModal] = useState(null)
   const [quizModal, setQuizModal]   = useState(null)
   const [chatModal, setChatModal]   = useState(null)
@@ -2088,263 +1600,118 @@ export default function App() {
   // Auth
   const [session, setSession]         = useState(null)
   const [userInfo, setUserInfo]       = useState(null)
-  const [userInfoErr, setUserInfoErr] = useState(false)
-  const [authEnabled, setAuthEnabled] = useState(true)   // production default until /api/config says otherwise
+  const [sbClient, setSbClient]       = useState(null)
+  const [authEnabled, setAuthEnabled] = useState(false)
   const [showLogin, setShowLogin]     = useState(false)
   const [loginMode, setLoginMode]     = useState('signin')
-  const [loginNotice, setLoginNotice] = useState(null)
-  const [loginKey, setLoginKey]       = useState(0)
-  const [showSetPw, setShowSetPw]     = useState(false)
   const [showUpgrade, setShowUpgrade] = useState(false)
   const [showAccount, setShowAccount] = useState(false)
   const [showEmailCapture, setShowEmailCapture] = useState(false)
-  const [emailCaptured, setEmailCaptured] = useState(() => !!ls.get('alimne_lead'))
-  const [authLoading, setAuthLoading] = useState(!!sb)
+  const [emailCaptured, setEmailCaptured] = useState(() => {
+    try { return !!localStorage.getItem('alimne_lead') } catch { return false }
+  })
+  const [authLoading, setAuthLoading] = useState(true)
   const [anonInfo, setAnonInfo]       = useState(null)  // {limit, remaining} for signed-out users
 
-  const openLogin = (mode = 'signin', notice = null) => {
-    setLoginMode(mode); setLoginNotice(notice); setLoginKey(k => k + 1); setShowLogin(true)
-  }
+  const openLogin = (mode = 'signin') => { setLoginMode(mode); setShowLogin(true) }
 
   // Referral
   const [refStats, setRefStats]     = useState(null)
   const [copied, setCopied]         = useState(false)
 
   const inputRef = useRef()
-  // UI strings + direction only; the API still receives `lang` unchanged ('auto' included)
-  const uiLang = lang === 'auto' ? (NAV_AR ? 'ar' : 'en') : lang
-  const t = T[uiLang] || T['en']
-  const isAr = uiLang === 'ar'
-
-  // Refs for async flows that outlive a render (a batch can run for minutes)
-  const sessionRef  = useRef(null)
-  const userInfoRef = useRef(userInfo); userInfoRef.current = userInfo
-  const queueRef    = useRef(queue);    queueRef.current = queue
-  const langRef     = useRef(lang);     langRef.current = lang
-  const tRef        = useRef(t);        tRef.current = t
-  const lastUid     = useRef(null)
-  const meSeq       = useRef(0)
-  const rehydrating = useRef({})
-  const savedQ      = useRef('')
+  const t = T[lang] || T['en']
 
   const quizHistory = (() => { try { return JSON.parse(localStorage.getItem('quizHistory') || '[]') } catch { return [] } })()
 
-  const chooseLang = v => { setLang(v); ls.set('alimne_lang', v) }   // explicit choices only
-  useEffect(() => { ls.set('alimne_theme', theme) }, [theme])
-
-  // Keep finished guides for this tab (whitelisted fields; drop the oldest copies past ~2 MB)
-  useEffect(() => {
-    try {
-      const rows = queue.filter(i => (i.status === 'done' || i.status === 'expired') && i.jobId)
-        .map(({ id, name, status, jobId, shareUrl, counts, source, guideBlob, sig, filename }) => {
-          const src = source ? { ...source } : undefined
-          if (src) delete src.text                              // pasted text stays in memory only
-          return { id, name, status, jobId, shareUrl, counts, source: src, guideBlob, sig, filename }
-        })
-      let s = JSON.stringify(rows)
-      for (let k = 0; s.length > 2e6 && k < rows.length; k++) {
-        rows[k] = { ...rows[k], guideBlob: undefined, sig: undefined }
-        s = JSON.stringify(rows)
-      }
-      if (s !== savedQ.current) { sessionStorage.setItem(QKEY, s); savedQ.current = s }
-    } catch { /* storage blocked or full */ }
-  }, [queue])
-
   // ── Capture referral code from URL ────────────────────────────────────────
   useEffect(() => {
-    try {
-      const params = new URLSearchParams(window.location.search)
-      const ref = params.get('ref')
-      if (!ref) return
-      ls.set('alimne_ref', ref.toUpperCase())
-      params.delete('ref')
-      const qs = params.toString()
-      window.history.replaceState(window.history.state, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash)
-    } catch { /* ignore */ }
+    const params = new URLSearchParams(window.location.search)
+    const ref = params.get('ref')
+    if (ref) {
+      localStorage.setItem('alimne_ref', ref.toUpperCase())
+      window.history.replaceState({}, '', window.location.pathname)
+    }
   }, [])
 
-  // ── OAuth / email-link errors come back in the URL: explain, reopen sign-in, clean the URL
-  useEffect(() => {
-    const e = AUTH_URL_ERR
-    if (!e) return
-    const expired = e.code === 'otp_expired' || /expired|invalid/i.test(e.desc || '')
-    openLogin('signin', { type: 'error', text: expired ? t.linkExpired : t.authLinkError })
-    try {
-      const q = new URLSearchParams(window.location.search)
-      ;['error', 'error_code', 'error_description'].forEach(k => q.delete(k))
-      const qs = q.toString()
-      const hash = /(^#|&)(error|error_code|error_description)=/.test(window.location.hash) ? '' : window.location.hash
-      window.history.replaceState(window.history.state, '', window.location.pathname + (qs ? `?${qs}` : '') + hash)
-    } catch { /* ignore */ }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
-  // ── /api/config: anon counters + auth_enabled only. Retried with backoff; if it
-  //    never loads, auth stays enabled (the Supabase client doesn't depend on it).
+  // ── Supabase init + auth ────────────────────────────────────────────────────
   useEffect(() => {
-    let live = true
-    ;(async () => {
-      for (let i = 0; i < 4 && live; i++) {
-        try {
-          const r = await fetchT('/api/config', { headers: { 'X-Device-Id': getDeviceId() } }, 8000)
-          if (!r.ok) throw new Error(`config ${r.status}`)
-          const cfg = await r.json()
-          if (!live) return
-          setAuthEnabled(cfg.auth_enabled !== false)
-          if (cfg.anon_free_limit !== undefined)
-            setAnonInfo({ limit: cfg.anon_free_limit, remaining: cfg.anon_remaining ?? cfg.anon_free_limit })
+    let authSub = null
+    fetch('/api/config', { headers: { 'X-Device-Id': getDeviceId() } })
+      .then(r => r.json())
+      .then(cfg => {
+        setAuthEnabled(!!cfg.auth_enabled)
+        if (cfg.anon_free_limit !== undefined)
+          setAnonInfo({ limit: cfg.anon_free_limit, remaining: cfg.anon_remaining ?? cfg.anon_free_limit })
+        if (!cfg.auth_enabled || !cfg.supabase_url || !cfg.supabase_anon_key) {
+          setAuthLoading(false)
           return
-        } catch { if (i < 3 && live) await sleep([1000, 3000, 9000][i]) }
-      }
-    })()
-    return () => { live = false }
+        }
+        const sb = createClient(cfg.supabase_url, cfg.supabase_anon_key)
+        setSbClient(sb)
+        sb.auth.getSession().then(({ data }) => {
+          setSession(data.session)
+          setAuthLoading(false)
+          if (data.session) {
+            _fetchUserInfo(data.session.access_token)
+            _fetchRefStats(data.session.access_token)
+          }
+        })
+        const { data: { subscription } } = sb.auth.onAuthStateChange((_event, sess) => {
+          setSession(sess)
+          if (sess) {
+            _fetchUserInfo(sess.access_token)
+            _fetchRefStats(sess.access_token)
+            // Apply stored referral code (only fires once, code removed after)
+            const storedRef = localStorage.getItem('alimne_ref')
+            if (storedRef) {
+              fetch('/api/referral/apply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sess.access_token}` },
+                body: JSON.stringify({ code: storedRef })
+              }).then(() => localStorage.removeItem('alimne_ref')).catch(() => {})
+            }
+          } else {
+            setUserInfo(null)
+            setRefStats(null)
+          }
+        })
+        authSub = subscription
+      })
+      .catch(() => setAuthLoading(false))
+    return () => { if (authSub) authSub.unsubscribe() }
   }, [])
 
-  // ── Auth state: everything is driven by the listener ───────────────────────
-  useEffect(() => {
-    if (!sb) return
-    let live = true
-    const { data: { subscription } } = sb.auth.onAuthStateChange((event, sess) => {
-      if (!live) return
-      sessionRef.current = sess
-      setSession(sess)
-      if (event === 'INITIAL_SESSION') setAuthLoading(false)
-      if (event === 'PASSWORD_RECOVERY' || (event === 'INITIAL_SESSION' && sess && RECOVERY_IN_URL)) setShowSetPw(true)
-      const id = sess?.user?.id || null
-      if (id && id !== lastUid.current) {
-        lastUid.current = id
-        // outside the auth lock: calling supabase inside this callback can deadlock
-        setTimeout(() => { fetchUserInfo(); fetchRefStats() }, 0)
-      } else if (!id) {
-        lastUid.current = null; meSeq.current++
-        setUserInfo(null); setUserInfoErr(false); setRefStats(null)
-      }
-      if (event === 'SIGNED_IN' && sess) setTimeout(applyReferral, 0)
-    })
-    sb.auth.getSession()
-      .then(({ error }) => { if (error) console.warn('auth restore:', error.message) })
+  const _fetchUserInfo = (token) => {
+    fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => { if (!d.error) setUserInfo(d) })
       .catch(() => {})
-      .finally(() => { if (live) setAuthLoading(false) })
-    return () => { live = false; subscription.unsubscribe() }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // Fresh auth per request: getSession() waits for the restore and refreshes a stale token.
-  const authHeaders = async () => {
-    const h = { 'X-Device-Id': getDeviceId() }
-    let s = sessionRef.current
-    if (sb) {
-      try {
-        const r = await Promise.race([sb.auth.getSession(), sleep(10000).then(() => 'timeout')])
-        if (r !== 'timeout') s = r?.data?.session || null
-      } catch { /* keep the last known session */ }
-    }
-    if (s?.access_token) h.Authorization = `Bearer ${s.access_token}`
-    return h
-  }
-
-  // → 'ok' | 'network' (keep the session, report offline) | 'failed' (session is dead)
-  const tryRefresh = async () => {
-    if (!sb) return 'failed'
-    try {
-      const { data, error } = await sb.auth.refreshSession()
-      if (!error && data?.session) return 'ok'
-      if (error && (error.name === 'AuthRetryableFetchError' || !error.status || error.status >= 500)) return 'network'
-      return 'failed'
-    } catch { return 'network' }
-  }
-
-  // Local sign-out (this device only). If the network call fails, clear the stored session and reload.
-  const signOut = async () => {
-    meSeq.current++; lastUid.current = null; sessionRef.current = null
-    let error = null
-    try { if (sb) error = (await sb.auth.signOut({ scope: 'local' })).error } catch (e) { error = e }
-    setSession(null); setUserInfo(null); setUserInfoErr(false); setRefStats(null)
-    if (error) {
-      try { Object.keys(localStorage).filter(k => k.startsWith('sb-') && k.endsWith('-auth-token')).forEach(k => localStorage.removeItem(k)) } catch { /* ignore */ }
-      window.location.reload()
-    }
-  }
-  // Explicit sign-out also clears this tab's guides (shared / library computers)
-  const userSignOut = async () => {
-    setShowAccount(false)
-    setQueue(q => q.filter(i => i.status === 'processing'))
-    try { sessionStorage.removeItem(QKEY) } catch { /* ignore */ }
-    await signOut()
-  }
-  const expireSession = async () => {
-    await signOut()
-    openLogin('signin', { type: 'error', text: tRef.current.sessionExpired })
-  }
-
-  // /api/auth/me — checks r.ok, refreshes once on 401, retries 5xx/network twice,
-  // keeps the previous userInfo on failure and ignores stale / post-sign-out replies.
-  const fetchUserInfo = async () => {
-    const seq = ++meSeq.current
-    const stale = () => seq !== meSeq.current || !sessionRef.current
-    setUserInfoErr(false)
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if (stale()) return
-      const h = await authHeaders()
-      if (!h.Authorization || stale()) return
-      let r = null
-      try { r = await fetchT('/api/auth/me', { headers: h }, 10000) } catch { /* network */ }
-      if (stale()) return
-      if (r && r.status === 401) {
-        if (attempt === 0 && (await tryRefresh()) === 'ok') continue
-        break
-      }
-      if (r && r.ok) {
-        const d = await r.json().catch(() => null)
-        if (stale()) return
-        if (d && !d.error) { setUserInfo(d); setUserInfoErr(false); return }
-      }
-      if (attempt < 2) await sleep(1500 * (attempt + 1))
-    }
-    if (!stale()) setUserInfoErr(true)
-  }
-
-  const fetchRefStats = async () => {
-    try {
-      const h = await authHeaders()
-      if (!h.Authorization) return
-      const r = await fetchT('/api/referral/stats', { headers: h }, 10000)
-      if (!r.ok) return
-      const d = await r.json()
-      if (sessionRef.current) setRefStats(d)
-    } catch { /* non-critical */ }
-  }
-
-  // Referral code stored from ?ref= — removed only once the server accepted or rejected it
-  const applyReferral = async () => {
-    const code = ls.get('alimne_ref')
-    if (!code) return
-    try {
-      const h = await authHeaders()
-      if (!h.Authorization) return
-      const r = await fetchT('/api/referral/apply', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', ...h }, body: JSON.stringify({ code })
-      }, 15000)
-      const d = await r.json().catch(() => ({}))
-      if (r.ok && (d.success || d.reason === 'invalid_code')) ls.del('alimne_ref')
-    } catch { /* retry on the next sign-in */ }
   }
 
   // Back from Stripe Checkout (?sub=success): confirm, then re-read the plan a
   // few times — the webhook that activates Pro can land a few seconds later.
   useEffect(() => {
-    if (!session?.user?.id) return
+    if (!session?.access_token) return
     let params
     try { params = new URLSearchParams(window.location.search) } catch { return }
     if (params.get('sub') !== 'success') return
     toast(t.subSuccess, 'success')
-    const timers = [2500, 7000, 15000].map(ms => setTimeout(() => fetchUserInfo(), ms))
+    const token = session.access_token
+    const timers = [2500, 7000, 15000].map(ms => setTimeout(() => _fetchUserInfo(token), ms))
     params.delete('sub')
     const qs = params.toString()
-    try { window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash) } catch { /* ignore */ }
+    try { window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash) } catch {}
     return () => timers.forEach(clearTimeout)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.user?.id])
+  }, [session?.access_token])
+
+  const _fetchRefStats = (token) => {
+    fetch('/api/referral/stats', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => setRefStats(d))
+      .catch(() => {})
+  }
 
   const copyReferral = (code) => {
     const link = `${window.location.origin}?ref=${code}`
@@ -2354,35 +1721,36 @@ export default function App() {
     }).catch(() => {})
   }
 
-  // Authenticated JSON call: fresh token, one silent refresh + retry on 401
-  const authedFetch = async (url, opts = {}, ms = 20000) => {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      let r
-      try { r = await fetchT(url, { ...opts, headers: { ...(opts.headers || {}), ...(await authHeaders()) } }, ms) }
-      catch { return { status: 0, d: {} } }
-      const d = await r.json().catch(() => ({}))
-      if (r.status === 401 && attempt === 0 && sessionRef.current) {
-        const rf = await tryRefresh()
-        if (rf === 'ok') continue
-        if (rf === 'failed') { await expireSession(); return { status: 401, d, handled: true } }
-        return { status: 0, d: {} }
-      }
-      return { status: r.status, ok: r.ok, d }
-    }
-    return { status: 401, d: {} }
+  const getAuthHeaders = () => {
+    const h = { 'X-Device-Id': getDeviceId() }
+    if (session?.access_token) h.Authorization = `Bearer ${session.access_token}`
+    return h
   }
 
-  const goToStripe = async (path, failText) => {
-    const { status, ok, d, handled } = await authedFetch(path, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({})
+  const signIn = () => {
+    if (!sbClient) return
+    sbClient.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.origin }
     })
-    if (ok && d.url) { window.location.href = d.url; return }
-    if (handled) return
-    if (status === 401) { openLogin('signin'); return }
-    toast(friendlyErr(t, status ? (d.error || failText) : '', status, d), 'error')
   }
-  const handleCheckout      = () => goToStripe('/api/stripe/checkout', t.paymentError)
-  const handleManageBilling = () => goToStripe('/api/stripe/portal', t.billingError)
+
+  const signOut = () => {
+    sbClient?.auth.signOut()
+    setSession(null)
+    setUserInfo(null)
+  }
+
+  const handleCheckout = () => {
+    fetch('/api/stripe/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({})
+    })
+      .then(r => r.json())
+      .then(d => { if (d.url) window.location.href = d.url; else throw new Error(d.error || 'No URL') })
+      .catch(e => toast(`Payment error — ${e.message || 'please try again'}`, 'error'))
+  }
 
   // Email capture at the paywall → store the lead, then send them to sign-up/subscribe.
   const submitLead = async (email) => {
@@ -2392,7 +1760,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, source: 'paywall' })
       })
-      ls.set('alimne_lead', email)
+      try { localStorage.setItem('alimne_lead', email) } catch {}
     } catch { /* best-effort — never trap the visitor */ }
     setEmailCaptured(true)
     setShowEmailCapture(false)
@@ -2400,56 +1768,55 @@ export default function App() {
   }
   const skipLead = () => { setShowEmailCapture(false); openLogin('signup') }
 
-  const updateItem = (id, patch) =>
-    setQueue(prev => prev.map(i => i.id === id ? { ...i, ...patch } : i))
-  // Patch only while the item still points at `jobId` (a regenerate/restore may have replaced it)
-  const updateItemJob = (id, jobId, patch) =>
-    setQueue(prev => prev.map(i => i.id === id && i.jobId === jobId ? { ...i, ...patch } : i))
-  const latestItem = id => queueRef.current.find(i => i.id === id)
-  const canRestore = it => !!(it && it.guideBlob && it.sig)
+  const handleManageBilling = () => {
+    fetch('/api/stripe/portal', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({})
+    })
+      .then(r => r.json())
+      .then(d => { if (d.url) window.location.href = d.url; else throw new Error(d.error || 'No URL') })
+      .catch(e => toast(`Billing error — ${e.message || 'please try again'}`, 'error'))
+  }
 
-  // 401 / 402 that a token refresh can't fix
-  const handleAuthError = (status, data, id) => {
-    const tt = tRef.current
+  // handle 401/402 from any SSE stream
+  const handleAuthError = (status, item, resolve, data) => {
     const code = data?.code
-    if (status === 401) {
-      if (sessionRef.current) { expireSession(); if (id) updateItem(id, { status: 'error', error: tt.sessionExpired, step: null }) }
-      else { openLogin('signin'); if (id) updateItem(id, { status: 'error', error: tt.loginTitle, step: null }) }
+    if (status === 401 || code === 'auth_required') {
+      openLogin('signin')
+      if (item) updateItem(item.id, { status: 'error', error: t.signInForMore })
+      if (resolve) resolve()
       return true
     }
     if (status === 402) {
       // Anonymous visitor out of free previews → invite sign-up (free tokens).
       // Signed-in user out of tokens → show the upgrade / subscribe modal.
       if (code === 'signin_for_more') {
-        if (!sessionRef.current) setAnonInfo(a => a ? { ...a, remaining: data?.tokens_remaining ?? 0 } : a)
-        if (emailCaptured || ls.get('alimne_lead')) openLogin('signup')
+        // Capture the email before the paywall (once), then route to sign-up/subscribe.
+        if (emailCaptured) openLogin('signup')
         else setShowEmailCapture(true)
-        if (id) updateItem(id, { status: 'error', error: tt.signInForMore, step: null })
+        if (item) updateItem(item.id, { status: 'error', error: t.signInForMore })
       } else {
         setShowUpgrade(true)
-        if (id) updateItem(id, { status: 'error', error: isProUser(userInfoRef.current) ? tt.proUsedUp : tt.freeUsedUp, step: null })
+        if (item) updateItem(item.id, { status: 'error', error: 'Free trial used — subscribe to continue.' })
       }
+      if (resolve) resolve()
       return true
     }
     return false
   }
 
   const addFiles = useCallback(fileList => {
-    const tt = tRef.current
-    const all = Array.from(fileList || [])
-    const typed = all.filter(f => /\.(pptx?|pdf|docx?|txt)$/i.test(f.name))
-    if (typed.length < all.length) toast(tt.unsupportedFile, 'error')
-    const valid = typed.filter(f => {
-      if (f.size > MAX_UPLOAD) { toast(tt.fileTooBig(f.name), 'error'); return false }
-      return true
-    })
+    const valid = Array.from(fileList).filter(f => f.name.match(/\.(pptx?|pdf|docx?|txt)$/i))
     if (!valid.length) return
-    // Up to 3 files waiting/processing at a time (finished guides don't count)
-    const active = queueRef.current.filter(i => i.status !== 'done' && i.status !== 'expired').length
-    const room = Math.max(0, 3 - active)
-    if (valid.length > room) toast(tt.maxFiles, 'error')
-    const add = valid.slice(0, room).map(f => ({ id: uid(), file: f, name: f.name, status: 'queued', jobId: null, error: null, step: null, msg: null, source: { type: 'file' } }))
-    if (add.length) setQueue(prev => [...prev, ...add])
+    setQueue(prev => {
+      const merged = [
+        ...prev,
+        ...valid.map(f => ({ id: uid(), file: f, name: f.name, status: 'queued', jobId: null, error: null, step: null, msg: null }))
+      ]
+      if (merged.length > 3) toast('You can process up to 3 files at a time.', 'error')
+      return merged.slice(0, 3)
+    })
   }, [])
 
   const onDrop = e => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files) }
@@ -2459,432 +1826,218 @@ export default function App() {
   const removeItem = id => setQueue(prev => prev.filter(i => i.id !== id))
   const clearAll   = () => setQueue([])
 
-  // ── Guide cache + recovery ─────────────────────────────────────────────────
-  const applyGuideResp = (id, jobId, d) => {
-    const patch = { guide: guideOf(d) }
-    if (typeof d.guide_blob === 'string' && d.sig) { patch.guideBlob = d.guide_blob; patch.sig = d.sig }
-    if (d.filename) patch.filename = d.filename
-    updateItemJob(id, jobId, patch)
-  }
-
-  // Restore an expired guide from the signed copy this tab holds — free, no credit.
-  // → { jobId } | { code }
-  const rehydrate = (it) => {
-    if (!canRestore(it)) return Promise.resolve({ code: 'no_copy' })
-    if (rehydrating.current[it.id]) return rehydrating.current[it.id]
-    const p = (async () => {
-      try {
-        const headers = { 'Content-Type': 'application/json', ...(await authHeaders()) }
-        const r = await fetchT('/api/rehydrate', { method: 'POST', headers, body: JSON.stringify({ guide_blob: it.guideBlob, sig: it.sig }) }, 30000)
-        const d = await r.json().catch(() => ({}))
-        if (r.ok && d.job_id) {
-          updateItem(it.id, { jobId: d.job_id, status: 'done', error: null, ...(d.filename ? { filename: d.filename } : {}) })
-          return { jobId: d.job_id }
-        }
-        // a copy the server can never accept → stop offering Restore
-        if (r.status === 400 || r.status === 403 || r.status === 413) updateItem(it.id, { guideBlob: null, sig: null })
-        return { code: d.code || `http_${r.status}` }
-      } catch { return { code: 'network' } }
-      finally { delete rehydrating.current[it.id] }
-    })()
-    rehydrating.current[it.id] = p
-    return p
-  }
-
-  // Fetch a job-backed endpoint for a queue item. A 404 'expired' is healed from the
-  // signed copy (/api/rehydrate) and retried once; otherwise the item becomes 'expired'.
-  // → { r, jobId }; throws Error('expired') or the fetch error (AbortError on timeout).
-  const jobFetch = async (item, pathFn, opts = {}, ms = 30000) => {
-    const cur = latestItem(item.id) || item
-    let jobId = cur.jobId
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const r = await fetchT(pathFn(jobId), opts, ms)
-      if (r.status !== 404) return { r, jobId }
-      const d = await r.clone().json().catch(() => ({}))
-      if (d.code === 'no_flashcards') return { r, jobId }
-      if (attempt > 0) break
-      const re = await rehydrate(latestItem(item.id) || cur)
-      if (!re.jobId) break
-      jobId = re.jobId
-    }
-    updateItem(item.id, { status: 'expired', busy: null, sharing: false })
-    throw new Error('expired')
-  }
-
-  const prefetchPdf = async (id, jobId) => {
-    try {
-      const r = await fetchT(`/api/download/${jobId}`, {}, 30000)
-      if (!r.ok) return
-      const blob = await r.blob()
-      updateItemJob(id, jobId, { pdfBlob: blob, pdfName: filenameFrom(r, null) })
-    } catch { /* the tap falls back to a normal download */ }
-  }
-
-  // Once per finished guide: keep a copy (+ its signature) so study modes and
-  // restores work after the 15-minute server window. In-app browsers also get the PDF.
-  const cacheGuide = async (id, jobId) => {
-    try {
-      const r = await fetchT(`/api/guide/${jobId}`, {}, 20000)
-      if (r.ok) applyGuideResp(id, jobId, await r.json())
-    } catch { /* modals fetch on demand */ }
-    if (IN_APP) prefetchPdf(id, jobId)
-  }
-
-  const loadGuide = async (id) => {
-    const cur = latestItem(id)
-    if (!cur?.jobId) throw new Error('expired')
-    if (cur.guide) return cur.guide
-    const { r, jobId } = await jobFetch(cur, j => `/api/guide/${j}`, {}, 20000)
-    if (!r.ok) throw new Error('failed')
-    const d = await r.json()
-    applyGuideResp(id, jobId, d)
-    return guideOf(d)
-  }
-
-  // ── Generation (file / YouTube / text / sample) over SSE ──────────────────
-  const streamP = (url, opts, onEvent) => new Promise(resolve => {
-    streamSSE(url, opts,
-      ev => {
-        try { onEvent(ev) }
-        finally {
-          if (ev.error) resolve({ ok: false, msg: ev.error, status: 200, data: ev })
-          else if (ev.step === 'done') resolve({ ok: true })
-        }
-      },
-      (msg, status, data) => resolve({ ok: false, msg, status, data }),
-      tRef.current)
-  })
-
-  const onGenEvent = (id, ev, hadBearer, demo) => {
-    if (!demo && ev.language && langRef.current === 'auto') setLang(ev.language)
-    if (ev.error) return
-    if (ev.step === 'done') {
-      const counts = { sections: ev.sections, keywords: ev.keywords, flashcards: ev.flashcards, mcqs: ev.mcqs }
-      updateItem(id, { status: 'done', jobId: ev.job_id, step: 'done', msg: null, error: null, counts, partial: !!ev.partial,
-        guide: null, guideBlob: null, sig: null, filename: null, pdfBlob: null, pdfName: null, shareUrl: null, busy: null })
-      if (!demo && ev.tokens_remaining !== undefined) {
-        // only a request that carried a Bearer token reports the account balance
-        if (hadBearer) setUserInfo(u => u ? { ...u, tokens_remaining: ev.tokens_remaining } : u)
-        else if (!sessionRef.current) setAnonInfo(a => a ? { ...a, remaining: ev.tokens_remaining } : a)
-        else fetchUserInfo()
-      }
-      if (ev.job_id) cacheGuide(id, ev.job_id)
-    } else {
-      updateItem(id, { step: ev.step, msg: ev.msg })
-    }
-  }
-
-  // One generation for item `id`: fresh auth per attempt, one silent refresh + retry
-  // on an auth failure. → 'done' | 'error' | 'auth' ('auth' = stop the batch)
-  const runGeneration = async (id, url, makeOpts, demo = false) => {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const headers = demo ? {} : await authHeaders()
-      const hadBearer = !!headers.Authorization
-      const r = await streamP(url, makeOpts(headers), ev => onGenEvent(id, ev, hadBearer, demo))
-      if (r.ok) return 'done'
-      const tt = tRef.current
-      const code = r.data?.code
-      if (!demo && attempt === 0 && sessionRef.current &&
-          (r.status === 401 || (r.status === 402 && code === 'signin_for_more'))) {
-        const rf = await tryRefresh()
-        if (rf === 'ok') { updateItem(id, { status: 'processing', error: null, step: 'extract', msg: tt.starting }); continue }
-        if (rf === 'failed') { await expireSession(); updateItem(id, { status: 'error', error: tt.sessionExpired, step: null }); return 'auth' }
-        updateItem(id, { status: 'error', error: tt.errNetwork, step: null }); return 'auth'
-      }
-      if (!demo && (r.status === 401 || r.status === 402)) { handleAuthError(r.status, r.data, id); return 'auth' }
-      updateItem(id, { status: 'error', error: friendlyErr(tt, r.msg, r.status, r.data), step: null })
-      return 'error'
-    }
-    return 'error'
-  }
-
-  const genOpts = () => ({ language: lang, detail, mode: summaryOnly ? 'summary' : 'full', quiz: includeQuiz })
-
-  const runFile = (id, file) => {
-    const o = genOpts()
-    updateItem(id, { status: 'processing', error: null, step: 'extract', msg: t.starting })
-    return runGeneration(id, '/api/summarize-stream', headers => {
-      const fd = new FormData()
-      fd.append('file', file)
-      fd.append('language', o.language)
-      fd.append('detail', o.detail)
-      fd.append('mode', o.mode)
-      fd.append('quiz', o.quiz ? 'true' : 'false')
-      return { method: 'POST', body: fd, headers }
-    })
-  }
+  const updateItem = (id, patch) =>
+    setQueue(prev => prev.map(i => i.id === id ? { ...i, ...patch } : i))
 
   // ── File processing with SSE ───────────────────────────────────────────────
   const processAll = async () => {
-    if (running) return
-    const pending = queueRef.current.filter(i => i.file && (i.status === 'queued' || i.status === 'error'))
+    const pending = queue.filter(i => i.status === 'queued' || i.status === 'error')
     if (!pending.length) return
     setRunning(true)
-    try {
-      for (const item of pending) {
-        if ((await runFile(item.id, item.file)) === 'auth') break   // sign-in / paywall: leave the rest queued
-      }
-    } finally {
-      setRunning(false)
+
+    for (const item of pending) {
+      updateItem(item.id, { status: 'processing', error: null, step: 'extract', msg: 'Starting…' })
+      await new Promise(resolve => {
+        const fd = new FormData()
+        fd.append('file', item.file)
+        fd.append('language', lang)
+        fd.append('detail', detail)
+        fd.append('mode', summaryOnly ? 'summary' : 'full')
+        fd.append('quiz', includeQuiz ? 'true' : 'false')
+        streamSSE(
+          '/api/summarize-stream',
+          { method: 'POST', body: fd, headers: getAuthHeaders() },
+          (ev) => {
+            if (ev.language && lang === 'auto') setLang(ev.language)
+            if (ev.error) { updateItem(item.id, { status: 'error', error: ev.error }); resolve(); return }
+            if (ev.step === 'done') {
+              updateItem(item.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
+              if (ev.tokens_remaining !== undefined && userInfo)
+                setUserInfo(u => ({ ...u, tokens_remaining: ev.tokens_remaining }))
+              else if (ev.tokens_remaining !== undefined && !session)
+                setAnonInfo(a => a ? { ...a, remaining: ev.tokens_remaining } : a)
+              resolve()
+            } else {
+              updateItem(item.id, { step: ev.step, msg: ev.msg })
+            }
+          },
+          (err, status, data) => {
+            if (!handleAuthError(status, item, resolve, data))
+              { updateItem(item.id, { status: 'error', error: err }); resolve() }
+          }
+        )
+      })
     }
+    setRunning(false)
   }
 
   // ── YouTube SSE ────────────────────────────────────────────────────────────
-  const runYoutube = async (id, url) => {
-    const o = genOpts()
-    setRunning(true)
-    updateItem(id, { status: 'processing', error: null, step: 'extract', msg: t.fetchingTranscript })
-    try {
-      return await runGeneration(id, '/api/youtube', headers => ({
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...headers },
-        body: JSON.stringify({ url, ...o })
-      }))
-    } finally { setRunning(false) }
-  }
   const processYoutube = () => {
     const url = ytUrl.trim()
     if (!url || running) return
-    const id = uid()
-    setQueue(prev => [...prev, { id, file: null, name: url, status: 'processing', jobId: null, error: null, step: 'extract', msg: t.fetchingTranscript, source: { type: 'youtube', url } }])
+    setRunning(true)
+    const qitem = { id: uid(), file: null, name: url, status: 'processing', jobId: null, error: null, step: 'extract', msg: 'Fetching transcript…' }
+    setQueue(prev => [...prev, qitem])
     setInputTab('upload')
-    runYoutube(id, url).then(res => { if (res === 'done') setYtUrl(v => v.trim() === url ? '' : v) })
+
+    streamSSE(
+      '/api/youtube',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ url, language: lang, detail, mode: summaryOnly ? 'summary' : 'full', quiz: includeQuiz })
+      },
+      (ev) => {
+        if (ev.language && lang === 'auto') setLang(ev.language)
+        if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); setRunning(false); return }
+        if (ev.step === 'done') {
+          updateItem(qitem.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
+          if (ev.tokens_remaining !== undefined && userInfo)
+            setUserInfo(u => ({ ...u, tokens_remaining: ev.tokens_remaining }))
+          else if (ev.tokens_remaining !== undefined && !session)
+            setAnonInfo(a => a ? { ...a, remaining: ev.tokens_remaining } : a)
+          setRunning(false)
+        } else {
+          updateItem(qitem.id, { step: ev.step, msg: ev.msg })
+        }
+      },
+      (err, status, data) => {
+        setRunning(false)
+        if (!handleAuthError(status, qitem, null, data))
+          updateItem(qitem.id, { status: 'error', error: err })
+      }
+    )
+    setYtUrl('')
   }
 
   // ── Paste text / URL SSE ───────────────────────────────────────────────────
-  const runText = async (id, src) => {
-    const o = genOpts()
-    setRunning(true)
-    updateItem(id, { status: 'processing', error: null, step: 'extract', msg: t.processingText })
-    try {
-      return await runGeneration(id, '/api/summarize-text', headers => ({
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...headers },
-        body: JSON.stringify({ text: src.text || '', url: src.url || '', language: o.language, filename: src.name, detail: o.detail, mode: o.mode, quiz: o.quiz })
-      }))
-    } finally { setRunning(false) }
-  }
   const processText = () => {
     const text = pasteText.trim()
     const url  = pasteUrl.trim()
     if ((!text && !url) || running) return
+    setRunning(true)
     const name = url ? url.replace(/^https?:\/\//, '').slice(0, 40) : 'Pasted text'
-    const id = uid()
-    const src = { type: 'text', url, text, name }   // `text` is never persisted
-    setQueue(prev => [...prev, { id, file: null, name, status: 'processing', jobId: null, error: null, step: 'extract', msg: t.processingText, source: src }])
+    const qitem = { id: uid(), file: null, name, status: 'processing', jobId: null, error: null, step: 'extract', msg: 'Processing text…' }
+    setQueue(prev => [...prev, qitem])
     setInputTab('upload')
-    runText(id, src).then(res => {
-      if (res !== 'done') return
-      setPasteText(v => v.trim() === text ? '' : v)
-      setPasteUrl(v => v.trim() === url ? '' : v)
-    })
+
+    streamSSE(
+      '/api/summarize-text',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ text, url, language: lang, filename: name, detail, mode: summaryOnly ? 'summary' : 'full', quiz: includeQuiz })
+      },
+      (ev) => {
+        if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); setRunning(false); return }
+        if (ev.step === 'done') {
+          updateItem(qitem.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
+          if (ev.tokens_remaining !== undefined && userInfo)
+            setUserInfo(u => ({ ...u, tokens_remaining: ev.tokens_remaining }))
+          else if (ev.tokens_remaining !== undefined && !session)
+            setAnonInfo(a => a ? { ...a, remaining: ev.tokens_remaining } : a)
+          setRunning(false)
+        } else {
+          updateItem(qitem.id, { step: ev.step, msg: ev.msg })
+        }
+      },
+      (err, status, data) => {
+        setRunning(false)
+        if (!handleAuthError(status, qitem, null, data))
+          updateItem(qitem.id, { status: 'error', error: err })
+      }
+    )
+    setPasteText('')
+    setPasteUrl('')
   }
 
   // ── Zero-friction demo: one tap → a real guide on a sample lecture (no file,
   //    no credit). The activation unlock for visitors with nothing to upload. ──
-  const runSample = async (id, sLang) => {
-    setRunning(true)
-    updateItem(id, { status: 'processing', error: null, step: 'extract', msg: t.sampleMsg })
-    try {
-      // demo spends no preview — anonymous on purpose, doesn't touch token state
-      return await runGeneration(id, '/api/summarize-text', () => ({
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ demo: true, language: sLang })
-      }), true)
-    } finally { setRunning(false) }
-  }
-  const startSample = () => {
+  const runSample = () => {
     if (running) return
+    setRunning(true)
     setInputTab('upload')
-    const sLang = isAr ? 'ar' : 'en'
-    const id = uid()
-    setQueue(prev => [...prev, { id, file: null, name: t.sampleName, status: 'processing', jobId: null, error: null, step: 'extract', msg: t.sampleMsg, demo: true, source: { type: 'sample', lang: sLang } }])
-    runSample(id, sLang)
+    const qitem = { id: uid(), file: null, name: t.sampleName, status: 'processing', jobId: null, error: null, step: 'extract', msg: t.sampleMsg, demo: true }
+    setQueue(prev => [...prev, qitem])
+    streamSSE(
+      '/api/summarize-text',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ demo: true, language: lang === 'ar' ? 'ar' : 'en' }) },
+      (ev) => {
+        if (ev.error) { updateItem(qitem.id, { status: 'error', error: ev.error }); setRunning(false); return }
+        if (ev.step === 'done') {
+          updateItem(qitem.id, { status: 'done', jobId: ev.job_id, step: 'done', msg: 'Ready' })
+          setRunning(false)   // demo spends no preview — don't touch anon/user token state
+        } else {
+          updateItem(qitem.id, { step: ev.step, msg: ev.msg })
+        }
+      },
+      (err) => { setRunning(false); updateItem(qitem.id, { status: 'error', error: err }) }
+    )
   }
 
-  // Expired / failed item → Restore (free) when this tab holds a signed copy, else Regenerate
-  const restoreItem = async (item) => {
-    const cur = latestItem(item.id) || item
-    if (cur.busy) return
-    updateItem(cur.id, { busy: 'restore' })
-    const res = await rehydrate(cur)
-    updateItem(cur.id, { busy: null })
-    if (res.jobId) toast(t.restored, 'success')
-    else toast(res.code === 'rate_limited' || res.code === 'http_429' ? t.errRateLimit : res.code === 'network' ? t.errNetwork : t.restoreFailed, 'error')
-  }
-  const regenerate = async (item) => {
-    const cur = latestItem(item.id) || item
-    const src = cur.source || (cur.file ? { type: 'file' } : null)
-    if (running || !src) return
-    if (src.type === 'file' && !cur.file) { toast(t.reselectFile, 'info'); return }
-    if (src.type === 'text' && !src.text && !src.url) { toast(t.repasteText, 'info'); return }
-    if (src.type !== 'sample' && !window.confirm(t.usesCredit)) return
-    updateItem(cur.id, { guide: null, guideBlob: null, sig: null, pdfBlob: null, shareUrl: null, partial: false })
-    if (src.type === 'file') {
-      setRunning(true)
-      try { await runFile(cur.id, cur.file) } finally { setRunning(false) }
-    }
-    else if (src.type === 'youtube') await runYoutube(cur.id, src.url)
-    else if (src.type === 'text') await runText(cur.id, src)
-    else if (src.type === 'sample') await runSample(cur.id, src.lang === 'ar' ? 'ar' : 'en')
-  }
-  const recoverItem = (item) => canRestore(latestItem(item.id) || item) ? restoreItem(item) : regenerate(item)
-
-  // ── Downloads / study actions ──────────────────────────────────────────────
-  const reqErr = (e, fallback) => e?.message === 'expired' ? t.guideExpired
-    : e?.name === 'AbortError' ? t.slowNetwork
-    : e?.name === 'TypeError' ? t.errNetwork
-    : fallback
-
-  const downloadPDF = async (item) => {
-    const cur = latestItem(item.id) || item
-    if (!cur.jobId || cur.busy) return
-    // In-app browsers ignore <a download>: hand the prefetched PDF to the share sheet,
-    // synchronously inside the tap (Safari rejects share() after an await).
-    if (IN_APP && cur.pdfBlob) {
-      const name = cur.pdfName || pdfNameOf(cur)
-      try {
-        const file = new File([cur.pdfBlob], name, { type: 'application/pdf' })
-        if (navigator.canShare?.({ files: [file] })) { navigator.share({ files: [file] }).catch(() => {}); return }
-      } catch { /* fall back to a blob save */ }
-      saveBlob(cur.pdfBlob, name); toast(t.pdfSaved, 'success'); return
-    }
-    updateItem(cur.id, { busy: 'pdf' })
-    try {
-      const { r } = await jobFetch(cur, id => `/api/download/${id}`)
-      if (!r.ok) throw new Error('failed')
-      const blob = await r.blob()
-      if (!blob.size || /json|html/i.test(blob.type || '')) throw new Error('failed')
-      const name = filenameFrom(r, pdfNameOf(cur))
-      saveBlob(blob, name)
-      if (IN_APP) updateItem(cur.id, { pdfBlob: blob, pdfName: name })
-      toast(t.pdfSaved, 'success')
-    } catch (e) {
-      toast(reqErr(e, t.downloadFailed), 'error')
-    } finally { updateItem(cur.id, { busy: null }) }
+  const downloadPDF = (item) => {
+    if (!item.jobId) return
+    const a = document.createElement('a')
+    a.href = `/api/download/${item.jobId}`
+    a.download = item.name.replace(/\.(pptx?|pdf|docx?|txt)$/i, '') + '_study_guide.pdf'
+    a.click()
+    toast('PDF downloading…', 'info')
   }
 
-  // Anki CSV from this tab's cached cards (same columns + escaping as the server)
-  const localAnki = (it) => {
-    const cards = (it?.guide?.flashcards || []).filter(c => c && typeof c === 'object')
-    if (!cards.length) return false
-    const csv = [['front', 'back'], ...cards.map(c => [c.q, c.a])].map(row => row.map(csvCell).join(',')).join('\r\n') + '\r\n'
-    saveBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), pdfNameOf(it).replace(/\.pdf$/i, '') + '_anki.csv')
-    return true
-  }
-  const downloadAnki = async (item) => {
-    const cur = latestItem(item.id) || item
-    if (!cur.jobId || cur.busy) return
-    updateItem(cur.id, { busy: 'anki' })
-    try {
-      const { r } = await jobFetch(cur, id => `/api/export/anki/${id}`)
-      if (r.status === 404) { toast(t.noFlashcards, 'info'); return }   // job alive, no cards (summary only)
-      if (!r.ok) throw new Error('failed')
-      const blob = await r.blob()
-      saveBlob(blob, filenameFrom(r, pdfNameOf(cur).replace(/\.pdf$/i, '') + '_anki.csv'))
-      toast(t.ankiSaved, 'success')
-    } catch (e) {
-      // server copy gone or offline, but this tab still has the cards → build the CSV here
-      if (localAnki(latestItem(cur.id) || cur)) toast(t.ankiSaved, 'success')
-      else toast(reqErr(e, t.downloadFailed), 'error')
-    } finally { updateItem(cur.id, { busy: null }) }
+  const downloadAnki = (item) => {
+    if (!item.jobId) return
+    const a = document.createElement('a')
+    a.href = `/api/export/anki/${item.jobId}`
+    a.click()
+    toast('Anki CSV downloading…', 'info')
   }
 
   const shareGuide = async (item) => {
-    const cur = latestItem(item.id) || item
-    if (!cur.jobId || cur.sharing) return
-    if (cur.shareUrl) {            // already shared — just copy again
-      try { await navigator.clipboard.writeText(cur.shareUrl) } catch { /* shown below the item */ }
+    if (!item.jobId || item.sharing) return
+    if (item.shareUrl) {            // already shared — just copy again
+      try { await navigator.clipboard.writeText(item.shareUrl) } catch {}
       toast(t.shareCopied, 'info')
       return
     }
-    updateItem(cur.id, { sharing: true })
+    updateItem(item.id, { sharing: true })
     try {
-      const headers = { 'Content-Type': 'application/json', ...(await authHeaders()) }
-      const { r } = await jobFetch(cur, id => `/api/share/${id}`, { method: 'POST', headers })
+      const headers = { 'Content-Type': 'application/json' }
+      if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`
+      const r = await fetch(`/api/share/${item.jobId}`, { method: 'POST', headers })
       const d = await r.json().catch(() => ({}))
-      if (!r.ok || !d.url) throw Object.assign(new Error('share_failed'), { status: r.status, data: d })
-      updateItem(cur.id, { sharing: false, shareUrl: d.url })
-      try { await navigator.clipboard.writeText(d.url) } catch { /* shown below the item */ }
+      if (!r.ok || !d.url) throw new Error(d.error || 'share_failed')
+      updateItem(item.id, { sharing: false, shareUrl: d.url })
+      try { await navigator.clipboard.writeText(d.url) } catch {}
       toast(t.shareCopied, 'info')
     } catch (e) {
-      updateItem(cur.id, { sharing: false })
-      toast(e.status ? friendlyErr(t, t.shareFailed, e.status, e.data) : reqErr(e, t.shareFailed), 'error')
+      updateItem(item.id, { sharing: false })
+      toast(e.message === 'share_failed' ? t.shareFailed : (e.message || t.shareFailed), 'error')
     }
   }
 
-  const deleteNow = async (item) => {
-    const cur = latestItem(item.id) || item
-    if (!cur.jobId || cur.busy) return
-    updateItem(cur.id, { busy: 'delete' })
-    let ok = false
-    try {
-      const r = await fetchT(`/api/delete/${cur.jobId}`, { method: 'POST', headers: await authHeaders() }, 15000)
-      ok = r.ok
-    } catch { /* reported below */ }
-    if (!ok) { updateItem(cur.id, { busy: null }); toast(t.deleteFailed, 'error'); return }
-    ls.del(`sr_${cur.jobId}`); ls.del(srKeyOf(cur))
-    setQueue(prev => prev.filter(q => q.id !== cur.id))     // also drops this tab's copy
-    toast(t.deleted, 'success')
+  const deleteNow = (item) => {
+    if (!item.jobId) return
+    fetch(`/api/delete/${item.jobId}`, { method: 'POST', headers: getAuthHeaders() })
+      .then(() => {
+        setQueue(prev => prev.filter(q => q.id !== item.id))
+        toast('Your data was deleted from the server.', 'success')
+      })
+      .catch(() => toast('Could not delete — it is auto-wiped within 15 minutes.', 'error'))
   }
 
-  const openPrint = async (item) => {
-    const cur = latestItem(item.id) || item
-    if (!cur.jobId) return
-    const w = window.open('', '_blank')   // opened inside the tap so iOS doesn't block it as a pop-up
-    try { w?.document.write('<p style="font-family:sans-serif;padding:2rem;color:#888">…</p>') } catch { /* ignore */ }
-    try {
-      const { r, jobId } = await jobFetch(cur, id => `/api/view/md/${id}`, { method: 'HEAD' }, 20000)
-      if (!r.ok) throw new Error('failed')
-      const url = `/api/view/md/${jobId}`
-      if (w && !w.closed) w.location.href = url
-      else if (!window.open(url, '_blank')) toast(t.popupBlocked, 'error')
-    } catch (e) {
-      try { w?.close() } catch { /* ignore */ }
-      toast(reqErr(e, t.loadFailed), 'error')
-    }
-  }
-
-  // Chat — fresh token, refresh once on 401, transparent restore on an expired guide
-  const askGuide = async (id, q) => {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const cur = latestItem(id)
-      if (!cur?.jobId) throw new Error('expired')
-      const language = lang === 'auto' ? (cur.guide?.language || uiLang) : lang
-      const headers = { 'Content-Type': 'application/json', ...(await authHeaders()) }
-      const { r } = await jobFetch(cur, j => `/api/chat/${j}`, { method: 'POST', headers, body: JSON.stringify({ question: q, language }) }, 60000)
-      const d = await r.json().catch(() => ({}))
-      if (r.ok) return d.answer || t.chatNoAnswer
-      if (r.status === 401) {
-        if (attempt === 0 && sessionRef.current) {
-          const rf = await tryRefresh()
-          if (rf === 'ok') continue
-          if (rf === 'failed') { setChatModal(null); await expireSession(); throw new Error('handled') }
-          throw new Error(t.errNetwork)
-        }
-        setChatModal(null); handleAuthError(401, d, null); throw new Error('handled')
-      }
-      throw new Error(friendlyErr(t, d.error, r.status, d))
-    }
-    throw new Error(t.errGeneric)
+  const openPrint = (item) => {
+    if (!item.jobId) return
+    window.open(`/api/view/md/${item.jobId}`, '_blank')
   }
 
   const doneCount    = queue.filter(i => i.status === 'done').length
-  const pendingCount = queue.filter(i => i.file && (i.status === 'queued' || i.status === 'error')).length
+  const pendingCount = queue.filter(i => i.status === 'queued' || i.status === 'error').length
   const hasQueue     = queue.length > 0
   const hasHistory   = quizHistory.length > 0
-  const isSubscribed = isProUser(userInfo)
-
-  const flashItem = flashModal ? queue.find(i => i.id === flashModal) : null
-  const quizItem  = quizModal ? queue.find(i => i.id === quizModal) : null
-  const chatItem  = chatModal ? queue.find(i => i.id === chatModal) : null
-  const viewItem  = mindmapModal ? queue.find(i => i.id === mindmapModal) : null
-  const studyProps = (it, close) => ({
-    guide: it.guide, loadGuide: () => loadGuide(it.id), lang: uiLang, t,
-    canRestore: canRestore(it), onRecover: () => { close(); recoverItem(it) }, onClose: close,
-  })
+  const isSubscribed = userInfo?.subscription_status === 'active'
 
   return (
-    <div data-theme={theme} dir={isAr ? 'rtl' : 'ltr'}>
+    <div data-theme={theme} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
       <ToastContainer />
       <div className="bg-orb orb-1" />
       <div className="bg-orb orb-2" />
@@ -2915,21 +2068,11 @@ export default function App() {
                 )}
 
                 {/* Auth controls */}
-                {authEnabled && authLoading && (
-                  <span className="ctrl-btn" aria-hidden="true" style={{opacity:0.6,cursor:'default'}}>
-                    <Loader2 size={13} className="spin" />
-                  </span>
-                )}
                 {authEnabled && !authLoading && (
                   session ? (
                     <>
-                      {/* Token counter (or a retry when the account couldn't load) */}
-                      {userInfoErr && !userInfo ? (
-                        <button className="ctrl-btn" onClick={() => fetchUserInfo()} title={`${t.accountLoadFailed} ${t.retry}`}
-                          style={{borderColor:'rgba(239,68,68,0.4)',color:'#ef4444'}}>
-                          <AlertCircle size={12} /><span className="ctrl-label"> {t.retry}</span>
-                        </button>
-                      ) : (() => {
+                      {/* Token counter */}
+                      {(() => {
                         const rem  = userInfo?.tokens_remaining ?? null
                         const low  = rem !== null && rem <= 1 && !isSubscribed
                         const dead = rem !== null && rem <= 0
@@ -2954,7 +2097,10 @@ export default function App() {
                       })()}
                       {/* User avatar → account panel (plan, billing, sign out) */}
                       <button className="ctrl-btn"
-                        onClick={() => { fetchUserInfo(); setShowAccount(true) }}
+                        onClick={() => {
+                          if (session?.access_token) _fetchUserInfo(session.access_token)
+                          setShowAccount(true)
+                        }}
                         title={`${userInfo?.name || userInfo?.email || ''} — ${t.accountTitle}`}>
                         {userInfo?.avatar_url
                           ? <img src={userInfo.avatar_url} alt="" style={{width:18,height:18,borderRadius:'50%',objectFit:'cover'}} />
@@ -2991,7 +2137,7 @@ export default function App() {
                   )
                 )}
 
-                <button className="ctrl-btn" onClick={() => chooseLang(lang === 'en' ? 'ar' : lang === 'ar' ? 'auto' : 'en')}>
+                <button className="ctrl-btn" onClick={() => setLang(p => p === 'en' ? 'ar' : p === 'ar' ? 'auto' : 'en')}>
                   <Globe size={13} /><span className="ctrl-label">{lang === 'en' ? ' عربي' : lang === 'ar' ? ' Auto' : ' EN'}</span>
                 </button>
                 <button className="ctrl-btn" onClick={() => setTheme(p => p === 'dark' ? 'light' : 'dark')}>
@@ -3005,16 +2151,6 @@ export default function App() {
         <main className="main">
           <div className="container">
 
-            {/* In-app browsers (Instagram / TikTok …): downloads are unreliable there */}
-            {IN_APP && (
-              <div role="note" style={{display:'flex',alignItems:'flex-start',gap:'0.5rem',margin:'0 0 1rem',padding:'0.6rem 0.85rem',
-                borderRadius:10,background:'rgba(251,191,36,0.1)',border:'1px solid rgba(251,191,36,0.35)',
-                color:'#f59e0b',fontSize:'0.8rem',lineHeight:1.45}}>
-                <AlertCircle size={14} style={{flexShrink:0,marginTop:2}} />
-                <span>{t.inAppBanner}</span>
-              </div>
-            )}
-
             {/* Hero */}
             <div className="hero">
               <div className="hero-badge"><Sparkles size={12} />{t.badge}</div>
@@ -3027,7 +2163,7 @@ export default function App() {
                 them see a real guide build in one tap. */}
             {!hasQueue && (
               <div style={{textAlign:'center', margin:'0 auto 1.2rem', maxWidth:'440px'}}>
-                <button onClick={startSample} disabled={running}
+                <button onClick={runSample} disabled={running}
                   style={{
                     display:'inline-flex', alignItems:'center', justifyContent:'center', gap:'0.5rem',
                     width:'100%', padding:'0.95rem 1.4rem', borderRadius:'13px', border:'none',
@@ -3070,7 +2206,7 @@ export default function App() {
                   onClick={() => inputRef.current?.click()}
                 >
                   <input ref={inputRef} type="file" accept=".pptx,.ppt,.pdf,.docx,.doc,.txt" multiple
-                    onChange={e => { addFiles(e.target.files); e.target.value = '' }} style={{display:'none'}} />
+                    onChange={e => addFiles(e.target.files)} style={{display:'none'}} />
                   <div className="drop-icon"><Upload size={22} /></div>
                   <div className="drop-title">{t.dropTitle}</div>
                   <div className="drop-sub">{t.dropSub}</div>
@@ -3089,8 +2225,8 @@ export default function App() {
                     />
                     <button className="submit-btn" style={{flex:'none'}}
                       onClick={processYoutube}
-                      disabled={!ytUrl.trim() || running}>
-                      {running ? <Loader2 size={15} className="spin" /> : <Youtube size={15} />}<span className="tab-label"> {t.ytBtn}</span>
+                      disabled={!ytUrl.trim()}>
+                      <Youtube size={15} /><span className="tab-label"> {t.ytBtn}</span>
                     </button>
                   </div>
                   <div style={{fontSize:'0.75rem',color:'var(--text-muted)',marginTop:'0.55rem'}}>
@@ -3119,8 +2255,8 @@ export default function App() {
                     />
                     <button className="submit-btn" style={{flex:'none'}}
                       onClick={processText}
-                      disabled={(!pasteText.trim() && !pasteUrl.trim()) || running}>
-                      {running ? <Loader2 size={15} className="spin" /> : <Type size={15} />}<span className="tab-label"> {t.textBtn}</span>
+                      disabled={!pasteText.trim() && !pasteUrl.trim()}>
+                      <Type size={15} /><span className="tab-label"> {t.textBtn}</span>
                     </button>
                   </div>
                 </div>
@@ -3154,18 +2290,18 @@ export default function App() {
                   className={`detail-tab${!summaryOnly ? ' active' : ''}`}
                   style={{fontSize:'0.73rem',padding:'0.28rem 0.6rem'}}
                   onClick={() => setSummaryOnly(false)}>
-                  {isAr ? 'دليل كامل' : 'Full guide'}
+                  {lang === 'ar' ? 'دليل كامل' : 'Full guide'}
                 </button>
                 <button
                   className={`detail-tab${summaryOnly ? ' active' : ''}`}
                   style={{fontSize:'0.73rem',padding:'0.28rem 0.6rem'}}
                   onClick={() => setSummaryOnly(true)}>
-                  {isAr ? 'ملخّص فقط' : 'Summary only'}
+                  {lang === 'ar' ? 'ملخّص فقط' : 'Summary only'}
                 </button>
                 {!summaryOnly && (
                   <label style={{display:'flex',alignItems:'center',gap:'0.35rem',fontSize:'0.73rem',color:'var(--text-muted)',cursor:'pointer',marginInlineStart:'0.25rem'}}>
                     <input type="checkbox" checked={includeQuiz} onChange={e => setIncludeQuiz(e.target.checked)} />
-                    {isAr ? 'اختبار تدريبي' : 'Practice quiz'}
+                    {lang === 'ar' ? 'اختبار تدريبي' : 'Practice quiz'}
                   </label>
                 )}
               </div>
@@ -3173,7 +2309,7 @@ export default function App() {
               {/* Language + Generate All row (only for upload tab) */}
               {inputTab === 'upload' && (
                 <div className="options-row" style={{marginTop:'0.65rem'}}>
-                  <select className="lang-select" value={lang} onChange={e => chooseLang(e.target.value)}>
+                  <select className="lang-select" value={lang} onChange={e => setLang(e.target.value)}>
                     <option value="auto">{t.langAuto}</option>
                     <option value="en">{t.langEn}</option>
                     <option value="ar">{t.langAr}</option>
@@ -3200,7 +2336,7 @@ export default function App() {
                 borderRadius:'10px', fontSize:'0.78rem',
                 color:'var(--privacy-text, #16a34a)',
                 lineHeight:1.45,
-                direction: isAr ? 'rtl' : 'ltr',
+                direction: lang === 'ar' ? 'rtl' : 'ltr',
               }}>
                 <ShieldCheck size={14} style={{flexShrink:0, marginTop:'1px'}} />
                 <span>{t.privacy}</span>
@@ -3209,7 +2345,7 @@ export default function App() {
 
             {/* Proof / sample output — first-visit only, builds trust before upload */}
             {!hasQueue && (
-              <div style={{ marginTop:'2.2rem', direction: isAr ? 'rtl' : 'ltr' }}>
+              <div style={{ marginTop:'2.2rem', direction: lang === 'ar' ? 'rtl' : 'ltr' }}>
                 <div style={{textAlign:'center', marginBottom:'1.2rem'}}>
                   <h2 style={{fontSize:'1.35rem', fontWeight:800, color:'var(--text-primary)', margin:'0 0 0.35rem'}}>{t.sampleTitle}</h2>
                   <p style={{fontSize:'0.9rem', color:'var(--text-muted)', maxWidth:'620px', margin:'0 auto', lineHeight:1.55}}>{t.sampleSub}</p>
@@ -3294,7 +2430,7 @@ export default function App() {
             {session && userInfo?.referral_code && (
               <div className="glass" style={{
                 marginTop:'1rem', padding:'1rem 1.25rem',
-                direction: isAr ? 'rtl' : 'ltr',
+                direction: lang === 'ar' ? 'rtl' : 'ltr',
               }}>
                 <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'0.55rem', flexWrap:'wrap', gap:'0.4rem'}}>
                   <div style={{display:'flex', alignItems:'center', gap:'0.45rem'}}>
@@ -3341,8 +2477,8 @@ export default function App() {
                 <div className="queue-header">
                   <div style={{display:'flex',alignItems:'center',gap:'0.45rem',fontWeight:600,fontSize:'0.88rem',color:'var(--text-primary)'}}>
                     <Files size={15} />
-                    {t.items(queue.length)}
-                    {doneCount > 0 && <span style={{fontSize:'0.76rem',color:'#22c55e',fontWeight:500}}>· {t.readyCount(doneCount)}</span>}
+                    {queue.length} item{queue.length !== 1 ? 's' : ''}
+                    {doneCount > 0 && <span style={{fontSize:'0.76rem',color:'#22c55e',fontWeight:500}}>· {doneCount} ready</span>}
                   </div>
                   <div className="queue-header-actions" style={{display:'flex',gap:'0.35rem'}}>
                     {inputTab === 'upload' && (
@@ -3350,23 +2486,15 @@ export default function App() {
                         <Upload size={12} /><span className="ctrl-label"> {t.addMore}</span>
                       </button>
                     )}
-                    {!running && (
-                      <button className="ctrl-btn" onClick={clearAll}>
-                        <X size={12} /><span className="ctrl-label"> {t.clearAll}</span>
-                      </button>
-                    )}
+                    <button className="ctrl-btn" onClick={clearAll}>
+                      <X size={12} /><span className="ctrl-label"> {t.clearAll}</span>
+                    </button>
                   </div>
                 </div>
 
                 {/* Items */}
                 {queue.map((item, i) => {
-                  const sc = STATUS_COLOR[item.status] || STATUS_COLOR.queued
-                  const failed = item.status === 'expired' || item.status === 'error'
-                  const src = item.source || (item.file ? { type: 'file' } : null)
-                  const restorable = canRestore(item)
-                  const hint = failed && !restorable && (
-                    src?.type === 'file' && !item.file ? t.reselectFile
-                      : src?.type === 'text' && !src.text && !src.url ? t.repasteText : null)
+                  const sc = STATUS_COLOR[item.status]
                   return (
                     <div key={item.id} className="queue-item"
                       style={{background: i % 2 === 0 ? 'transparent' : 'var(--glass-light)'}}>
@@ -3377,28 +2505,24 @@ export default function App() {
                           {item.status === 'processing' ? <Loader2 size={15} className="spin" />
                             : item.status === 'done'    ? <CheckCircle2 size={15} color="#22c55e" />
                             : item.status === 'error'   ? <AlertCircle size={15} color="#ef4444" />
-                            : item.status === 'expired' ? <AlertCircle size={15} color="#94a3b8" />
                             : <FileText size={15} />}
                         </div>
 
                         <div style={{flex:1,minWidth:0}}>
                           <div className="queue-name">{item.name}</div>
                           {item.error && <div style={{fontSize:'0.72rem',color:'#ef4444',marginTop:2}}>{item.error}</div>}
-                          {item.status === 'expired' && <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{t.expiredNote}</div>}
-                          {hint && <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{hint}</div>}
-                          {item.status === 'done' && item.partial && <div style={{fontSize:'0.72rem',color:'#fbbf24',marginTop:2}}>{t.partialNote}</div>}
                           {item.status === 'processing' && (
-                            <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{item.msg || t.processing}</div>
+                            <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{item.msg || 'Processing…'}</div>
                           )}
                         </div>
 
                         <div className="queue-status-badge"
                           style={{background:sc.bg,color:sc.color,border:`1px solid ${sc.border}`}}>
-                          {t[item.status] || item.status}
+                          {t[item.status]}
                         </div>
 
                         {!running && (
-                          <button className="ctrl-btn" onClick={() => removeItem(item.id)} aria-label={t.close}
+                          <button className="ctrl-btn" onClick={() => removeItem(item.id)}
                             style={{padding:'0.3rem 0.4rem',flexShrink:0}}>
                             <X size={13} />
                           </button>
@@ -3417,9 +2541,8 @@ export default function App() {
                       {/* Action buttons (done items only) */}
                       {item.status === 'done' && (
                         <div className="action-row">
-                          <button className="action-btn primary" title={t.download} onClick={() => downloadPDF(item)}
-                            disabled={!!item.busy} style={item.busy === 'pdf' ? {opacity:0.7} : undefined}>
-                            {item.busy === 'pdf' ? <Loader2 size={12} className="spin" /> : <Download size={12} />}<span className="action-label"> {t.pdf}</span>
+                          <button className="action-btn primary" title="Download PDF" onClick={() => downloadPDF(item)}>
+                            <Download size={12} /><span className="action-label"> PDF</span>
                           </button>
                           <button className="action-btn" title={t.shareTitle}
                             style={item.shareUrl ? {borderColor:'rgba(34,197,94,0.4)', color:'#22c55e'} : {}}
@@ -3427,46 +2550,27 @@ export default function App() {
                             {item.sharing ? <Loader2 size={12} className="spin" /> : item.shareUrl ? <Check size={12} /> : <Share2 size={12} />}
                             <span className="action-label"> {item.shareUrl ? t.shareCopy : t.share}</span>
                           </button>
-                          {item.counts?.flashcards !== 0 && (
-                            <button className="action-btn" title={t.ankiTip} onClick={() => downloadAnki(item)} disabled={!!item.busy}>
-                              {item.busy === 'anki' ? <Loader2 size={12} className="spin" /> : <Download size={12} />}<span className="action-label"> {t.anki}</span>
-                            </button>
-                          )}
-                          <button className="action-btn" title={t.deleteTip} onClick={() => deleteNow(item)} disabled={!!item.busy}>
-                            {item.busy === 'delete' ? <Loader2 size={12} className="spin" /> : <X size={12} />}<span className="action-label"> {t.deleteNow}</span>
+                          <button className="action-btn" title="Export Anki CSV" onClick={() => downloadAnki(item)}>
+                            <Download size={12} /><span className="action-label"> Anki</span>
                           </button>
-                          <button className="action-btn" title={t.cardsTip} onClick={() => setFlashModal(item.id)}>
-                            <Brain size={12} /><span className="action-label"> {t.cards}</span>
+                          <button className="action-btn" title="Delete my data from the server now" onClick={() => deleteNow(item)}>
+                            <X size={12} /><span className="action-label"> Delete now</span>
                           </button>
-                          <button className="action-btn" title={t.quizTip} onClick={() => setQuizModal(item.id)}>
-                            <ClipboardList size={12} /><span className="action-label"> {t.quiz}</span>
+                          <button className="action-btn" title="Flash Cards" onClick={() => setFlashModal(item.jobId)}>
+                            <Brain size={12} /><span className="action-label"> Cards</span>
                           </button>
-                          <button className="action-btn" title={t.overviewTip} onClick={() => setMindmapModal(item.id)}>
-                            <Map size={12} /><span className="action-label"> {t.overview}</span>
+                          <button className="action-btn" title="Quiz" onClick={() => setQuizModal({jobId:item.jobId,filename:item.name})}>
+                            <ClipboardList size={12} /><span className="action-label"> Quiz</span>
                           </button>
-                          <button className="action-btn" title={t.printTip} onClick={() => openPrint(item)}>
-                            <Printer size={12} /><span className="action-label"> {t.print}</span>
+                          <button className="action-btn" title="Overview" onClick={() => setMindmapModal(item.jobId)}>
+                            <Map size={12} /><span className="action-label"> Overview</span>
                           </button>
-                          <button className="action-btn" title={t.chatTip} onClick={() => setChatModal(item.id)}>
-                            <MessageSquare size={12} /><span className="action-label"> {t.chat}</span>
+                          <button className="action-btn" title="Print / View" onClick={() => openPrint(item)}>
+                            <Printer size={12} /><span className="action-label"> Print</span>
                           </button>
-                        </div>
-                      )}
-
-                      {/* Recovery (expired / failed items): Restore is free; Regenerate re-runs the source */}
-                      {failed && (restorable || (src && !hint)) && (
-                        <div className="action-row">
-                          {restorable ? (
-                            <button className="action-btn primary" onClick={() => restoreItem(item)} disabled={!!item.busy}>
-                              {item.busy === 'restore' ? <Loader2 size={12} className="spin" /> : <RotateCcw size={12} />}
-                              <span className="action-label"> {t.restore}</span>
-                            </button>
-                          ) : (
-                            <button className="action-btn primary" onClick={() => regenerate(item)} disabled={running}
-                              style={running ? {opacity:0.6} : undefined}>
-                              <RotateCcw size={12} /><span className="action-label"> {item.status === 'expired' ? t.regenerate : t.retry}</span>
-                            </button>
-                          )}
+                          <button className="action-btn" title="Ask the guide" onClick={() => setChatModal(item.jobId)}>
+                            <MessageSquare size={12} /><span className="action-label"> Chat</span>
+                          </button>
                         </div>
                       )}
 
@@ -3476,7 +2580,7 @@ export default function App() {
                           margin:'0 1.2rem 0.9rem', padding:'0.55rem 0.7rem', borderRadius:9,
                           background:'var(--glass-light)', border:'1px solid var(--glass-border)',
                           display:'flex', alignItems:'center', gap:'0.5rem',
-                          direction: isAr ? 'rtl' : 'ltr',
+                          direction: lang === 'ar' ? 'rtl' : 'ltr',
                         }}>
                           <Share2 size={13} style={{color:'#22c55e', flexShrink:0}} />
                           <input readOnly value={item.shareUrl}
@@ -3508,18 +2612,18 @@ export default function App() {
         </main>
 
         {/* Site footer — must be inside app-wrap to stay above the fixed bg-mesh overlay */}
-        <footer className="site-footer" style={{ direction: isAr ? 'rtl' : 'ltr' }}>
+        <footer className="site-footer" style={{ direction: lang === 'ar' ? 'rtl' : 'ltr' }}>
           <div style={{marginBottom:'0.6rem'}}>
             © 2026 Alimne &nbsp;·&nbsp;
             <button onClick={() => setShowTerms(true)} className="footer-terms-btn">
-              {isAr ? 'الشروط والأحكام' : 'Terms & Conditions'}
+              {lang === 'ar' ? 'الشروط والأحكام' : 'Terms & Conditions'}
             </button>
             &nbsp;·&nbsp;
             <a href="/privacy" className="footer-terms-btn" style={{textDecoration:'none'}}>
-              {isAr ? 'سياسة الخصوصية' : 'Privacy Policy'}
+              {lang === 'ar' ? 'سياسة الخصوصية' : 'Privacy Policy'}
             </a>
             &nbsp;·&nbsp;
-            {isAr
+            {lang === 'ar'
               ? 'جرّب مجاناً · تُحذف الملفات تلقائياً'
               : 'Free to try · Files deleted automatically'}
           </div>
@@ -3530,43 +2634,26 @@ export default function App() {
             className="souc-pill"
           >
             <span style={{fontSize:'0.6rem', opacity:0.7}}>⚡</span>
-            {isAr ? 'مدعوم من souc.ai' : 'Powered by souc.ai'}
+            {lang === 'ar' ? 'مدعوم من souc.ai' : 'Powered by souc.ai'}
           </a>
         </footer>
       </div>
 
       {/* ── Modals ── */}
-      {flashItem && (
-        <FlashCardModal key={flashItem.id} jobId={flashItem.jobId} srKey={srKeyOf(flashItem)}
-          {...studyProps(flashItem, () => setFlashModal(null))} />
-      )}
-      {quizItem && (
-        <QuizModal key={quizItem.id} jobId={quizItem.jobId} filename={quizItem.name}
-          {...studyProps(quizItem, () => setQuizModal(null))} />
-      )}
-      {viewItem && <OverviewModal key={viewItem.id} {...studyProps(viewItem, () => setMindmapModal(null))} />}
-      {chatItem && (
-        <ChatModal key={chatItem.id} t={t} isAr={isAr}
-          needsSignIn={authEnabled && !session}
-          onSignIn={() => { setChatModal(null); openLogin('signin') }}
-          ask={q => askGuide(chatItem.id, q)}
-          onClose={() => setChatModal(null)} />
-      )}
+      {flashModal   && <FlashCardModal jobId={flashModal} onClose={() => setFlashModal(null)} />}
+      {quizModal    && <QuizModal jobId={quizModal.jobId} filename={quizModal.filename} onClose={() => setQuizModal(null)} />}
+      {chatModal    && <ChatModal jobId={chatModal} onClose={() => setChatModal(null)} lang={lang} getAuthHeaders={getAuthHeaders} />}
+      {mindmapModal && <OverviewModal jobId={mindmapModal} onClose={() => setMindmapModal(null)} />}
       {showHistory  && <HistoryModal onClose={() => setShowHistory(false)} />}
-      {showTerms    && <TermsModal lang={uiLang} onClose={() => setShowTerms(false)} />}
-      {showLogin    && (
-        <LoginModal key={loginKey} onClose={() => { setShowLogin(false); setLoginNotice(null) }}
-          lang={uiLang} sbClient={sb} initialMode={loginMode}
-          initialEmail={ls.get('alimne_lead') || ''} notice={loginNotice} />
-      )}
-      {showSetPw && sb && <SetPasswordModal onClose={() => setShowSetPw(false)} lang={uiLang} sbClient={sb} />}
+      {showTerms    && <TermsModal lang={lang} onClose={() => setShowTerms(false)} />}
+      {showLogin    && <LoginModal onClose={() => setShowLogin(false)} onLogin={signIn} lang={lang} sbClient={sbClient} toast={toast} initialMode={loginMode} />}
       {showUpgrade  && (
         <UpgradeModal
           onClose={() => setShowUpgrade(false)}
           onUpgrade={handleCheckout}
           onManage={handleManageBilling}
           isSubscribed={isSubscribed}
-          lang={uiLang}
+          lang={lang}
         />
       )}
       {showAccount && session && (
@@ -3574,12 +2661,10 @@ export default function App() {
           onClose={() => setShowAccount(false)}
           onManage={handleManageBilling}
           onUpgrade={() => { setShowAccount(false); handleCheckout() }}
-          onSignOut={userSignOut}
+          onSignOut={() => { setShowAccount(false); signOut() }}
           userInfo={userInfo}
           isSubscribed={isSubscribed}
-          lang={uiLang}
-          loadErr={userInfoErr}
-          onRetry={() => fetchUserInfo()}
+          lang={lang}
         />
       )}
       {showEmailCapture && (
@@ -3587,7 +2672,7 @@ export default function App() {
           onClose={() => setShowEmailCapture(false)}
           onSubmit={submitLead}
           onSkip={skipLead}
-          lang={uiLang}
+          lang={lang}
         />
       )}
 
@@ -3616,7 +2701,6 @@ export default function App() {
           outline: none;
         }
         .chat-input:focus { border-color: var(--accent); }
-        .action-btn:disabled { cursor: default; }
         @media print {
           .nav, button, .modal-overlay { display: none !important; }
         }
