@@ -1850,6 +1850,29 @@ def _guide_blob(guide, filename):
 def _guide_sig(blob):
     return hmac.new(_GUIDE_KEY, blob.encode("utf-8"), hashlib.sha256).hexdigest()
 
+# ── Loose guide shapes ─────────────────────────────────────────────────────────
+# Guide content comes from the LLM (and from older shared copies), so any field
+# can arrive in the wrong shape: a keyword dict without 'term', one string where
+# a list belongs, a number as the title. Readers (chat, share page, views) use
+# these instead of assuming the ideal shape — a loose guide must never be a 500.
+def _as_list(v):
+    """A guide list field: a list stays; one non-blank string becomes [it];
+    anything else (None, a number, a dict) is []."""
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str) and v.strip():
+        return [v]
+    return []
+
+def _scalar_text(v):
+    """Display text for a scalar guide value: a str as-is, a number as str();
+    anything else (None, bool, list, dict) → ''."""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return str(v)
+    return ""
+
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY        = colors.HexColor('#0a1628')
 NAVY_MID    = colors.HexColor('#1a3a6e')
@@ -4028,7 +4051,8 @@ def share_guide(job_id):
     sb = _get_sb()
     if sb is None:
         return jsonify({"error": "Sharing is temporarily unavailable."}), 503
-    guide = job.get("guide") or {}
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
     # Sharing works signed out too: a rejected token (False) just shares anonymously,
     # and created_by must never be False.
     uid   = _auth_optional(request) or None
@@ -4039,7 +4063,11 @@ def share_guide(job_id):
         "mcqs":       guide.get("mcqs",       []), "keywords":   guide.get("keywords",   []),
         "objectives": guide.get("objectives", []), "language":   lang,
     }
-    base = {"guide": payload, "title": (guide.get("title") or "Study Guide")[:200],
+    # The title column is text: a number title (1984) used to 500 on [:200], and a
+    # list/object one was stored as-is. Numbers become text; others the default.
+    t = guide.get("title")
+    title = (t if isinstance(t, str) else _scalar_text(t)) or "Study Guide"
+    base = {"guide": payload, "title": title[:200],
             "language": lang, "created_by": uid}
     for _ in range(6):
         slug = _new_slug()
@@ -4058,14 +4086,16 @@ def share_guide(job_id):
 
 def _sg_bullet(b):
     if isinstance(b, str):  return _debullet(b)
-    if isinstance(b, dict): return _debullet(b.get("text") or b.get("fact") or "")
-    return _debullet(b)
+    if isinstance(b, dict): return _debullet(_scalar_text(b.get("text") or b.get("fact")))
+    return _debullet(_scalar_text(b))   # a number → its text; None / list → "" (skipped, not "None")
 
 def _sg_desc(g):
-    parts = [o for o in (g.get("objectives") or []) if isinstance(o, str) and o.strip()]
+    parts = [o for o in _as_list(g.get("objectives")) if isinstance(o, str) and o.strip()]
     if not parts:
-        for sec in (g.get("sections") or []):
-            for b in (sec.get("bullets") or []):
+        for sec in _as_list(g.get("sections")):
+            if not isinstance(sec, dict):
+                continue
+            for b in _as_list(sec.get("bullets")):
                 t = _sg_bullet(b).strip()
                 if t:
                     parts.append(t); break
@@ -4147,7 +4177,11 @@ def _shared_404():
     return _shared_shell("Guide not found · Alimne", "", body)
 
 def _render_shared_guide(row):
-    g      = row.get("guide") or {}
+    # Every field read here tolerates loose shapes (see _as_list / _scalar_text):
+    # this is a PUBLIC page, and a stored guide with e.g. a number for bullets or
+    # options, or a string section, used to answer 500.
+    g      = row.get("guide")
+    g      = g if isinstance(g, dict) else {}
     is_ar  = (row.get("language") or g.get("language")) == "ar"
     L = {
         "tag":   "دليل دراسة" if is_ar else "Study guide",
@@ -4161,13 +4195,14 @@ def _render_shared_guide(row):
                  if is_ar else "Upload a lecture — PowerPoint, PDF, or a YouTube link — and get notes, flashcards and a quiz in seconds.",
         "pbtn":  "ابدأ مجاناً" if is_ar else "Start free",
     }
-    title_raw = g.get("title") or "Study Guide"
+    title_raw = _scalar_text(g.get("title")) or "Study Guide"
     title = _he(title_raw)
     desc  = _sg_desc(g)
-    sub   = ("<p class=\"sub\">%s</p>" % _he(g.get("subtitle"))) if g.get("subtitle") else ""
+    sub_raw = _scalar_text(g.get("subtitle"))
+    sub   = ("<p class=\"sub\">%s</p>" % _he(sub_raw)) if sub_raw else ""
 
-    flashcards = [f for f in (g.get("flashcards") or []) if isinstance(f, dict)]
-    mcqs       = [m for m in (g.get("mcqs") or []) if isinstance(m, dict)]
+    flashcards = [f for f in _as_list(g.get("flashcards")) if isinstance(f, dict)]
+    mcqs       = [m for m in _as_list(g.get("mcqs")) if isinstance(m, dict)]
     meta_bits = []
     if flashcards: meta_bits.append(("%d بطاقة" % len(flashcards)) if is_ar else "%d flashcards" % len(flashcards))
     if mcqs:       meta_bits.append(("%d سؤال" % len(mcqs)) if is_ar else "%d quiz questions" % len(mcqs))
@@ -4175,19 +4210,20 @@ def _render_shared_guide(row):
     meta = "<div class=\"meta\">%s</div>" % _he(" · ".join(meta_bits))
 
     parts = []
-    objs = [o for o in (g.get("objectives") or []) if isinstance(o, str) and o.strip()]
+    objs = [o for o in _as_list(g.get("objectives")) if isinstance(o, str) and o.strip()]
     if objs:
         parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (
             _he(L["learn"]), "".join("<li>%s</li>" % _he(o) for o in objs)))
-    for sec in (g.get("sections") or []):
+    for sec in _as_list(g.get("sections")):
         if not isinstance(sec, dict): continue
         lis = "".join("<li>%s</li>" % _he(_sg_bullet(b).strip())
-                      for b in (sec.get("bullets") or []) if _sg_bullet(b).strip())
+                      for b in _as_list(sec.get("bullets")) if _sg_bullet(b).strip())
         if lis:
-            parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (_he(sec.get("title", "")), lis))
-    kws = [k for k in (g.get("keywords") or []) if isinstance(k, dict) and k.get("term")]
+            parts.append("<section class=\"sec\"><h2>%s</h2><ul>%s</ul></section>" % (_he(_scalar_text(sec.get("title"))), lis))
+    kws = [k for k in _as_list(g.get("keywords")) if isinstance(k, dict) and _scalar_text(k.get("term")).strip()]
     if kws:
-        dl = "".join("<div class=\"kw\"><dt>%s</dt><dd>%s</dd></div>" % (_he(k.get("term", "")), _he(k.get("definition", ""))) for k in kws)
+        dl = "".join("<div class=\"kw\"><dt>%s</dt><dd>%s</dd></div>" % (
+            _he(_scalar_text(k.get("term"))), _he(_scalar_text(k.get("definition")))) for k in kws)
         parts.append("<section class=\"sec\"><h2>%s</h2>%s</section>" % (_he(L["keys"]), dl))
     if flashcards:
         cards = "".join("<div class=\"fc\"><div class=\"fc-q\">%s</div><div class=\"fc-a\">%s</div></div>" % (
@@ -4201,7 +4237,7 @@ def _render_shared_guide(row):
             opts = "".join("<li class=\"opt%s\">%s%s</li>" % (
                 " correct" if _mcq_correct(o, ans) else "",
                 "✓ " if _mcq_correct(o, ans) else "",
-                _he(o if isinstance(o, str) else str(o))) for o in (m.get("options") or []))
+                _he(o if isinstance(o, str) else str(o))) for o in _as_list(m.get("options")))
             expl = m.get("explanation") or m.get("rationale") or ""
             ex = ("<div class=\"expl\">%s</div>" % _he(expl)) if expl else ""
             qz.append("<div class=\"qz\"><div class=\"qz-q\">%s</div><ul class=\"opts\">%s</ul>%s</div>" % (qt, opts, ex))
@@ -4257,6 +4293,60 @@ def shared_guide_page(slug):
     return _render_shared_guide(row)
 
 
+def _chat_context(guide):
+    """The study material for the chat prompt (title, objectives, section notes,
+    key terms) — rather than raw slide chunks. Tolerates loose guide shapes: a
+    keyword dict without 'term', a string where a list belongs, non-string
+    entries… are str()'d or skipped, never a 500."""
+    guide = guide if isinstance(guide, dict) else {}
+    parts = []
+    title = _scalar_text(guide.get("title"))
+    if title.strip():
+        parts.append(f"Title: {title}")
+    objs = [t for t in (_scalar_text(o) for o in _as_list(guide.get("objectives"))) if t.strip()]
+    if objs:
+        parts.append("Objectives:\n" + "\n".join(f"- {o}" for o in objs))
+    for sec in _as_list(guide.get("sections")):
+        if not isinstance(sec, dict):
+            continue
+        lines = []
+        for b in _as_list(sec.get("bullets")):
+            if isinstance(b, dict):
+                b = b.get("text") or b.get("fact")
+            t = _scalar_text(b)
+            if t.strip():
+                lines.append(f"- {t}")
+        if lines:
+            parts.append(f"\n[{_scalar_text(sec.get('title'))}]\n" + "\n".join(lines))
+    kw_lines = []
+    for k in _as_list(guide.get("keywords"))[:30]:
+        if isinstance(k, dict):
+            term, defn = _scalar_text(k.get("term")), _scalar_text(k.get("definition"))
+            line = f"{term}: {defn}" if term.strip() else defn
+        else:
+            line = _scalar_text(k)
+        if line.strip():
+            kw_lines.append(line)
+    if kw_lines:
+        parts.append("Key terms:\n" + "\n".join(kw_lines))
+    return "\n\n".join(parts) or "No material available."
+
+def _chat_answer(result):
+    """The model's answer as a string, whatever JSON shape came back: a list
+    ([{"answer": …}]), a bare JSON string, an answer that is a list of lines…
+    An unusable answer is '' (the client then shows its own localized
+    'no answer' text, as it did for null); no 'answer' key at all keeps the
+    historical default text."""
+    if isinstance(result, str):
+        return result.strip()
+    res = _as_dict(result)
+    if "answer" not in res:
+        return "No answer found in the material."
+    ans = res.get("answer")
+    if isinstance(ans, list):
+        ans = "\n".join(t for t in (_scalar_text(a) for a in ans) if t.strip())
+    return _scalar_text(ans)
+
 @app.route("/api/chat/<job_id>", methods=["POST"])
 def chat_with_slides(job_id):
     if not _check_rate_limit(_client_ip(), scope="chat", limit=20):
@@ -4266,37 +4356,24 @@ def chat_with_slides(job_id):
         return err
     if not _valid_job(job_id):
         return jsonify({"error": "Invalid job ID"}), 400
-    data     = request.json or {}
-    question = data.get("question", "")[:500].strip()
+    # A non-string question (a number, list, object, null) or a non-object body
+    # used to 500 on [:500]; it is a 400 'bad_request' now.
+    data = {}
+    try:
+        data     = _json_object()
+        question = _str_field(data, "question")[:500].strip()
+    except _BadField as e:
+        return _bad_field(e, data)
     language = "ar" if data.get("language") == "ar" else "en"
     if not question:
-        return jsonify({"error": "No question provided"}), 400
+        return _bad_request("No question provided",
+                            "لم يتم إدخال أي سؤال — اكتب سؤالك أولاً.", data)
     with _jobs_lock:
         job = get_job(job_id)
     if not job:
         return _job_expired_json()
 
-    # Build rich context from guide (sections + keywords) rather than raw slide chunks
-    guide   = job.get("guide") or {}
-    context_parts = []
-    if guide.get("title"):
-        context_parts.append(f"Title: {guide['title']}")
-    if guide.get("objectives"):
-        context_parts.append("Objectives:\n" + "\n".join(f"- {o}" for o in guide["objectives"]))
-    for sec in (guide.get("sections") or []):
-        bullets = sec.get("bullets") or []
-        if bullets:
-            context_parts.append(f"\n[{sec.get('title','')}]\n" + "\n".join(
-                f"- {b}" if isinstance(b, str) else f"- {b.get('text') or b.get('fact','')}"
-                for b in bullets
-            ))
-    if guide.get("keywords"):
-        kw_lines = [
-            f"{k['term']}: {k.get('definition','')}" if isinstance(k, dict) else str(k)
-            for k in guide["keywords"][:30]
-        ]
-        context_parts.append("Key terms:\n" + "\n".join(kw_lines))
-    context = "\n\n".join(context_parts) or "No material available."
+    context = _chat_context(job.get("guide"))
 
     lang = "in Arabic" if language == "ar" else "in English"
     try:
@@ -4315,7 +4392,7 @@ Rules:
 - If genuinely not covered, say so briefly
 - Be helpful and detailed; include facts, definitions, examples from the material
 - JSON only""", num_predict=1024)
-        return jsonify({"answer": result.get("answer", "No answer found in the material.")})
+        return jsonify({"answer": _chat_answer(result)})
     except Exception as e:
         return jsonify({"error": _safe_err(e)}), 500
 
@@ -4352,9 +4429,11 @@ def view_md(job_id):
         job = get_job(job_id)
     if not job:
         return _VIEW_EXPIRED_HTML, 404, {"Content-Type": "text/html; charset=utf-8"}
-    is_ar = (job.get("guide") or {}).get("language") == "ar"
-    title = _he(job["guide"].get("title", "Study Guide"))
-    md = job["md"]
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
+    is_ar = guide.get("language") == "ar"
+    title = _he(_scalar_text(guide.get("title", "Study Guide")) or "Study Guide")
+    md = job.get("md") or ""
 
     def _md_to_html(text):
         lines, out = text.split('\n'), []
@@ -4450,9 +4529,10 @@ def view_cards(job_id):
         job = get_job(job_id)
     if not job:
         return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
-    guide = job["guide"]
-    title = _he(guide.get("title", "Flash Cards"))
-    cards = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
+    title = _he(_scalar_text(guide.get("title", "Flash Cards")) or "Flash Cards")
+    cards = [f for f in _as_list(guide.get("flashcards")) if isinstance(f, dict)]
     if not cards:
         return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No flash cards available.</p>")
 
@@ -4522,6 +4602,20 @@ render();
     return _page_shell(f"Flash Cards — {title}", css, html, script)
 
 
+def _quiz_items(mcqs):
+    """Quiz questions the view script can render: dicts whose `options` is a
+    non-empty list of strings. q.options.map() crashed the page on a string or
+    number, and a question with no options can never be answered (its Next
+    button only appears after a pick), so such questions are left out."""
+    out = []
+    for m in _as_list(mcqs):
+        if not isinstance(m, dict):
+            continue
+        opts = [t for t in (_scalar_text(o) for o in _as_list(m.get("options"))) if t.strip()]
+        if opts:
+            out.append({**m, "options": opts})
+    return out
+
 @app.route("/api/view/quiz/<job_id>")
 def view_quiz(job_id):
     if not _valid_job(job_id):
@@ -4530,9 +4624,10 @@ def view_quiz(job_id):
         job = get_job(job_id)
     if not job:
         return "<h2 style='font-family:sans-serif;padding:2rem'>Guide not found or expired</h2>", 404
-    guide = job["guide"]
-    title = _he(guide.get("title", "Quiz"))
-    mcqs = [m for m in guide.get("mcqs", []) if isinstance(m, dict)]
+    guide = job.get("guide")
+    guide = guide if isinstance(guide, dict) else {}
+    title = _he(_scalar_text(guide.get("title", "Quiz")) or "Quiz")
+    mcqs = _quiz_items(guide.get("mcqs"))
     if not mcqs:
         return _page_shell(title, "", "<p style='text-align:center;color:#4a5f80;padding:3rem'>No quiz questions available.</p>")
 
