@@ -716,7 +716,8 @@ def _security_headers(resp):
     resp.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     if request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https":
         resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-    if request.path.startswith("/api/"):
+    if request.path.startswith("/api/") or request.path == "/admin" or request.path.startswith("/admin/"):
+        # Admin pages carry subscriber PII and set the session cookie: never cache.
         resp.headers.setdefault("Cache-Control", "no-store")
     # Content-Security-Policy — defence-in-depth backstop behind the output
     # escaping. The React SPA loads an external bundle (no inline JS), so it gets
@@ -784,9 +785,51 @@ _PRIVATE_RANGES = (
 def _is_private(ip):
     return any(ip.startswith(p) for p in _PRIVATE_RANGES)
 
+# ── Admin authentication ───────────────────────────────────────────────────────
+# The admin token is NEVER read from the query string (query strings end up in
+# Render's / Cloudflare's request logs), never rendered into a page and never
+# kept in localStorage. A browser signs in once via POST /admin/login and gets an
+# HttpOnly cookie holding an HMAC *derived* from ADMIN_TOKEN (not the token), so
+# rotating ADMIN_TOKEN invalidates every cookie. Scripts send X-Admin-Token.
+ADMIN_COOKIE         = "alimne_admin"
+_ADMIN_COOKIE_PATH   = "/admin"
+_ADMIN_REMEMBER_SECS = 30 * 24 * 3600     # "Remember on this device" = 30 days
+_ADMIN_CSRF_HEADER   = "X-Requested-With"
+_ADMIN_CSRF_VALUE    = "alimne-admin"
+_ADMIN_LOGIN_PER_MIN = 10
+
+def _ct_eq(a, b):
+    """Constant-time string compare that never raises. secrets.compare_digest
+    raises TypeError on non-ASCII str (a 500 for a stray 'é' header)."""
+    if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
+        return False
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+def _admin_session_value():
+    # Derived from ADMIN_TOKEN at call time: a new token => a new value, so every
+    # previously issued cookie stops matching automatically.
+    return hmac.new(ADMIN_TOKEN.encode("utf-8"), b"alimne-admin-session-v1",
+                    hashlib.sha256).hexdigest()
+
+def _admin_auth():
+    """How this request is authenticated as admin: 'header' (X-Admin-Token, for
+    scripts), 'cookie' (browser session from /admin/login) or None."""
+    if _ct_eq(request.headers.get("X-Admin-Token", ""), ADMIN_TOKEN):
+        return "header"
+    if _ct_eq(request.cookies.get(ADMIN_COOKIE, ""), _admin_session_value()):
+        return "cookie"
+    return None
+
 def _admin_ok():
-    supplied = request.headers.get("X-Admin-Token") or request.args.get("token") or ""
-    return secrets.compare_digest(supplied, ADMIN_TOKEN)
+    how = _admin_auth()
+    if how is None:
+        return False
+    if how == "cookie" and request.method not in ("GET", "HEAD", "OPTIONS"):
+        # CSRF defence in depth on top of SameSite=Strict: a cross-site page
+        # can't attach a custom header without a CORS preflight, and credentialed
+        # CORS is never granted here. Header (script) auth needs no such check.
+        return request.headers.get(_ADMIN_CSRF_HEADER, "") == _ADMIN_CSRF_VALUE
+    return True
 
 def _safe_err(e):
     if isinstance(e, ValueError):
@@ -918,6 +961,8 @@ def _canonical_host():
     if host.endswith(".onrender.com"):
         from urllib.parse import quote
         qs = request.query_string.decode("latin-1")
+        if request.path == "/admin" or request.path.startswith("/admin/"):
+            qs = ""   # never carry an old ?token= across — query strings get logged
         path = quote(request.path, safe="/%:@!$&'()*+,;=-._~")
         return redirect(_CANONICAL_ORIGIN + path + ("?" + qs if qs else ""), 301)
     return None
@@ -951,7 +996,7 @@ def track_visitor():
         "isp":     "",
         "lat":     "",
         "lon":     "",
-        "path":    request.path,
+        "path":    request.path,      # path only, never the query string (secrets)
         "method":  request.method,
         "ua":      (request.headers.get("User-Agent") or "")[:160],
     }
@@ -1119,66 +1164,148 @@ def admin_user_cancel():
     return jsonify({"ok": True, "canceled_at_period_end": False})
 
 
-# Token gate for /admin. Lets you enter the admin token once; the browser then
-# remembers it (localStorage) and auto-opens the dashboard on later visits, so
-# you never retype it. The token value is only ever entered by you.
-ADMIN_GATE_HTML = """<!DOCTYPE html><html><head><meta charset="UTF-8">
+# Sign-in gate for /admin. The token is POSTed once to /admin/login, which sets
+# an HttpOnly session cookie; the token never goes into a URL, is not kept in
+# the browser, and is never rendered back into a page. On load the gate also
+# deletes the token older versions left in localStorage (migration).
+ADMIN_GATE_HTML = """<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Admin — Alimne</title>
 <style>
  *{box-sizing:border-box;margin:0;padding:0}
  body{font-family:'Segoe UI',system-ui,sans-serif;background:#050d1a;color:#e8f0ff;
       min-height:100vh;display:flex;align-items:center;justify-content:center;padding:1rem}
- .card{background:#0a1628;border:1px solid #1a3a6e;border-radius:14px;padding:1.8rem;max-width:400px;width:100%}
- h2{font-size:1.1rem;margin:0 0 .4rem;display:flex;gap:.5rem;align-items:center}
- p{color:#8aa0c8;font-size:.88rem;margin:0 0 1.1rem;line-height:1.5}
+ .card{background:#0a1628;border:1px solid #1a3a6e;border-radius:14px;padding:1.8rem;max-width:420px;width:100%}
+ h2{font-size:1.1rem;margin:0 0 .4rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+ p{color:#8aa0c8;font-size:.88rem;margin:0 0 .6rem;line-height:1.5}
+ p.ar{margin-bottom:1.1rem}
+ .ar{font-family:'Segoe UI',Tahoma,'Noto Naskh Arabic',system-ui,sans-serif}
  input[type=password]{width:100%;padding:.7rem;border-radius:8px;border:1px solid #1a3a6e;
       background:#050d1a;color:#e8f0ff;font-size:.9rem;margin-bottom:.75rem}
  button{width:100%;padding:.72rem;border-radius:8px;border:none;background:#4f8ef7;color:#fff;
       font-weight:600;font-size:.9rem;cursor:pointer}
  button:hover{opacity:.9}
- .err{color:#f87171;font-size:.85rem;margin-bottom:.75rem;display:none}
- label{display:flex;gap:.5rem;align-items:center;color:#8aa0c8;font-size:.82rem;margin:0 0 1rem;cursor:pointer}
+ button[disabled]{opacity:.6;cursor:wait}
+ .err{color:#f87171;font-size:.85rem;margin-bottom:.75rem;display:none;line-height:1.5}
+ label{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;color:#8aa0c8;font-size:.82rem;margin:0 0 1rem;cursor:pointer}
 </style></head><body>
 <div class="card">
-  <h2>🔒 Alimne Admin</h2>
-  <p>Enter your admin token once. This browser will remember it, so you won't be asked again.</p>
-  <div class="err" id="err">That token was rejected — check it and try again.</div>
-  <input id="tok" type="password" placeholder="Admin token" autocomplete="off" autofocus>
-  <label><input type="checkbox" id="remember" checked> Remember on this device</label>
-  <button id="go">Open dashboard</button>
+  <h2>🔒 Alimne Admin <span class="ar" lang="ar" dir="rtl">لوحة الإدارة</span></h2>
+  <p>Enter your admin token. With &ldquo;Remember&rdquo; ticked, this device stays signed in for 30 days &mdash; the token itself is never saved in the browser.</p>
+  <p class="ar" lang="ar" dir="rtl">أدخل رمز المشرف. عند تفعيل «تذكّرني» يبقى هذا الجهاز مسجَّل الدخول لمدة 30 يومًا، ولا يُحفظ الرمز نفسه في المتصفح أبدًا.</p>
+  <div class="err" id="err" role="alert"><div id="err-en"></div><div id="err-ar" class="ar" lang="ar" dir="rtl"></div></div>
+  <input id="tok" type="password" placeholder="Admin token · رمز المشرف" autocomplete="off" autofocus>
+  <label><input type="checkbox" id="remember" checked> Remember on this device (30 days) · <span class="ar" lang="ar" dir="rtl">تذكّرني على هذا الجهاز (30 يومًا)</span></label>
+  <button id="go" type="button">Open dashboard · <span class="ar" lang="ar" dir="rtl">فتح لوحة التحكم</span></button>
 </div>
 <script>
- var KEY = "alimne_admin_token";
- var tried = new URLSearchParams(location.search).get("token");
- if (tried) {
-   // A token was supplied but we still landed on this gate => it was invalid.
-   try { localStorage.removeItem(KEY); } catch (e) {}
+(function () {
+ // Migration: older versions kept the raw admin token in localStorage. Delete
+ // it — sign-in now lives in an HttpOnly cookie that page scripts can't read.
+ try { localStorage.removeItem("alimne_admin_token"); } catch (e) {}
+ var MSG = {
+   bad:  ["That token was rejected — check it and try again.",
+          "تم رفض هذا الرمز — تحقّق منه وحاول مرة أخرى."],
+   rate: ["Too many attempts — wait a minute and try again.",
+          "محاولات كثيرة جدًا — انتظر دقيقة ثم حاول مرة أخرى."],
+   net:  ["Couldn't reach the server — check your connection and try again.",
+          "تعذّر الوصول إلى الخادم — تحقّق من اتصالك وحاول مرة أخرى."],
+   oops: ["Something went wrong on the server — try again in a moment.",
+          "حدث خطأ في الخادم — حاول مرة أخرى بعد قليل."]
+ };
+ function showErr(k) {
+   document.getElementById("err-en").textContent = MSG[k][0];
+   document.getElementById("err-ar").textContent = MSG[k][1];
    document.getElementById("err").style.display = "block";
- } else {
-   var saved = null; try { saved = localStorage.getItem(KEY); } catch (e) {}
-   if (saved) { location.replace("/admin?token=" + encodeURIComponent(saved)); }
  }
+ // A link from another site (email, chat app) doesn't carry the SameSite=Strict
+ // cookie, so we can land here while still signed in. Ask same-origin and, if
+ // the session is valid, forward once (time-guarded so it can never loop).
+ try {
+   var last = +(sessionStorage.getItem("alimne_admin_fwd") || 0);
+   if (Date.now() - last > 10000) {
+     fetch("/admin/session", {credentials: "same-origin"}).then(function (r) {
+       if (r.status === 204) {
+         try { sessionStorage.setItem("alimne_admin_fwd", String(Date.now())); } catch (e) {}
+         location.replace("/admin");
+       }
+     }).catch(function () {});
+   }
+ } catch (e) {}
+ var btn = document.getElementById("go"), tok = document.getElementById("tok");
  function go() {
-   var v = document.getElementById("tok").value.trim();
-   if (!v) return;
-   try {
-     if (document.getElementById("remember").checked) localStorage.setItem(KEY, v);
-     else localStorage.removeItem(KEY);
-   } catch (e) {}
-   location.href = "/admin?token=" + encodeURIComponent(v);
+   var v = tok.value.trim();
+   if (!v || btn.disabled) return;
+   btn.disabled = true;
+   fetch("/admin/login", {
+     method: "POST", credentials: "same-origin",
+     headers: {"Content-Type": "application/json", "X-Requested-With": "alimne-admin"},
+     body: JSON.stringify({token: v, remember: document.getElementById("remember").checked})
+   }).then(function (r) {
+     btn.disabled = false;
+     if (r.ok) { tok.value = ""; location.replace("/admin"); return; }
+     showErr(r.status === 429 ? "rate" : (r.status === 401 ? "bad" : "oops"));
+   }).catch(function () { btn.disabled = false; showErr("net"); });
  }
- document.getElementById("go").addEventListener("click", go);
- document.getElementById("tok").addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
+ btn.addEventListener("click", go);
+ tok.addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
+})();
 </script>
 </body></html>"""
 
 
+@app.route("/admin/login", methods=["POST"])
+def admin_login():
+    """Exchange the admin token (JSON body, never the URL) for an HttpOnly
+    session cookie. Rate limited per IP; the supplied value is never logged."""
+    ip = _client_ip()
+    if not _check_rate_limit(ip, scope="admin-login", limit=_ADMIN_LOGIN_PER_MIN):
+        _log.warning("ADMIN login rate-limited for %s", ip)
+        return jsonify({"ok": False, "error": "Too many attempts — wait a minute and try again.",
+                        "code": "rate_limited"}), 429
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
+    supplied = data.get("token")
+    if not (isinstance(supplied, str) and len(supplied) <= 512 and _ct_eq(supplied, ADMIN_TOKEN)):
+        _log.warning("ADMIN login failed from %s", ip)
+        return jsonify({"ok": False, "error": "Invalid admin token.", "code": "bad_token"}), 401
+    remember = data.get("remember") is True
+    resp = jsonify({"ok": True})
+    resp.set_cookie(ADMIN_COOKIE, _admin_session_value(),
+                    max_age=_ADMIN_REMEMBER_SECS if remember else None,   # None = session cookie
+                    path=_ADMIN_COOKIE_PATH, secure=True, httponly=True, samesite="Strict")
+    _log.info("ADMIN login from %s (remember=%s)", ip, remember)
+    return resp
+
+
+@app.route("/admin/logout", methods=["POST"])
+def admin_logout():
+    """Clear the admin session cookie on this device."""
+    resp = jsonify({"ok": True})
+    resp.delete_cookie(ADMIN_COOKIE, path=_ADMIN_COOKIE_PATH,
+                       secure=True, httponly=True, samesite="Strict")
+    return resp
+
+
+@app.route("/admin/session")
+def admin_session():
+    """204 if this request is signed in as admin, else 401. Lets the gate page
+    forward to the dashboard when a cross-site link arrived without the
+    SameSite=Strict cookie. Reveals nothing beyond yes/no to the caller."""
+    if not _admin_ok():
+        return jsonify({"ok": False}), 401
+    return "", 204
+
+
 @app.route("/admin")
 def admin_page():
+    if request.query_string:
+        # Old bookmarks and the old gate put the token in ?token=. Never honour
+        # it (query strings are logged) and drop it from the address bar/history.
+        return redirect("/admin", 302)
     if not _admin_ok():
         return ADMIN_GATE_HTML, 401
-    token = ADMIN_TOKEN
     with _vis_lock:
         vis_copy     = list(_visitors)
         blocked_copy = set(_blocked_ips)
@@ -1547,7 +1674,7 @@ def admin_page():
   <div class="actions">
     <button class="btn btn-gray" onclick="location.reload()">↻ Refresh</button>
     <button class="btn btn-red" onclick="clearLog()">🗑 Clear Log</button>
-    <button class="btn btn-gray" onclick="forgetToken()" title="Forget the saved admin token on this device">⎋ Sign out</button>
+    <button class="btn btn-gray" onclick="signOut()" title="Sign out of the admin dashboard on this device · تسجيل الخروج من لوحة الإدارة على هذا الجهاز">⎋ Sign out</button>
   </div>
 </div>
 {subs_section}
@@ -1568,36 +1695,41 @@ def admin_page():
 </div>
 <div id="toast"></div>
 <script>
-const TOKEN = "{str(token).replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))}";
-// Remember the token on this device so /admin auto-opens next time, and strip
-// the token out of the address bar / history now that it's saved.
-try {{ localStorage.setItem("alimne_admin_token", TOKEN); if (location.search) history.replaceState(null, "", "/admin"); }} catch (e) {{}}
+// Auth rides on the HttpOnly session cookie, which the browser attaches to these
+// same-origin requests by itself; the admin token never reaches this page. The
+// server requires the fixed X-Requested-With header on every cookie-authed POST.
+try {{ localStorage.removeItem("alimne_admin_token"); }} catch (e) {{}}   // legacy copy
+const ADMIN_HEADERS = {{"Content-Type":"application/json","X-Requested-With":"alimne-admin"}};
 function toast(msg, color="#16a34a"){{
   const t = document.getElementById("toast");
   t.textContent = msg; t.style.background = color; t.style.display = "block";
   setTimeout(()=>t.style.display="none", 2500);
 }}
-// Send the admin token in the X-Admin-Token HEADER, never the URL query string
-// (query strings are recorded in access logs; the header is not).
+// POST an admin action. Resolves to the Response, or null when the session has
+// expired (cookie cleared, or the admin token was rotated) — then it sends you to sign in.
+async function adminPost(url, body){{
+  const r = await fetch(url, {{method:"POST", credentials:"same-origin", headers:ADMIN_HEADERS,
+                               body: JSON.stringify(body || {{}})}});
+  if (r.status === 401) {{
+    toast("Session expired — sign in again. · انتهت الجلسة — سجّل الدخول مرة أخرى.", "#dc2626");
+    setTimeout(()=>{{ location.href = "/admin"; }}, 1800);
+    return null;
+  }}
+  return r;
+}}
 async function blockIp(ip){{
   if(!confirm("Block " + ip + "?\\nThis will 403 all their requests immediately.")) return;
-  const r = await fetch("/admin/block", {{
-    method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}},
-    body: JSON.stringify({{ip}})
-  }});
-  if(r.ok){{ toast("⛔ Blocked: " + ip, "#dc2626"); setTimeout(()=>location.reload(),1200); }}
+  const r = await adminPost("/admin/block", {{ip}});
+  if(r && r.ok){{ toast("⛔ Blocked: " + ip, "#dc2626"); setTimeout(()=>location.reload(),1200); }}
 }}
 async function unblock(ip){{
-  const r = await fetch("/admin/unblock", {{
-    method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}},
-    body: JSON.stringify({{ip}})
-  }});
-  if(r.ok){{ toast("✓ Unblocked: " + ip); setTimeout(()=>location.reload(),1200); }}
+  const r = await adminPost("/admin/unblock", {{ip}});
+  if(r && r.ok){{ toast("✓ Unblocked: " + ip); setTimeout(()=>location.reload(),1200); }}
 }}
 async function clearLog(){{
   if(!confirm("Clear all visitor log entries?")) return;
-  const r = await fetch("/admin/clear", {{method:"POST", headers:{{"X-Admin-Token":TOKEN}}}});
-  if(r.ok){{ toast("🗑 Log cleared"); setTimeout(()=>location.reload(),1200); }}
+  const r = await adminPost("/admin/clear");
+  if(r && r.ok){{ toast("🗑 Log cleared"); setTimeout(()=>location.reload(),1200); }}
 }}
 
 // ── Subscribers: search / paying-only filter / sort / CSV / actions ──────────
@@ -1650,19 +1782,23 @@ async function grantTokens(uid, email){{
   if (v === null) return;
   var amount = parseInt(v, 10);
   if (!amount) {{ toast("Enter a non-zero number", "#dc2626"); return; }}
-  var r = await fetch("/admin/user/grant", {{method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}}, body: JSON.stringify({{user_id: uid, amount: amount}})}});
+  var r = await adminPost("/admin/user/grant", {{user_id: uid, amount: amount}});
+  if (!r) return;
   var d = await r.json().catch(function(){{ return {{}}; }});
   if (r.ok) {{ toast("✓ " + email + ": " + d.tokens_remaining + " tokens"); setTimeout(function(){{ location.reload(); }}, 900); }}
   else {{ toast("✗ " + (d.error || "failed"), "#dc2626"); }}
 }}
 async function cancelSub(uid, email){{
   if (!confirm("Cancel subscription for " + email + "?\\nStripe subscriptions cancel at period end (they keep access until then).")) return;
-  var r = await fetch("/admin/user/cancel", {{method:"POST", headers:{{"Content-Type":"application/json","X-Admin-Token":TOKEN}}, body: JSON.stringify({{user_id: uid}})}});
+  var r = await adminPost("/admin/user/cancel", {{user_id: uid}});
+  if (!r) return;
   var d = await r.json().catch(function(){{ return {{}}; }});
   if (r.ok) {{ toast(d.canceled_at_period_end ? "✓ Cancels at period end" : "✓ Set to free"); setTimeout(function(){{ location.reload(); }}, 900); }}
   else {{ toast("✗ " + (d.error || "failed"), "#dc2626"); }}
 }}
-function forgetToken(){{
+async function signOut(){{
+  // Server clears the HttpOnly cookie (page JS can't); then back to the sign-in gate.
+  try {{ await fetch("/admin/logout", {{method:"POST", credentials:"same-origin", headers:ADMIN_HEADERS, body:"{{}}"}}); }} catch(e) {{}}
   try {{ localStorage.removeItem("alimne_admin_token"); }} catch(e) {{}}
   location.href = "/admin";
 }}
