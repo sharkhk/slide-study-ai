@@ -2424,6 +2424,9 @@ def _call_ollama(prompt, retries=3, num_predict=4096):
     raise last_err
 
 
+# Longest Groq Retry-After we sleep through; a longer one (daily limit) moves on.
+_GROQ_MAX_WAIT_S = 60
+
 def _call_groq(prompt, retries=5, max_tokens=2048):
     if not GROQ_API_KEY:
         raise ValueError("GROQ_API_KEY is not set — configure it in Render environment variables.")
@@ -2461,8 +2464,14 @@ def _call_groq(prompt, retries=5, max_tokens=2048):
                 )
                 if r.status_code == 429:
                     wait = int(r.headers.get("retry-after", 10))
-                    _log.warning("GROQ rate limited (429) — waiting %ds. body=%s", wait, r.text[:300])
                     last_err = RuntimeError(f"GROQ rate limited (429): {r.text[:200]}")
+                    if wait > _GROQ_MAX_WAIT_S:
+                        # Daily limit: don't hold a worker thread for hours —
+                        # try the next model (own limits), else fail fast.
+                        _log.warning("GROQ rate limited (429, model=%s) — retry-after %ds too long, trying next model. body=%s",
+                                     model, wait, r.text[:300])
+                        break
+                    _log.warning("GROQ rate limited (429) — waiting %ds. body=%s", wait, r.text[:300])
                     time.sleep(wait)
                     continue
                 if r.status_code in (400, 404):
