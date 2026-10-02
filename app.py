@@ -3066,7 +3066,7 @@ def build_markdown(guide):
     lines = [f"# {guide.get('title', L['title'])}", ""]
     if guide.get("subtitle"):
         lines += [f"*{guide['subtitle']}*", ""]
-    objs = [o for o in guide.get("objectives", []) if isinstance(o, str)]
+    objs = [o for o in _as_list(guide.get("objectives")) if isinstance(o, str)]
     if objs:
         lines += [f"## {L['objectives']}", ""]
         for o in objs: lines.append(f"- {o}")
@@ -3081,7 +3081,7 @@ def build_markdown(guide):
             lines.append("| " + " | ".join(str(h) for h in tbl["headers"]) + " |")
             lines.append("|" + "|".join(["---"] * len(tbl["headers"])) + "|")
             for row in tbl["rows"]:
-                lines.append("| " + " | ".join(str(c) for c in row) + " |")
+                lines.append("| " + " | ".join(str(c) for c in (row if isinstance(row, list) else [row])) + " |")
         lines.append("")
     kws = [k for k in guide.get("keywords", []) if isinstance(k, dict)]
     if kws:
@@ -3437,10 +3437,10 @@ def _page_num(canvas, doc):
 def build_pdf(guide, language, out_filename="study_guide"):
     if not isinstance(guide, dict):
         guide = {}
-    guide["sections"]   = [s for s in guide.get("sections",   []) if isinstance(s, dict)]
-    guide["keywords"]   = [k for k in guide.get("keywords",   []) if isinstance(k, dict)]
-    guide["flashcards"] = [f for f in guide.get("flashcards", []) if isinstance(f, dict)]
-    guide["objectives"] = [o for o in guide.get("objectives", []) if isinstance(o, str)]
+    guide["sections"]   = [s for s in _as_list(guide.get("sections"))   if isinstance(s, dict)]
+    guide["keywords"]   = [k for k in _as_list(guide.get("keywords"))   if isinstance(k, dict)]
+    guide["flashcards"] = [f for f in _as_list(guide.get("flashcards")) if isinstance(f, dict)]
+    guide["objectives"] = [o for o in _as_list(guide.get("objectives")) if isinstance(o, str)]
 
     is_ar = (language == "ar")
     ar_ok = is_ar and _ensure_arabic_font()
@@ -3661,7 +3661,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
             rtl = (lambda cells: cells[::-1]) if is_ar else (lambda cells: cells)
             tbl_rows = [rtl([P(h, ST["tbl_hdr"]) for h in headers])]
             for ri, row in enumerate(tbl["rows"]):
-                padded = (list(row) + [""] * n_cols)[:n_cols]
+                padded = ((row if isinstance(row, list) else [row]) + [""] * n_cols)[:n_cols]
                 tbl_rows.append(rtl([P(str(c), ST["tbl_cell"]) for c in padded]))
             inner = Table(tbl_rows, colWidths=[col_w]*n_cols)
             ts = [
