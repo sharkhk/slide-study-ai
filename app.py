@@ -5760,6 +5760,30 @@ class _PinnedIPAdapter(http.adapters.HTTPAdapter):
         return super().send(request, **kwargs)
 
 
+_META_CHARSET_RE = re.compile(rb'<meta[^>]+charset\s*=\s*["\']?\s*([A-Za-z0-9_.:-]+)', re.IGNORECASE)
+
+def _decode_html(content, content_type):
+    """Page bytes → str. Charset from the Content-Type header, else <meta charset>,
+    else UTF-8 (cp1252 if the bytes aren't UTF-8). requests' own fallback for a
+    header without charset is ISO-8859-1, which turned UTF-8 Arabic into mojibake;
+    an unknown charset name falls through instead of raising LookupError."""
+    import codecs
+    m = re.search(r'charset\s*=\s*["\']?\s*([A-Za-z0-9_.:-]+)', content_type or "", re.IGNORECASE)
+    declared = [m.group(1)] if m else []
+    mm = _META_CHARSET_RE.search(content[:4096])
+    if mm:
+        declared.append(mm.group(1).decode("ascii", "ignore"))
+    for cs in declared:
+        try:
+            codecs.lookup(cs)
+        except LookupError:
+            continue
+        return content.decode(cs, "replace")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode("cp1252", "replace")
+
 def _fetch_url_text(url):
     """Fetch a PUBLIC webpage and extract readable text. SSRF guard: public
     http(s) only, no private/internal addresses, no redirects, 5 MB cap. The
@@ -5801,7 +5825,7 @@ def _fetch_url_text(url):
         raise ValueError(f"Could not fetch URL: {e}")
     finally:
         sess.close()
-    html = content.decode(r.encoding or "utf-8", "replace")
+    html = _decode_html(content, r.headers.get("Content-Type", ""))
     # Remove script/style blocks
     html = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
     # Extract text from meaningful tags
