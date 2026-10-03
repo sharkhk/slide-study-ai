@@ -3076,11 +3076,12 @@ def build_markdown(guide):
         lines += [f"## {sec.get('title', '')}", ""]
         for b in sec.get("bullets", []): lines.append(f"- {_debullet(b)}")
         tbl = sec.get("table")
-        if isinstance(tbl, dict) and tbl.get("headers") and tbl.get("rows"):
+        if isinstance(tbl, dict) and _as_list(tbl.get("headers")) and _as_list(tbl.get("rows")):
+            headers = _as_list(tbl["headers"])
             lines.append("")
-            lines.append("| " + " | ".join(str(h) for h in tbl["headers"]) + " |")
-            lines.append("|" + "|".join(["---"] * len(tbl["headers"])) + "|")
-            for row in tbl["rows"]:
+            lines.append("| " + " | ".join(str(h) for h in headers) + " |")
+            lines.append("|" + "|".join(["---"] * len(headers)) + "|")
+            for row in _as_list(tbl["rows"]):
                 lines.append("| " + " | ".join(str(c) for c in (row if isinstance(row, list) else [row])) + " |")
         lines.append("")
     kws = [k for k in guide.get("keywords", []) if isinstance(k, dict)]
@@ -3093,12 +3094,12 @@ def build_markdown(guide):
         lines += [f"## {L['flashcards']}", ""]
         for i, fc in enumerate(fcs, 1):
             lines += [f"**{L['q']}{i}:** {fc.get('q','')}", f"**{L['a']}:** {fc.get('a','')}", ""]
-    mcqs = [m for m in guide.get("mcqs", []) if isinstance(m, dict)]
+    mcqs = [m for m in _as_list(guide.get("mcqs")) if isinstance(m, dict)]
     if mcqs:
         lines += [f"## {L['quiz']}", ""]
         for i, m in enumerate(mcqs, 1):
             lines.append(f"**{i}. {m.get('q','')}**")
-            for opt in m.get("options", []): lines.append(f"   {opt}")
+            for opt in _as_list(m.get("options")): lines.append(f"   {opt}")
             lines += [f"   ✓ **{m.get('answer','')}** — {m.get('explanation','')}", ""]
     return "\n".join(lines)
 
@@ -3440,6 +3441,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
     guide["sections"]   = [s for s in _as_list(guide.get("sections"))   if isinstance(s, dict)]
     guide["keywords"]   = [k for k in _as_list(guide.get("keywords"))   if isinstance(k, dict)]
     guide["flashcards"] = [f for f in _as_list(guide.get("flashcards")) if isinstance(f, dict)]
+    guide["mcqs"]       = [m for m in _as_list(guide.get("mcqs"))       if isinstance(m, dict)]
     guide["objectives"] = [o for o in _as_list(guide.get("objectives")) if isinstance(o, str)]
 
     is_ar = (language == "ar")
@@ -3651,8 +3653,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
             block.append(bt)
 
         tbl = sec.get("table")
-        if isinstance(tbl, dict) and tbl.get("headers") and tbl.get("rows"):
-            headers = tbl["headers"]
+        if isinstance(tbl, dict) and _as_list(tbl.get("headers")) and _as_list(tbl.get("rows")):
+            headers = _as_list(tbl["headers"])
             n_cols  = len(headers)
             col_w   = W / n_cols
             # Arabic tables run right-to-left: the first column is drawn on the
@@ -3660,7 +3662,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
             # and no column-specific style, so reversing the cells is enough.
             rtl = (lambda cells: cells[::-1]) if is_ar else (lambda cells: cells)
             tbl_rows = [rtl([P(h, ST["tbl_hdr"]) for h in headers])]
-            for ri, row in enumerate(tbl["rows"]):
+            for ri, row in enumerate(_as_list(tbl["rows"])):
                 padded = ((row if isinstance(row, list) else [row]) + [""] * n_cols)[:n_cols]
                 tbl_rows.append(rtl([P(str(c), ST["tbl_cell"]) for c in padded]))
             inner = Table(tbl_rows, colWidths=[col_w]*n_cols)
