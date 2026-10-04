@@ -5772,11 +5772,15 @@ def _decode_html(content, content_type):
     declared = [m.group(1)] if m else []
     mm = _META_CHARSET_RE.search(content[:4096])
     if mm:
-        declared.append(mm.group(1).decode("ascii", "ignore"))
+        meta_cs = mm.group(1).decode("ascii", "ignore")
+        # A <meta> read as ASCII bytes can't be UTF-16/32; browsers use UTF-8.
+        declared.append("utf-8" if meta_cs.lower().startswith(("utf-16", "utf-32")) else meta_cs)
     for cs in declared:
         try:
-            codecs.lookup(cs)
+            info = codecs.lookup(cs)
         except LookupError:
+            continue
+        if not getattr(info, "_is_text_encoding", True):   # base64, hex, rot13…
             continue
         return content.decode(cs, "replace")
     try:

@@ -61,3 +61,28 @@ def test_unknown_header_charset_does_not_crash(monkeypatch, cs):
     text = "Cells make energy in mitochondria through respiration."
     _serve(monkeypatch, f"<p>{text}</p>".encode("utf-8"), f"text/html; charset={cs}")
     assert text in appmod._fetch_url_text("https://example.com/x")
+
+
+# A codec that is not a text encoding ("base64", "hex", "rot13"…) passed
+# codecs.lookup but bytes.decode() then raised LookupError → refund + HTML 500.
+@pytest.mark.parametrize("cs", ["base64", "hex", "rot13", "zip"])
+def test_non_text_codec_charset_does_not_crash(monkeypatch, cs):
+    text = "Cells make energy in mitochondria through respiration."
+    _serve(monkeypatch, f"<p>{text}</p>".encode("utf-8"), f"text/html; charset={cs}")
+    assert text in appmod._fetch_url_text("https://example.com/x")
+
+
+def test_non_text_codec_meta_charset_does_not_crash(monkeypatch):
+    html = f"<html><head><meta charset='base64'></head><body><p>{AR_TEXT}</p></body></html>"
+    _serve(monkeypatch, html.encode("utf-8"), "text/html")
+    assert AR_TEXT in appmod._fetch_url_text("https://example.com/ar")
+
+
+# A <meta> can't truly declare UTF-16/32 (the meta itself was read as ASCII
+# bytes); browsers treat such a page as UTF-8. Decoding it as UTF-16 turned an
+# Arabic page into CJK-looking garbage and charged for a nonsense guide.
+@pytest.mark.parametrize("cs", ["utf-16", "UTF-16LE", "utf-32"])
+def test_meta_utf16_is_read_as_utf8(monkeypatch, cs):
+    html = f'<html><head><meta charset="{cs}"></head><body><p>{AR_TEXT}</p></body></html>'
+    _serve(monkeypatch, html.encode("utf-8"), "text/html")
+    assert AR_TEXT in appmod._fetch_url_text("https://example.com/ar")
