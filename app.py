@@ -2894,14 +2894,24 @@ Rules:
     return result
 
 
+def _kw_sec_text(guide):
+    """Prompt text for flash cards / quiz: key terms and section titles. A loose
+    entry (a keyword without "term", a numeric term, a null section title) is
+    skipped or stringified - a KeyError here used to drop the cards and quiz."""
+    terms  = [_scalar_text(k.get("term")) for k in _as_list(guide.get("keywords"))[:20]
+              if isinstance(k, dict)]
+    titles = [_scalar_text(s.get("title")) for s in _as_list(guide.get("sections"))
+              if isinstance(s, dict)]
+    return ", ".join(t for t in terms if t), " | ".join(t for t in titles if t)
+
+
 def pass3_flashcards(guide, language, dcfg=None):
     """Generate Q&A flash cards from the guide content."""
     dcfg = dcfg or DETAIL["standard"]
     lang = "in Arabic" if language == "ar" else "in English"
-    kw_text  = ", ".join(k["term"] for k in guide.get("keywords", [])[:20] if isinstance(k, dict))
-    sec_text = " | ".join(s["title"] for s in guide.get("sections", []) if isinstance(s, dict))
+    kw_text, sec_text = _kw_sec_text(guide)
     bullets_ctx = ""
-    for sec in guide.get("sections", []):
+    for sec in _as_list(guide.get("sections")):
         if isinstance(sec, dict) and sec.get("bullets"):
             bullets_ctx += f"\n{sec.get('title','')}:\n" + "\n".join(f"- {b}" for b in sec["bullets"])
     result = _call_ollama(f"""Create exam flash cards {lang} for a study guide about: {guide.get('title', '')}.
@@ -2937,10 +2947,9 @@ def pass4_mcq(guide, language, dcfg=None):
     dcfg   = dcfg or DETAIL["standard"]
     lang   = "in Arabic" if language == "ar" else "in English"
     n      = dcfg["n_mcq"]
-    kw_text  = ", ".join(k["term"] for k in guide.get("keywords", [])[:20] if isinstance(k, dict))
-    sec_text = " | ".join(s["title"] for s in guide.get("sections", []) if isinstance(s, dict))
+    kw_text, sec_text = _kw_sec_text(guide)
     bullets_ctx = ""
-    for sec in guide.get("sections", []):
+    for sec in _as_list(guide.get("sections")):
         if isinstance(sec, dict) and sec.get("bullets"):
             bullets_ctx += f"\n{sec.get('title','')}:\n" + "\n".join(f"- {b}" for b in sec["bullets"])
     result = _call_ollama(f"""Create {n} multiple-choice exam questions {lang} for: {guide.get('title','')}.
