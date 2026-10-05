@@ -5507,7 +5507,10 @@ def _text_to_slides(text, chunk_size=500):
 def _extract_video_id(url):
     """Extract YouTube video ID — only accepts youtube.com and youtu.be hostnames."""
     import urllib.parse
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:            # e.g. an unclosed "[" — was an HTML 500
+        return None
     host = (parsed.hostname or "").lower()
     host = host[4:] if host.startswith("www.") else host  # strip prefix, not charset
     if host not in ("youtube.com", "youtu.be", "m.youtube.com"):
