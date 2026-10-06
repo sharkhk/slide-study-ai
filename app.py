@@ -3949,7 +3949,11 @@ def referral_apply():
         return err
     if uid == "dev":
         return jsonify({"success": False, "reason": "dev_mode"})
-    code = (request.get_json(silent=True) or {}).get("code", "").strip().upper()
+    # A non-object body or a non-string code ({"code": null}, a number…) used
+    # to 500 on .get()/.strip(); it is the same 400 'no_code' as a blank code.
+    data = request.get_json(silent=True)
+    code = data.get("code") if isinstance(data, dict) else None
+    code = code.strip().upper() if isinstance(code, str) else ""
     if not code:
         return jsonify({"success": False, "reason": "no_code"}), 400
     sb = _get_sb()
