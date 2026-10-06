@@ -1063,7 +1063,8 @@ def _via_cloudflare():
     Without the secret configured we can't tell, so we trust it as before."""
     if not CF_ORIGIN_SECRET:
         return True
-    return secrets.compare_digest(request.headers.get("X-Origin-Verify", ""), CF_ORIGIN_SECRET)
+    # _ct_eq: a non-ASCII header made secrets.compare_digest raise (a 500 on every route).
+    return _ct_eq(request.headers.get("X-Origin-Verify", ""), CF_ORIGIN_SECRET)
 
 def _client_ip():
     ra = request.remote_addr or "unknown"
