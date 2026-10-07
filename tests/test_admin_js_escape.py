@@ -130,7 +130,8 @@ def test_unblock_buttons_pass_the_ip_as_one_string(client, visitors, ip):
     assert args.count([ip]) == 2, args     # the visitor row + the blocked-IPs panel
 
 
-def test_subscriber_buttons_pass_uid_and_email_as_strings(client, visitors, monkeypatch):
+def test_subscriber_buttons_pass_uid_and_email_as_strings(client, visitors, monkeypatch, legacy_tokens):
+    # Token mode (ALIMNE_FREE_MODE=0): the "+ Tokens" and the Cancel button are both there.
     visitors([])
     _fake_users(monkeypatch, [{"id": UID_PAYLOAD, "email": EMAIL_PAYLOAD, "name": "n",
                                "subscription_status": "active", "subscription_id": "sub_x",
@@ -141,6 +142,20 @@ def test_subscriber_buttons_pass_uid_and_email_as_strings(client, visitors, monk
         calls = [h for h in handlers if h.startswith(fn + "(")]
         assert len(calls) == 1, (fn, handlers)
         assert _call_args(calls[0], fn) == [UID_PAYLOAD, EMAIL_PAYLOAD]
+
+
+def test_free_mode_cancel_button_passes_uid_and_email_as_strings(client, visitors, monkeypatch):
+    # Free mode: no "+ Tokens" action at all; Cancel stays for a legacy active subscriber.
+    visitors([])
+    _fake_users(monkeypatch, [{"id": UID_PAYLOAD, "email": EMAIL_PAYLOAD, "name": "n",
+                               "subscription_status": "active", "subscription_id": "sub_x",
+                               "tokens_remaining": 1, "created_at": "2026-10-01"}])
+    html = client.get("/admin", headers=HDR).get_data(as_text=True)
+    handlers = _onclicks(html)
+    assert not [h for h in handlers if h.startswith("grantTokens(")]
+    calls = [h for h in handlers if h.startswith("cancelSub(")]
+    assert len(calls) == 1, handlers
+    assert _call_args(calls[0], "cancelSub") == [UID_PAYLOAD, EMAIL_PAYLOAD]
 
 
 def test_plain_values_still_render_readably(client, visitors):

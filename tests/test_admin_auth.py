@@ -80,7 +80,7 @@ def test_query_token_never_authenticates_and_redirects_to_plain_admin(client):
     # Following it lands on the (unauthenticated) gate, not the dashboard.
     r2 = client.get("/admin")
     assert r2.status_code == 401
-    assert "Subscribers" not in r2.get_data(as_text=True)
+    assert 'id="subTable"' not in r2.get_data(as_text=True)
 
     # A query token on an admin POST is ignored too.
     assert client.post(f"/admin/clear?token={TOKEN}").status_code == 401
@@ -105,7 +105,7 @@ def test_header_auth_works_without_csrf_header(client):
     r = client.post("/admin/clear", headers={"X-Admin-Token": TOKEN})
     assert r.status_code == 200 and r.get_json()["ok"] is True
     page = client.get("/admin", headers={"X-Admin-Token": TOKEN})
-    assert page.status_code == 200 and "Subscribers" in page.get_data(as_text=True)
+    assert page.status_code == 200 and 'id="subTable"' in page.get_data(as_text=True)
     assert client.post("/admin/clear", headers={"X-Admin-Token": "nope"}).status_code == 401
 
 
@@ -134,7 +134,7 @@ def test_login_sets_hardened_cookie_and_cookie_authenticates(client):
     assert "no-store" in r.headers.get("Cache-Control", "")
 
     page = client.get("/admin")
-    assert page.status_code == 200 and "Subscribers" in page.get_data(as_text=True)
+    assert page.status_code == 200 and 'id="subTable"' in page.get_data(as_text=True)
     assert "no-store" in page.headers.get("Cache-Control", "")
 
 
