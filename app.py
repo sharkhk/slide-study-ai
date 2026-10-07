@@ -1975,6 +1975,24 @@ def _admin_made_guide(user, activity):
     return (_admin_int(user.get("generations_count")) > 0
             or str(user.get("id") or "") in (activity or {}))
 
+# Subscription states in which Stripe can still charge the customer → the words
+# shown for them. The webhook writes 'active' (for active and trialing), 'past_due'
+# and 'unpaid'; 'canceling' is a subscription set to end with its period.
+# 'canceled' is over: there is nothing left to cancel.
+_ADMIN_SUB_BILLING = {"active": "active", "trialing": "trialing", "canceling": "canceling",
+                      "past_due": "past due", "unpaid": "unpaid"}
+
+def _admin_legacy_sub(user):
+    """The old paid plan of an account → {"status", "active", "legacy", "label"}.
+    "legacy" is True for every account that may still be paying, so the owner can
+    always find it and cancel it: a billing state (_ADMIN_SUB_BILLING), or a Stripe
+    subscription id on file whose state is anything but 'canceled' (unknown is
+    treated as live). "label" is the state in words, for the badge."""
+    status = str(user.get("subscription_status") or "free").strip().lower() or "free"
+    legacy = status in _ADMIN_SUB_BILLING or (bool(user.get("subscription_id")) and status != "canceled")
+    return {"status": status, "active": status == "active", "legacy": legacy,
+            "label": _ADMIN_SUB_BILLING.get(status, status)}
+
 def _admin_visits(visit_rows, now, days=7):
     """visit_stats rows ({"day": 'YYYY-MM-DD', "count": n}) → all-time, today, and
     the `days`-day window ending today."""
@@ -2691,9 +2709,8 @@ def admin_page():
                 _invited_paid[rb] = _invited_paid.get(rb, 0) + 1
     for u in users:
         uid_u  = str(u.get("id") or "")
-        status = str(u.get("subscription_status") or "free").lower()
-        active = status == "active"
-        legacy_sub = active or status == "canceling"
+        plan   = _admin_legacy_sub(u)
+        status, active, legacy_sub = plan["status"], plan["active"], plan["legacy"]
         subs_active += 1 if active else 0
         subs_legacy += 1 if legacy_sub else 0
         email  = str(u.get("email") or "—")
@@ -2725,14 +2742,23 @@ def admin_page():
             inv_html += f' <span class="muted">({inv_p:,} paid)</span>'
         cancel_btn = (f'<button class="mini" onclick="cancelSub(\'{_js(uid_u)}\',\'{_js(email)}\')">Cancel</button>')
         if free:
-            # Free mode: no plan for anyone, except a badge for the people who still pay.
-            plan_txt = "legacy subscriber" if legacy_sub else ""
+            # Free mode: no plan for anyone, except a badge (with the state Stripe has it
+            # in) and Cancel for everyone who may still be paying: past due, unpaid and
+            # already-ending subscriptions are still subscriptions.
+            plan_txt = f'legacy subscriber ({plan["label"]})' if legacy_sub else ""
             plan_html = ""
             if legacy_sub:
-                when = f'{"renews" if active else "ends"} {renews}' if renews else ("active" if active else "canceling")
+                if active:
+                    when = f"renews {renews}" if renews else "active"
+                elif status == "canceling":
+                    when = f"canceling · ends {renews}" if renews else "canceling"
+                elif status in _ADMIN_SUB_BILLING:
+                    when = plan["label"] + (f" · period end {renews}" if renews else "")
+                else:
+                    when = f'Stripe subscription on file · status: {plan["label"]}'
                 plan_html = (f'<span class="pill {"green" if active else "amber"}">legacy subscriber</span> '
                              f'<span class="muted" style="font-size:12px;white-space:nowrap">{_he(when)}</span>'
-                             + (f' {cancel_btn}' if active else ""))
+                             f' {cancel_btn}')
             tail = tok_attr = ""
         else:
             plan_txt = status

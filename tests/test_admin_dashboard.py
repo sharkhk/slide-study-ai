@@ -880,15 +880,97 @@ def test_free_mode_users_table(client, monkeypatch):
     assert html.count("legacy subscriber<") == 2
     assert "renews 2026-10-26" in html and "ends 2026-10-13" in html
     assert [r["data-email"] for r in d.rows if r["data-legacy"] == "1"] == ["user4@example.com", "user2@example.com"]
-    # Cancel: the ACTIVE legacy subscriber only
-    cancels = [a["onclick"] for t, a in d.attrs if (a.get("onclick") or "").startswith("cancelSub(")]
-    assert cancels == [f"cancelSub('{_uid(2)}','user2@example.com')"]
+    # Cancel: every legacy subscriber, the one that is already set to end included
+    assert _cancels(d) == sorted([f"cancelSub('{_uid(2)}','user2@example.com')",
+                                  f"cancelSub('{_uid(4)}','user4@example.com')"])
+    assert rows["user2@example.com"]["data-plan"] == "legacy subscriber (active)"
+    assert rows["user4@example.com"]["data-plan"] == "legacy subscriber (canceling)"
+    assert rows["user40@example.com"]["data-plan"] == ""
     # invites + invited-by
     assert rows["user3@example.com"]["data-invites"] == "2" and rows["user31@example.com"]["data-refby"] == "user3@example.com"
     # guides made: the lifetime counter, or "active since free mode" from the per-user counter
     assert rows["user1@example.com"]["data-used"] == "4"
     assert rows["user35@example.com"]["data-used"] == "2" and rows["user35@example.com"]["data-lastused"] == "2026-10-06"
     assert rows["user40@example.com"]["data-used"] == "0" and rows["user40@example.com"]["data-lastused"] == ""
+
+
+def _cancels(doc):
+    return sorted(a["onclick"] for t, a in doc.attrs if (a.get("onclick") or "").startswith("cancelSub("))
+
+
+def _user_row_html(html, email):
+    return re.search(r'<tr class="subrow" data-email="%s".*?</tr>' % re.escape(email), html, re.S).group(0)
+
+
+def _subscribers_db():
+    """The sample week plus one account in every subscription state the Stripe
+    webhook (or an operator) can leave behind. users[k] is user{k+1}."""
+    sb = sample_db()
+    u = sb.tables["users"]
+    u[10].update(subscription_status="past_due", subscription_id="sub_legacy_3",
+                 subscription_period_end=_iso(NOW - timedelta(days=2)))
+    u[11].update(subscription_status="unpaid", subscription_id="sub_legacy_4")
+    u[12].update(subscription_status="Past_Due", subscription_id="sub_legacy_5")        # any letter case
+    u[13].update(subscription_status="trialing", subscription_id="sub_legacy_6",
+                 subscription_period_end=_iso(NOW + timedelta(days=3)))
+    u[14].update(subscription_status="free", subscription_id="sub_legacy_7")            # a subscription on file, state unknown
+    u[15].update(subscription_status="canceled", subscription_id="sub_legacy_8",        # over: nothing left to cancel
+                 subscription_period_end=_iso(NOW - timedelta(days=30)))
+    u[16].update(subscription_status="past_due")                                         # no Stripe id: Cancel sets it to free
+    u[17].update(subscription_status="incomplete", subscription_id="sub_legacy_9")      # a state the webhook never writes
+    return sb
+
+
+BILLABLE = (2, 4, 11, 12, 13, 14, 15, 17, 18)          # user numbers that may still be paying
+
+
+def test_free_mode_every_subscriber_who_may_still_pay_keeps_badge_filter_and_cancel(client, monkeypatch):
+    """The owner must always be able to find and cancel a paying legacy subscriber:
+    'past_due' / 'unpaid' / 'canceling' are still Stripe subscriptions that bill."""
+    html = _page_of(client, monkeypatch, _subscribers_db())
+    d = _doc(html)
+    rows = {r["data-email"]: r for r in d.rows}
+    want = sorted(f"user{i}@example.com" for i in BILLABLE)
+    # the 'Legacy subscribers only' filter reads data-legacy
+    assert sorted(e for e, r in rows.items() if r["data-legacy"] == "1") == want
+    assert '"payAttr": "legacy"' in html
+    # the Cancel action
+    assert _cancels(d) == sorted(f"cancelSub('{_uid(i)}','user{i}@example.com')" for i in BILLABLE)
+    # the badge, with the status in words
+    assert html.count("legacy subscriber<") == len(BILLABLE)
+    assert f"{len(BILLABLE)} legacy subscribers" in html
+    for i, words in ((2, "renews 2026-10-26"), (4, "canceling"), (4, "ends 2026-10-13"), (11, "past due"),
+                     (11, "2026-10-05"), (12, "unpaid"), (13, "past due"), (14, "trialing"),
+                     (14, "2026-10-10"), (15, "Stripe subscription on file"), (17, "past due"),
+                     (18, "incomplete")):
+        cell = _user_row_html(html, f"user{i}@example.com")
+        assert "legacy subscriber<" in cell and words in cell, (i, words)
+    # ... and in the CSV / sort key
+    assert rows["user11@example.com"]["data-plan"] == "legacy subscriber (past due)"
+    assert rows["user12@example.com"]["data-plan"] == "legacy subscriber (unpaid)"
+    assert rows["user13@example.com"]["data-plan"] == "legacy subscriber (past due)"
+    assert rows["user15@example.com"]["data-plan"] == "legacy subscriber (free)"
+    # a subscription that is over has nothing left to cancel
+    ended = _user_row_html(html, "user16@example.com")
+    assert "legacy subscriber" not in ended and "cancelSub" not in ended
+    assert rows["user16@example.com"]["data-legacy"] == "0" and rows["user16@example.com"]["data-plan"] == ""
+    # everyone else has no badge and no action
+    assert rows["user40@example.com"]["data-legacy"] == "0"
+    assert not re.search(r"sub_legacy_\d", html)                  # Stripe ids stay on the server
+
+
+def test_token_mode_cancel_is_offered_exactly_as_before(client, monkeypatch, legacy_tokens):
+    """ALIMNE_FREE_MODE=0 is untouched: Cancel for active, canceling, and any row
+    with a Stripe subscription id; 'Paying only' still means status == active."""
+    html = _page_of(client, monkeypatch, _subscribers_db())
+    d = _doc(html)
+    rows = {r["data-email"]: r for r in d.rows}
+    assert _cancels(d) == sorted(f"cancelSub('{_uid(i)}','user{i}@example.com')"
+                                 for i in (2, 4, 11, 12, 13, 14, 15, 16, 18))
+    assert sorted(e for e, r in rows.items() if r["data-active"] == "1") == ["user2@example.com"]
+    assert '"payAttr": "active"' in html and "legacy subscriber" not in html
+    assert rows["user11@example.com"]["data-plan"] == "past_due" and rows["user16@example.com"]["data-plan"] == "canceled"
+    assert _num(html, "active-subs") == "1"
 
 
 def test_an_account_whose_only_attempt_was_refused_has_not_made_a_guide(client, monkeypatch):
