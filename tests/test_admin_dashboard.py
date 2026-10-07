@@ -449,6 +449,30 @@ def test_funnel_uses_exact_device_counts_when_the_row_sample_was_cut():
     assert f["gate_signup_rate"] == pytest.approx(5 / 900)
 
 
+@pytest.mark.parametrize("limit", [0, -3, "0"])
+def test_funnel_when_sign_in_is_required_from_the_first_guide(limit):
+    """ANON_FREE_USES=0 is a supported setting: no anonymous guide exists, so the two
+    device steps do not apply and new accounts are measured against visits."""
+    visits, gate, users, activity = _funnel_fixture()
+    f = appmod._admin_funnel(visits, gate, users, NOW, limit, activity=activity)
+    by = {s["key"]: s for s in f["steps"]}
+    assert f["gate_from_first"] is True
+    assert [s["key"] for s in f["steps"] if s["na"]] == ["devices", "gate"]
+    for key in ("devices", "gate"):
+        assert (by[key]["value"], by[key]["rate"], by[key]["base"]) == (0, None, None)   # old gate rows are not counted
+    assert (by["visits"]["value"], by["accounts"]["value"], by["activated"]["value"]) == (700, 5, 3)
+    assert by["accounts"]["base"] == "visits" and by["accounts"]["rate"] == pytest.approx(5 / 700)
+    assert by["activated"]["base"] == "accounts" and by["activated"]["rate"] == pytest.approx(3 / 5)
+    assert f["gate_signup_rate"] is None
+
+
+def test_funnel_steps_name_the_step_their_rate_is_measured_from():
+    visits, gate, users, activity = _funnel_fixture()
+    f = appmod._admin_funnel(visits, gate, users, NOW, 3, activity=activity)
+    assert f["gate_from_first"] is False and not any(s["na"] for s in f["steps"])
+    assert [s["base"] for s in f["steps"]] == [None, "visits", "devices", "gate", "accounts"]
+
+
 @pytest.mark.parametrize("rate,cap,text", [
     (None, None, "-"), (0, None, "0%"), (0.004, None, "0.4%"), (0.05, None, "5%"), (0.0951, None, "9.5%"),
     (0.61, None, "61%"), (1.0, None, "100%"), (1.0, 1.0, "100%"), (4.5, 1.0, "100%+"), (4.5, None, "450%"),
@@ -595,6 +619,59 @@ def test_gate_note_follows_the_configured_limit_and_goes_away_with_data(client, 
     html = _page(client)
     assert "gate data starts when" not in html
     assert (_num(html, "funnel-devices"), _num(html, "funnel-gate")) == ("120", "40")
+
+
+@pytest.mark.parametrize("setting", [0, -1, "0"])
+def test_gate_set_to_zero_reads_as_sign_in_from_the_first_guide(client, monkeypatch, setting):
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", setting, raising=False)
+    sb = sample_db()
+    html = _page_of(client, monkeypatch, sb)
+    assert 'data-note="gate-from-first"' in html
+    assert "sign-in required from the first guide" in html
+    # not the "the gate is not live yet" note, and never a made-up 1-guide gate
+    assert "gate data starts when" not in html and 'data-note="gate-not-live"' not in html
+    for wrong in ("1-guide gate", "0-guide gate", "all 1 free guides", "all 0 free guides"):
+        assert wrong not in html, wrong
+    # the two device steps and the gate rate are "not applicable", not a real 0
+    assert [_num(html, k) for k in ("funnel-devices", "funnel-gate", "gate-signup-rate")] == ["n/a"] * 3
+    assert 'data-conv="devices"' not in html and 'data-conv="gate"' not in html
+    assert html.count("not applicable") >= 3
+    # the rest of the funnel stands; new accounts are measured against visits
+    assert (_num(html, "funnel-visits"), _num(html, "funnel-accounts"), _num(html, "funnel-activated")) ==         ("2,235", "27", "10")
+    assert re.search(r'data-conv="accounts">1\.2% of visits<', html)            # 27 / 2,235
+    assert re.search(r'data-conv="activated">37% of new accounts<', html)       # 10 / 27
+    assert "Gate → sign-up is an estimate" not in html
+    # nothing is asked of the gate counters, so a failure there cannot show up either
+    assert not any(q.table == "anon_usage" and ("like", "key", "gate:dev:%") in q.filters for q in sb.queries)
+    for s in SECTIONS:
+        assert f'id="{s}"' in html
+
+
+def test_gate_set_to_zero_on_an_empty_or_failing_database(client, monkeypatch):
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 0, raising=False)
+    html = _page_of(client, monkeypatch, FakeSB())
+    assert 'data-note="gate-from-first"' in html and "gate data starts when" not in html
+    assert (_num(html, "funnel-devices"), _num(html, "funnel-accounts")) == ("n/a", "0")
+    assert re.search(r'data-conv="accounts">-<', html)                          # 0 visits: nothing to divide by
+    sb = sample_db()
+    sb.fail.add("anon_usage")
+    html = _page_of(client, monkeypatch, sb)
+    assert 'data-err="gate"' not in html and 'data-err="budget"' in html
+    assert (_num(html, "funnel-devices"), _num(html, "funnel-gate")) == ("n/a", "n/a")
+    assert re.search(r'data-conv="accounts">1\.2% of visits<', html)            # visits and accounts did load
+    sb = sample_db()
+    sb.fail.add("visit_stats")
+    html = _page_of(client, monkeypatch, sb)
+    assert _num(html, "funnel-visits") == "-" and re.search(r'data-conv="accounts">-<', html)
+
+
+def test_a_one_guide_gate_is_still_a_gate(client, monkeypatch):
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 1, raising=False)
+    html = _page_of(client, monkeypatch, FakeSB())
+    assert "sign-in gate data starts when the 1-guide gate goes live" in html
+    assert 'data-note="gate-from-first"' not in html and _num(html, "funnel-devices") == "0"
+    html = _page_of(client, monkeypatch, sample_db(gate_limit=1))
+    assert (_num(html, "funnel-devices"), _num(html, "funnel-gate")) == ("120", "120")
 
 
 def test_sample_week_numbers(client, monkeypatch):

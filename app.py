@@ -1934,7 +1934,8 @@ def _admin_gate_devices(rows, limit, now, days=7):
     """anon_usage rows 'gate:dev:<device>' → {"devices": anonymous devices that made
     at least 1 guide in the window, "at_gate": those that used all `limit` free
     guides, i.e. were shown the sign-in gate}. A row with count 0 was charged and
-    refunded (no guide), so it is not a device that made one."""
+    refunded (no guide), so it is not a device that made one. A `limit` below 1 is
+    read as 1 here; the funnel never asks when there is no free guide at all."""
     start = _admin_window_start(now, days)
     limit = max(1, _admin_int(limit, 3))
     devices = at_gate = 0
@@ -2017,18 +2018,25 @@ def _admin_funnel(visit_rows, gate_rows, users, now, gate_limit, activity=None, 
                   device_counts=None):
     """The sign-up funnel of the last `days` UTC days (today included):
     visits → anonymous devices that made a guide → devices that reached the sign-in
-    gate → new accounts → new accounts that made a guide. Each step carries its
-    conversion from the step before (None when that step is 0), and
-    "gate_signup_rate" = new accounts / devices at the gate (None: no data).
-    Devices and accounts are counted separately, so the rate is an estimate.
-    `device_counts` = exact (devices, at_gate) when the row sample was cut short."""
+    gate → new accounts → new accounts that made a guide. Each step carries "rate",
+    its conversion from the step named in "base" (the step before; None when that
+    step is 0), and "gate_signup_rate" = new accounts / devices at the gate (None:
+    no data). Devices and accounts are counted separately, so the rate is an estimate.
+    `device_counts` = exact (devices, at_gate) when the row sample was cut short.
+    A `gate_limit` of 0 (ANON_FREE_USES=0: sign in from the very first guide) sets
+    "gate_from_first": nobody can make a guide without an account, so the two
+    device steps are "na" (not applicable, no rate) and new accounts are measured
+    against visits."""
     start = _admin_window_start(now, days)
     visits = _admin_visits(visit_rows, now, days)["window"]
-    gate = _admin_gate_devices(gate_rows, gate_limit, now, days)
-    devices, at_gate = gate["devices"], gate["at_gate"]
-    if device_counts:
-        devices = max(devices, _admin_int(device_counts[0]))
-        at_gate = max(at_gate, _admin_int(device_counts[1]))
+    from_first = _admin_int(gate_limit, 3) <= 0
+    devices = at_gate = 0
+    if not from_first:
+        gate = _admin_gate_devices(gate_rows, gate_limit, now, days)
+        devices, at_gate = gate["devices"], gate["at_gate"]
+        if device_counts:
+            devices = max(devices, _admin_int(device_counts[0]))
+            at_gate = max(at_gate, _admin_int(device_counts[1]))
     accounts = activated = 0
     for u in users or ():
         ts = _admin_ts(u.get("created_at")) if isinstance(u, dict) else None
@@ -2040,13 +2048,18 @@ def _admin_funnel(visit_rows, gate_rows, users, now, gate_limit, activity=None, 
     values = [("visits", "Visits", visits), ("devices", "Anonymous devices", devices),
               ("gate", "Reached the sign-in gate", at_gate), ("accounts", "New accounts", accounts),
               ("activated", "Made a guide", activated)]
-    steps, prev = [], None
+    steps, prev = [], None            # prev: (key, value) of the last step that applies
     for key, label, value in values:
-        steps.append({"key": key, "label": label, "value": value,
-                      "rate": None if prev is None else _admin_rate(value, prev)})
-        prev = value
-    return {"days": days, "steps": steps, "gate_signup_rate": _admin_rate(accounts, at_gate),
-            "gate_live": devices > 0}
+        na = from_first and key in ("devices", "gate")
+        measured = prev is not None and not na
+        steps.append({"key": key, "label": label, "value": value, "na": na,
+                      "base": prev[0] if measured else None,
+                      "rate": _admin_rate(value, prev[1]) if measured else None})
+        if not na:
+            prev = (key, value)
+    return {"days": days, "steps": steps,
+            "gate_signup_rate": None if from_first else _admin_rate(accounts, at_gate),
+            "gate_live": devices > 0, "gate_from_first": from_first}
 
 def _admin_budget(rows, now, global_limit, anon_limit=None, window_hours=24):
     """Today's AI budget from the 'fair:global' (and 'fair:global:anon') counter
@@ -2135,7 +2148,9 @@ def _admin_load(sb, now, gate_limit):
                      .limit(1).execute())
             exact = (total, _admin_exact(hit) or 0)
         return rows, exact
-    res = read("gate", gate)
+    # ANON_FREE_USES=0: no anonymous guide exists and the funnel shows the device
+    # steps as not applicable, so there is nothing to read (and nothing that can fail).
+    res = read("gate", gate) if gate_limit > 0 else None
     if res is not None:
         out["gate_rows"], out["gate_exact"] = res
 
@@ -2216,6 +2231,8 @@ _ADMIN_CSS = r"""
   .card.violet .lbl{color:#c4b5fd}
   .card.lilac .num{color:#a78bfa}
   .card.pink .num{color:#f472b6}
+  .card.na{border-style:dashed}
+  .card.na .num,.card.na .lbl{color:#6b7fa8}
   .note{color:#8aa0c8;font-size:12px;line-height:1.5;margin-top:.55rem;max-width:900px}
   .note.err{color:#fca5a5}
   .muted{color:#6b7fa8}
@@ -2463,41 +2480,65 @@ _ADMIN_STEP_SUBS = {
     "accounts":  "signed up",
     "activated": "new accounts that made at least 1 guide",
 }
-_ADMIN_STEP_OF = {"devices": "of visits", "gate": "of those devices",
-                  "accounts": "of gate devices", "activated": "of new accounts"}
+# how a step's conversion reads, by the step it is measured from (its "base")
+_ADMIN_STEP_OF = {"visits": "of visits", "devices": "of those devices",
+                  "gate": "of gate devices", "accounts": "of new accounts"}
+_ADMIN_GATE_FROM_FIRST = "sign-in required from the first guide"
 # the database blocks each step is made from (see "errors" in _admin_load)
 _ADMIN_STEP_BLOCKS = {"visits": ("visits",), "devices": ("gate",), "gate": ("gate",),
                       "accounts": ("users",), "activated": ("users", "activity")}
 
 def _admin_funnel_html(funnel, gate_limit, errors, totals_cards):
     """Section 2: the 7-day funnel, the gate → sign-up rate with its caveat, and
-    the all-time cards under it. A step whose data could not be loaded shows '-'."""
+    the all-time cards under it. A step whose data could not be loaded shows '-';
+    a step that does not apply (ANON_FREE_USES=0, see _admin_funnel) shows 'n/a'."""
     steps, steps_html = funnel["steps"], ""
-    lost = [any(b in errors for b in _ADMIN_STEP_BLOCKS[s["key"]]) for s in steps]
+    from_first = funnel["gate_from_first"]
+    # a step that does not apply is made from no data, so it cannot be "not loaded"
+    lost = {s["key"]: not s["na"] and any(b in errors for b in _ADMIN_STEP_BLOCKS[s["key"]]) for s in steps}
     for i, s in enumerate(steps):
-        conv = ""
+        key, conv = s["key"], ""
         if i:
-            # conversion from the step before; "-" alone when there is nothing to divide by
-            rate = None if (lost[i] or lost[i - 1]) else s["rate"]
-            of = f' {_ADMIN_STEP_OF[s["key"]]}' if rate is not None else ""
-            conv = (f'<div class="conv" data-conv="{_he(s["key"])}">'
-                    f'{_he(_admin_pct(rate, cap=1.0) + of)}</div>')
             steps_html += '<span class="arrow">→</span>'
-        steps_html += (f'<div class="card{" hero" if s["key"] == "accounts" else ""}">'
+        if s["na"]:
+            num, sub, cls = "n/a", f"not applicable: {_ADMIN_GATE_FROM_FIRST}", " na"
+        else:
+            num = "-" if lost[key] else format(s["value"], ",")
+            sub = _ADMIN_STEP_SUBS[key].format(limit=gate_limit)
+            cls = " hero" if key == "accounts" else ""
+            if i:
+                # conversion from the step it is measured from; "-" alone when there is nothing to divide by
+                base = s["base"]
+                rate = None if (lost[key] or lost.get(base, False)) else s["rate"]
+                of = f' {_ADMIN_STEP_OF[base]}' if (rate is not None and base in _ADMIN_STEP_OF) else ""
+                conv = (f'<div class="conv" data-conv="{_he(key)}">'
+                        f'{_he(_admin_pct(rate, cap=1.0) + of)}</div>')
+        steps_html += (f'<div class="card{cls}">'
                        f'<div class="lbl"><span class="stepno">{i + 1}</span>{_he(s["label"])}</div>'
-                       f'<div class="num" data-num="funnel-{_he(s["key"])}">{"-" if lost[i] else format(s["value"], ",")}</div>'
-                       f'<div class="sub">{_he(_ADMIN_STEP_SUBS[s["key"]].format(limit=gate_limit))}</div>'
+                       f'<div class="num" data-num="funnel-{_he(key)}">{num}</div>'
+                       f'<div class="sub">{_he(sub)}</div>'
                        f'{conv}</div>')
-    gate_note = _admin_err_note(errors, "gate", "the anonymous-device counters, so the two device steps and "
-                                                "the gate → sign-up rate show no data")
-    if not gate_note and not funnel["gate_live"]:
-        gate_note = (f'<p class="note" data-note="gate-not-live">No anonymous device has been counted in the last '
-                     f'{funnel["days"]} days: sign-in gate data starts when the {gate_limit}-guide gate goes live.</p>')
-    rate = None if (lost[2] or lost[3]) else funnel["gate_signup_rate"]
-    rate_card = _admin_card("Gate → sign-up", _admin_pct(rate, cap=1.0),
-                            f'{_admin_n(steps[3]["value"], errors, "users")} new accounts ÷ '
-                            f'{_admin_n(steps[2]["value"], errors, "gate")} devices at the gate',
-                            "gate-signup-rate", "hero")
+    if from_first:
+        gate_note = (f'<p class="note" data-note="gate-from-first">The gate is set to <b>{_ADMIN_GATE_FROM_FIRST}</b> '
+                     f'(ANON_FREE_USES=0): a visitor cannot make a guide without an account, so the two '
+                     f'anonymous-device steps do not apply and new accounts are measured against visits.</p>')
+        rate_card = _admin_card("Gate → sign-up", "n/a", f"not applicable: {_ADMIN_GATE_FROM_FIRST}",
+                                "gate-signup-rate", "na")
+        estimate_note = ""
+    else:
+        gate_note = _admin_err_note(errors, "gate", "the anonymous-device counters, so the two device steps and "
+                                                    "the gate → sign-up rate show no data")
+        if not gate_note and not funnel["gate_live"]:
+            gate_note = (f'<p class="note" data-note="gate-not-live">No anonymous device has been counted in the last '
+                         f'{funnel["days"]} days: sign-in gate data starts when the {gate_limit}-guide gate goes live.</p>')
+        rate = None if (lost["gate"] or lost["accounts"]) else funnel["gate_signup_rate"]
+        rate_card = _admin_card("Gate → sign-up", _admin_pct(rate, cap=1.0),
+                                f'{_admin_n(steps[3]["value"], errors, "users")} new accounts ÷ '
+                                f'{_admin_n(steps[2]["value"], errors, "gate")} devices at the gate',
+                                "gate-signup-rate", "hero")
+        estimate_note = ('<p class="note">Gate → sign-up is an estimate: devices and accounts are counted separately '
+                         '(one person can use several devices, and people also sign up without ever reaching the '
+                         'gate), so it is capped at 100% on screen.</p>')
     return f"""
 <section class="sec" id="sec-funnel">
   <h3>🔻 Funnel <small>last {funnel["days"]} days (UTC days, today included)</small></h3>
@@ -2508,8 +2549,7 @@ def _admin_funnel_html(funnel, gate_limit, errors, totals_cards):
     {rate_card}
     {totals_cards}
   </div>
-  <p class="note">Gate → sign-up is an estimate: devices and accounts are counted separately (one person can use
-  several devices, and people also sign up without ever reaching the gate), so it is capped at 100% on screen.</p>
+  {estimate_note}
 </section>"""
 
 def _admin_budget_html(budget, gen_gate, errors, free):
@@ -2663,7 +2703,8 @@ def admin_page():
     g      = globals()
     free   = bool(FREE_MODE)
     # Knobs of the sign-in gate / fair use, read defensively: the gate ships separately.
-    gate_limit = max(1, _admin_int(g.get("ANON_FREE_USES", 3), 3))
+    # 0 is a real setting (sign in from the very first guide), never rounded up to 1.
+    gate_limit = max(0, _admin_int(g.get("ANON_FREE_USES", 3), 3))
     sb_note = ""
     try:
         sb = _get_sb()
