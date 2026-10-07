@@ -34,6 +34,10 @@ import pytest
 
 import app as appmod
 
+# These tests pin the OLD token system, which ALIMNE_FREE_MODE=0 must restore exactly.
+# (The free-mode behaviour is covered in tests/test_free_mode.py.)
+pytestmark = pytest.mark.usefixtures("legacy_tokens")
+
 SECRET = "test-hs256-secret-not-a-real-key-0000"   # >= 32 bytes (no PyJWT key warning)
 KEY = b"test-guide-signing-key"
 

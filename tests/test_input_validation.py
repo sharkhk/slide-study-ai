@@ -16,6 +16,10 @@ import pytest
 
 import app as appmod
 
+# These tests pin the OLD token system, which ALIMNE_FREE_MODE=0 must restore exactly.
+# (The free-mode behaviour is covered in tests/test_free_mode.py.)
+pytestmark = pytest.mark.usefixtures("legacy_tokens")
+
 
 # ── shared fakes ─────────────────────────────────────────────────────────────────
 def _llm(prompt, retries=3, num_predict=4096):
