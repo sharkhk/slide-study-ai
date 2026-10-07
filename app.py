@@ -2624,6 +2624,8 @@ def _pdf_latin_markup(s):
             sym.clear()
 
     for ch in _pdf_normalize(s):
+        if (ch < " " or ch == "\x7f") and not ch.isspace():
+            continue                   # NUL/ESC/DEL...: no Helvetica glyph (■)
         if _enc_ok(ch, "cp1252"):
             flush(); out.append(esc(ch)); continue
         if _enc_ok(ch, "symbol"):
