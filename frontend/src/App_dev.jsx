@@ -25,10 +25,12 @@ const T = {
     h1a: 'Turn any lecture into',
     h1b: 'Study Guides',
     sub: 'Drop a PowerPoint, PDF, or YouTube lecture — get an exam-ready guide with notes, flashcards, and a practice quiz in seconds.',
-    heroFree: 'Free. No card. No sign-up needed.',
+    // n = the guides an anonymous visitor may make before a free account is required (from /api/config)
+    heroFree: (n) => n === 1 ? 'Free. No card. Your first guide needs no account.' : `Free. No card. Your first ${n} guides need no account.`,
     dropTitle: 'Drop your PowerPoint or PDF files here',
     dropSub: 'or click to browse — .pptx / .ppt / .pdf / .docx / .doc / .txt, multiple files supported',
-    dropFree: 'Free to use · no account needed · fair-use daily limits apply',
+    dropFree: (n) => `Free · ${n === 1 ? '1 guide' : `${n} guides`} without an account · then a free sign-in`,
+    dropFreeUser: 'Free to use · fair-use daily limits apply',
     footerFree: 'Free to use · Files deleted automatically',
     langAuto: 'Auto-detect language',
     langEn: 'English output',
@@ -90,15 +92,22 @@ const T = {
     haveAccount: 'Already have an account? Sign in',
     wrongPassword: 'Incorrect email or password. Signed up with Google? Use Continue with Google.',
     accountExists: 'An account already exists for this email. Sign in instead.',
-    freeTry: 'Try free, no sign-up',
     signInFreeCta: 'Sign in free',
     emailInvalid: 'Please enter a valid email address.',
+    // Sign-in gate: an anonymous device may make N guides, then a free account is required to make more.
+    // The nav counter, the notice in the sign-in modal, the held item, and the toast after signing in.
+    anonLeft: (n) => n === 1 ? '1 free guide left' : `${n} free guides left`,
+    anonNone: 'Sign in to continue — free',
+    signinRequired: (n) => `You've used your ${n === 1 ? 'free guide' : `${n} free guides`}. Create a free account to keep going — it's still free.`,
+    signInToContinue: 'Sign in to continue (free)',
+    gateCleared: "You're signed in — you can keep making guides now.",
+    generateNow: 'Generate',
     // Why sign in (shown in the sign-in modal and in the card after a visitor's first guide).
-    // Only real features: a higher daily allowance than anonymous visitors, Chat (needs an account), the invite link.
-    perks: (f) => `a higher daily allowance${f ? ` (up to ${f.user_daily} guides a day instead of ${f.device_daily})` : ''}, chat with your guide, and a link to invite friends`,
+    // Only real features: more guides (the account's daily fair-use allowance), Chat (needs an account), the invite link.
+    perks: (f) => `more guides${f ? ` (up to ${f.user_daily} a day, fair use)` : ''}, chat with your guide, and a link to invite friends`,
     perksNote: (c) => `With a free account you get ${c}.`,
     joinTitle: 'Create a free account',
-    joinBody: (c) => `Get ${c}.`,
+    joinBody: (c, left) => `${left > 0 ? `You have ${left === 1 ? '1 free guide' : `${left} free guides`} left without an account.` : "You've used your free guides."} A free account gets you ${c}.`,
     // Invite a friend (plain share link — no rewards)
     referTitle: 'Invite a friend',
     referSub: "Know someone who could use Alimne? Share your link — it's free for them too.",
@@ -143,7 +152,7 @@ const T = {
     sampleQuizQ: 'What is the correct order of interphase?',
     sampleQuizOpts: ['G1 → S → G2', 'S → G1 → G2', 'G2 → S → G1'],
     sampleQuizAnswer: 0,
-    trust: ['Free · no sign-up needed', 'Files wiped in 15 min', 'English & العربية'],
+    trust: ['Free · no card needed', 'Files wiped in 15 min', 'English & العربية'],
     // Status / recovery
     expired: 'Expired',
     expiredNote: 'Expired on the server — guides are kept for 15 minutes.',
@@ -191,8 +200,7 @@ const T = {
     errRetry: 'Temporary problem — please try again in a moment.',
     errGeneric: 'Something went wrong — please try again.',
     errNoNotes: "The AI couldn't build notes right now — please try again.",
-    // Fair use / capacity (free mode)
-    errFairDevice: "You've used today's free guides on this device. Sign in free for a higher daily allowance — or come back tomorrow.",
+    // Fair use / capacity (free mode). The anonymous allowance is the sign-in gate above (signinRequired).
     errFairIp: "Lots of students are using Alimne from your network today, so it's paused here for now — please try again later.",
     errFairUser: "You've reached today's fair-use limit. It refills within 24 hours — please try again later.",
     errBusyToday: 'Alimne is very popular today — please try again later.',
@@ -246,10 +254,12 @@ const T = {
     h1a: 'حوّل أي محاضرة إلى',
     h1b: 'أدلة دراسة',
     sub: 'ارفع عرضاً تقديمياً أو PDF أو رابط محاضرة من YouTube — واحصل على دليل جاهز للامتحان مع ملخص وبطاقات وأسئلة مراجعة خلال ثوانٍ.',
-    heroFree: 'مجاني. بدون بطاقة. لا حاجة إلى حساب.',
+    heroFree: (n) => n === 1 ? 'مجاني. بدون بطاقة. دليلك الأول لا يحتاج إلى حساب.' : n === 2 ? 'مجاني. بدون بطاقة. أول دليلين لا يحتاجان إلى حساب.'
+      : `مجاني. بدون بطاقة. أول ${n} ${n <= 10 ? 'أدلة' : 'دليلاً'} لا تحتاج إلى حساب.`,
     dropTitle: 'أسقط ملفات PowerPoint أو PDF هنا',
     dropSub: 'أو انقر للتصفح — .pptx / .ppt / .pdf / .docx / .doc / .txt، يدعم ملفات متعددة',
-    dropFree: 'مجاني للاستخدام · بدون حساب · تُطبَّق حدود يومية للاستخدام العادل',
+    dropFree: (n) => `مجاني · ${n === 1 ? 'دليل واحد' : n === 2 ? 'دليلان' : n <= 10 ? `${n} أدلة` : `${n} دليلاً`} دون حساب · ثم تسجيل دخول مجاني`,
+    dropFreeUser: 'مجاني للاستخدام · تُطبَّق حدود يومية للاستخدام العادل',
     footerFree: 'مجاني للاستخدام · تُحذف الملفات تلقائياً',
     langAuto: 'اكتشاف اللغة تلقائياً',
     langEn: 'الإخراج بالإنجليزية',
@@ -312,13 +322,19 @@ const T = {
     haveAccount: 'لديك حساب بالفعل؟ سجّل الدخول',
     wrongPassword: 'البريد أو كلمة المرور غير صحيحة. سجّلت عبر Google؟ استخدم «المتابعة عبر Google».',
     accountExists: 'يوجد حساب بهذا البريد بالفعل. سجّل الدخول بدلاً من ذلك.',
-    freeTry: 'جرّب مجاناً، بدون تسجيل',
     signInFreeCta: 'سجّل الدخول مجاناً',
     emailInvalid: 'يرجى إدخال بريد إلكتروني صحيح.',
-    perks: (f) => `حدّ يومي أعلى${f ? ` (حتى ${f.user_daily} ${f.user_daily <= 10 ? 'أدلة' : 'دليلاً'} في اليوم بدل ${f.device_daily})` : ''}، والدردشة مع دليلك، ورابط لدعوة أصدقائك`,
+    // بوابة تسجيل الدخول: عدد من الأدلة للزائر، ثم يلزم حساب مجاني لإنشاء المزيد
+    anonLeft: (n) => n === 1 ? 'بقي لك دليل مجاني واحد' : n === 2 ? 'بقي لك دليلان مجانيان' : n <= 10 ? `بقي لك ${n} أدلة مجانية` : `بقي لك ${n} دليلاً مجانياً`,
+    anonNone: 'سجّل الدخول للمتابعة — مجاناً',
+    signinRequired: (n) => `استخدمت ${n === 1 ? 'دليلك المجاني' : n === 2 ? 'دليلَيك المجانيَّين' : `أدلتك المجانية الـ${n}`}. أنشئ حساباً مجانياً للمتابعة — وما زال الاستخدام مجانياً.`,
+    signInToContinue: 'سجّل الدخول للمتابعة (مجاناً)',
+    gateCleared: 'تم تسجيل الدخول — يمكنك الآن متابعة إنشاء الأدلة.',
+    generateNow: 'توليد',
+    perks: (f) => `المزيد من الأدلة${f ? ` (حتى ${f.user_daily} ${f.user_daily <= 10 ? 'أدلة' : 'دليلاً'} في اليوم ضمن الاستخدام العادل)` : ''}، والدردشة مع دليلك، ورابط لدعوة أصدقائك`,
     perksNote: (c) => `بحساب مجاني تحصل على ${c}.`,
     joinTitle: 'أنشئ حساباً مجانياً',
-    joinBody: (c) => `احصل على ${c}.`,
+    joinBody: (c, left) => `${left > 0 ? `بقي لك ${left === 1 ? 'دليل مجاني واحد' : left === 2 ? 'دليلان مجانيان' : left <= 10 ? `${left} أدلة مجانية` : `${left} دليلاً مجانياً`} دون حساب.` : 'استخدمت أدلتك المجانية.'} بحساب مجاني تحصل على ${c}.`,
     // ادعُ صديقاً (رابط مشاركة فقط — بلا مكافآت)
     referTitle: 'ادعُ صديقاً',
     referSub: 'تعرف من قد يحتاج علّمني؟ شارك رابطك — فهو مجاني لهم أيضاً.',
@@ -363,7 +379,7 @@ const T = {
     sampleQuizQ: 'ما الترتيب الصحيح للطور البيني؟',
     sampleQuizOpts: ['G1 ← S ← G2', 'S ← G1 ← G2', 'G2 ← S ← G1'],
     sampleQuizAnswer: 0,
-    trust: ['مجاني · بدون تسجيل', 'تُمسح الملفات خلال 15 دقيقة', 'الإنجليزية والعربية'],
+    trust: ['مجاني · بدون بطاقة', 'تُمسح الملفات خلال 15 دقيقة', 'الإنجليزية والعربية'],
     // الحالة / الاستعادة
     expired: 'منتهي الصلاحية',
     expiredNote: 'انتهت صلاحيته على الخادم — تُحفظ الأدلة 15 دقيقة.',
@@ -412,7 +428,6 @@ const T = {
     errGeneric: 'حدث خطأ ما — حاول مجدداً.',
     errNoNotes: 'تعذّر على الذكاء الاصطناعي إعداد الملاحظات الآن — حاول مجدداً.',
     // الاستخدام العادل / الازدحام (الوضع المجاني)
-    errFairDevice: 'استخدمت أدلتك المجانية لهذا اليوم على هذا الجهاز. سجّل الدخول مجاناً للحصول على حدّ يومي أعلى — أو عُد غداً.',
     errFairIp: 'يستخدم الكثير من الطلاب علّمني من شبكتك اليوم، لذلك توقّف مؤقتاً هنا — حاول مجدداً لاحقاً.',
     errFairUser: 'وصلت إلى حدّ الاستخدام العادل لهذا اليوم. يتجدّد خلال 24 ساعة — حاول مجدداً لاحقاً.',
     errBusyToday: 'علّمني مزدحم جداً اليوم — يرجى المحاولة لاحقاً.',
@@ -535,18 +550,63 @@ const tFor = (lang, freeMode = true) => {
 
 // A whole number >= 1 from /api/config, else null (never trust a missing / odd field)
 const posInt = v => (typeof v === 'number' && Number.isFinite(v) && v >= 1) ? Math.floor(v) : null
-// "Why sign in" clause. The numbers are only quoted when /api/config says a signed-in user really gets more.
-const perksOf = (t, fair) =>
-  t.perks(fair && fair.user_daily && fair.device_daily && fair.user_daily > fair.device_daily ? fair : null)
+// A whole number >= 0 (a counter, which may honestly be 0), else null
+const countInt = v => (typeof v === 'number' && Number.isFinite(v) && v >= 0) ? Math.floor(v) : null
+// A language-pack value that may be a function of a number (free-mode copy) or a plain string (token-mode copy)
+const say = (v, ...args) => typeof v === 'function' ? v(...args) : v
+// "Why sign in" clause. The account's daily number is quoted only when /api/config really sent one.
+const perksOf = (t, fair) => t.perks(fair && fair.user_daily ? fair : null)
+
+// ── Sign-in gate (free mode) ──────────────────────────────────────────────────
+// An anonymous device may make ANON_FREE_USES guides (a lifetime allowance, 3 unless the owner
+// changes it); after those a free account is required to make more. The server is the judge
+// (401 signin_required). The client mirrors the count so it can say how many are left and open
+// the sign-in modal instead of sending a request that would only be refused. The sample lecture,
+// and viewing / downloading / restoring guides already made, are never gated.
+const FREE_USES_DEFAULT = 3
+// /api/config → { limit, remaining }. A missing or odd field falls back to the default (3 of 3).
+const gateFromConfig = (cfg) => {
+  const limit = posInt(cfg?.signin_after) ?? posInt(cfg?.anon_free_limit) ?? FREE_USES_DEFAULT
+  const left = countInt(cfg?.anon_remaining)
+  return { limit, remaining: left === null ? limit : Math.min(left, limit) }
+}
+// After an anonymous guide is done: the server's own count when the 'done' event carries it, else one less
+const gateAfterDone = (gate, ev) => {
+  const left = countInt(ev?.anon_remaining)
+  return { ...gate, remaining: left === null ? Math.max(0, gate.remaining - 1) : Math.min(left, gate.limit) }
+}
+// True when a NEW generation must not be sent: signed out, in free mode, nothing left.
+// Never while the session is still restoring, and never when sign-in is switched off (no way forward then).
+const anonGated = ({ freeMode, authEnabled, authLoading, session, remaining }) =>
+  !!(freeMode && authEnabled && !authLoading && !session && remaining <= 0)
+// The refusals that mean "sign in to continue": the gate, and what a server from before the gate sent for it
+const GATE_CODES = new Set(['signin_required', 'fair_use_device'])
 // Server refusals that make the rest of a batch pointless: stop it, leave the other files queued
-const STOP_CODES = new Set(['fair_use_device', 'fair_use_ip', 'fair_use_user', 'busy_today', 'busy'])
-// The one refusal where signing in helps: an anonymous device over its (lower) daily cap
-const offersSignIn = (item, session) => !!item && item.errCode === 'fair_use_device' && !session
+const STOP_CODES = new Set(['signin_required', 'fair_use_device', 'fair_use_ip', 'fair_use_user', 'busy_today', 'busy'])
+// An item held for sign-in: only a signed-out visitor is asked (once signed in it is simply ready to run)
+const offersSignIn = (item, session) => !!item && GATE_CODES.has(item.errCode) && !session
 // Line under a processing item: the queue position (localized, not the server's English) or the stream message
 const procLine = (t, item) => item.step === 'queued'
   ? (item.queuePos > 0 ? t.queuePos(item.queuePos) : t.queueWait)
   : (item.msg || t.processing)
-const badgeKey = item => (item.status === 'processing' && item.step === 'queued') ? 'queued' : item.status
+const badgeKey = (item, session) => (item.status === 'processing' && item.step === 'queued') ? 'queued'
+  : (item.status === 'queued' && offersSignIn(item, session)) ? 'signin' : item.status
+// Session-only note that the gate asked this visitor to sign in. Google sign-in leaves the page and
+// comes back, so the note (and the link they had typed: never a file, never pasted text) survives it.
+const GATE_KEY = 'alimne_gate_v1'
+const gateNote = {
+  save: (o) => { try { sessionStorage.setItem(GATE_KEY, JSON.stringify(o)) } catch { /* best-effort */ } },
+  take: () => {
+    try {
+      const raw = sessionStorage.getItem(GATE_KEY)
+      if (!raw) return null
+      sessionStorage.removeItem(GATE_KEY)
+      const o = JSON.parse(raw)
+      return o && typeof o === 'object' ? o : {}
+    } catch { return null }
+  },
+}
+const keptLink = v => (typeof v === 'string' && v.length <= 2000) ? v.trim() : ''
 // Card inviting an anonymous visitor to create a free account — only after their first real guide
 // (the sample demo is not theirs), never in token mode, never once signed in or dismissed.
 const showJoinCard = ({ freeMode, authEnabled, authLoading, session, dismissed, queue }) =>
@@ -559,6 +619,7 @@ const STATUS_COLOR = {
   done:       { bg: 'rgba(34,197,94,0.12)',  color: '#22c55e',  border: 'rgba(34,197,94,0.3)'  },
   error:      { bg: 'rgba(239,68,68,0.12)',  color: '#ef4444',  border: 'rgba(239,68,68,0.3)'  },
   expired:    { bg: 'rgba(148,163,184,0.12)', color: '#94a3b8', border: 'rgba(148,163,184,0.3)' },
+  signin:     { bg: 'rgba(251,191,36,0.12)', color: '#f59e0b',  border: 'rgba(251,191,36,0.35)' },   // held for sign-in (not an error)
 }
 
 let _id = 0
@@ -631,9 +692,11 @@ function friendlyErr(t, msg, status, data) {
   // 'your credit was returned' only exists in token mode (LEGACY); free mode never mentions credits
   if (code === 'no_notes') return data?.refunded && t.errNoNotesRefunded ? t.errNoNotesRefunded : t.errNoNotes
   if (code === 'yt_blocked') return t.errYtBlocked
+  // Sign-in gate (HTTP 401 signin_required; 'fair_use_device' is what a server from before the gate sent):
+  // the free guides are used, a free account is needed. The number is the server's own (free_uses).
+  if (code === 'signin_required' || code === 'fair_use_device') return t.signinRequired(posInt(data?.free_uses) || FREE_USES_DEFAULT)
   // Free-mode fair-use / capacity refusals (HTTP 429 / 503, or an SSE error event with status 200):
   // our own words, ahead of the generic 429 / 503 text below
-  if (code === 'fair_use_device') return t.errFairDevice
   if (code === 'fair_use_ip') return t.errFairIp
   if (code === 'fair_use_user') return t.errFairUser
   if (code === 'busy_today') return t.errBusyToday
@@ -1627,8 +1690,9 @@ Effective: May 2026 · Updated: October 2026
 Alimne is an AI-powered study tool registered under the souc.ai platform. It converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided free of charge for educational and personal use, subject to the fair-use limits in section 2.
 
 2. FREE USE, FAIR USE & EXISTING SUBSCRIPTIONS
-• Alimne is free to use. No payment, card or paid plan is needed, and you can try it without an account.
-• Fair-use limits apply: to keep Alimne free and available to everyone, we limit how many guides can be generated each day per device, per network, per account and across the whole service. Signed-in users get a higher daily allowance than anonymous visitors.
+• Alimne is free to use. No payment, card or paid plan is needed.
+• Without an account you can make your first {FREE_GUIDES}. After that, a free account is required to make more guides; creating one costs nothing. The sample lecture, and viewing or downloading the guides you already made, stay open to everyone.
+• Fair-use limits apply to accounts: to keep Alimne free and available to everyone, we limit how many guides can be generated each day per account, per network and across the whole service.
 • These limits may change at any time, and when Alimne is busy a request may wait in a queue or be asked to try again later.
 • If you subscribed before Alimne became free, you can manage or cancel your subscription at any time from Account, via the billing portal. No refunds for partial months.
 • Payments for existing subscriptions are processed by Stripe, Inc. and are subject to Stripe's Terms of Service.
@@ -1704,8 +1768,9 @@ Alimne (علّمني) — منتج souc.ai
 Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصطناعي مسجّلة تحت منصة souc.ai. تحوّل ملفات PowerPoint وPDF ومقاطع YouTube والنصوص إلى أدلة دراسة منظمة للاختبارات. تُقدَّم الخدمة مجاناً للاستخدام التعليمي والشخصي، وفق حدود الاستخدام العادل الواردة في البند ٢.
 
 ٢. الاستخدام المجاني والاستخدام العادل والاشتراكات القائمة
-• علّمني مجاني للاستخدام. لا حاجة إلى دفع أو بطاقة أو خطة مدفوعة، ويمكنك تجربته دون حساب.
-• تُطبَّق حدود الاستخدام العادل: لإبقاء علّمني مجانياً ومتاحاً للجميع، نضع حداً يومياً لعدد الأدلة التي يمكن إنشاؤها لكل جهاز ولكل شبكة ولكل حساب وللخدمة ككل. ويحصل المستخدمون المسجّلون على حدّ يومي أعلى من الزوّار بلا حساب.
+• علّمني مجاني للاستخدام. لا حاجة إلى دفع أو بطاقة أو خطة مدفوعة.
+• يمكنك إنشاء {FREE_GUIDES} دون حساب. بعد ذلك يلزم حساب مجاني لإنشاء المزيد من الأدلة، وإنشاء الحساب لا يكلّف شيئاً. أما المحاضرة النموذجية وعرض الأدلة التي أنشأتها أو تنزيلها فتبقى متاحة للجميع.
+• تُطبَّق حدود الاستخدام العادل على الحسابات: لإبقاء علّمني مجانياً ومتاحاً للجميع، نضع حداً يومياً لعدد الأدلة التي يمكن إنشاؤها لكل حساب ولكل شبكة وللخدمة ككل.
 • قد تتغيّر هذه الحدود في أي وقت، وعندما يكون علّمني مزدحماً قد ينتظر طلبك في طابور أو يُطلب منك المحاولة لاحقاً.
 • إذا كنت قد اشتركت قبل أن يصبح علّمني مجانياً، يمكنك إدارة اشتراكك أو إلغاؤه في أي وقت من «حسابك» عبر بوابة الفوترة. لا يوجد استرداد للأشهر الجزئية.
 • تُعالَج مدفوعات الاشتراكات القائمة بواسطة Stripe وتخضع لشروط خدمة Stripe.
@@ -1729,10 +1794,21 @@ Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصط
 ${TERMS_AR_TAIL}`
 
 
-function TermsModal({ lang, onClose, freeMode = true }) {
+// The Terms as shown. Free mode names the real number of guides an anonymous visitor may make
+// ({FREE_GUIDES} in the text, from /api/config); token mode (ALIMNE_FREE_MODE=0) is the old text as it was.
+const termsText = (lang, freeMode, n) => {
   const isAr = lang === 'ar'
-  // Token-mode text only while the server is in token mode (ALIMNE_FREE_MODE=0)
-  const content = isAr ? (freeMode ? TERMS_AR : TERMS_AR_LEGACY) : (freeMode ? TERMS_EN : TERMS_EN_LEGACY)
+  if (!freeMode) return isAr ? TERMS_AR_LEGACY : TERMS_EN_LEGACY
+  const k = posInt(n) || FREE_USES_DEFAULT
+  const guides = isAr
+    ? (k === 1 ? 'دليلك الأول' : k === 2 ? 'أول دليلين' : `أول ${k} ${k <= 10 ? 'أدلة' : 'دليلاً'}`)
+    : (k === 1 ? 'guide' : `${k} guides`)
+  return (isAr ? TERMS_AR : TERMS_EN).replace('{FREE_GUIDES}', guides)
+}
+
+function TermsModal({ lang, onClose, freeMode = true, freeUses = FREE_USES_DEFAULT }) {
+  const isAr = lang === 'ar'
+  const content = termsText(lang, freeMode, freeUses)
   return (
     <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
       <div className="modal-box" onClick={e => e.stopPropagation()}
@@ -1762,10 +1838,12 @@ function TermsModal({ lang, onClose, freeMode = true }) {
 // ── Login Modal ────────────────────────────────────────────────────────────────
 // Inline role=alert messages (not toasts), confirm-email panel with resend,
 // forgot password, and an in-app-browser notice instead of a Google button that
-// can't work there.
-function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice, freeMode = true, fair = null }) {
+// can't work there. `gateUses` (free mode): the sign-in gate opened this modal, so it says why,
+// with the number of free guides the visitor has used, for as long as the modal is open.
+function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice, freeMode = true, fair = null, gateUses = null }) {
   const t = tFor(lang, freeMode)
   const isAr = lang === 'ar'
+  const gateText = freeMode && posInt(gateUses) ? t.signinRequired(posInt(gateUses)) : null
   const [mode, setMode]         = useState(initialMode === 'signup' ? 'signup' : 'signin')
   const [email, setEmail]       = useState(initialEmail || '')
   const [password, setPassword] = useState('')
@@ -1878,6 +1956,15 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
           <div style={{fontWeight:700, fontSize:'1.15rem', color:'var(--text-primary)', marginBottom:'0.4rem'}}>
             {sentTo ? t.checkInboxTitle : isSignup ? t.loginTitleSignup : t.loginTitle}
           </div>
+          {/* Why this modal opened: the free guides are used and a free account is needed to make more */}
+          {gateText && !sentTo && (
+            <div role="status" style={{display:'flex', alignItems:'flex-start', gap:'0.45rem', margin:'0.2rem 0 0.75rem', padding:'0.65rem 0.8rem',
+              borderRadius:10, background:'rgba(251,191,36,0.1)', border:'1px solid rgba(251,191,36,0.4)',
+              fontSize:'0.84rem', fontWeight:600, lineHeight:1.5, color:'var(--text-primary)', textAlign: isAr ? 'right' : 'left'}}>
+              <LogIn size={15} color="#f59e0b" style={{flexShrink:0, marginTop:2}} />
+              <span>{gateText}</span>
+            </div>
+          )}
           {!sentTo && (
             <div style={{fontSize:'0.82rem', color:'var(--text-muted)', lineHeight:1.55}}>
               {isSignup ? t.loginSubSignup : t.loginSub}
@@ -2245,10 +2332,26 @@ function EmailCaptureModal({ onClose, onSubmit, onSkip, lang }) {
 }
 
 
+// ── Nav counter for a signed-out visitor (free mode) ───────────────────────────
+// "N free guides left", or "Sign in to continue — free" at 0. On a phone the nav hides its
+// labels (.ctrl-label), so the bare number stays visible there (.gate-short).
+function AnonCounter({ t, left, onClick }) {
+  const n = left > 0 ? Math.floor(left) : 0
+  const text = n > 0 ? t.anonLeft(n) : t.anonNone
+  return (
+    <button className="ctrl-btn" onClick={onClick} title={text} aria-label={text}
+      style={{cursor:'pointer', borderColor: n > 0 ? 'rgba(34,197,94,0.3)' : 'rgba(251,191,36,0.5)', color: n > 0 ? '#22c55e' : '#fbbf24'}}>
+      <Zap size={12} />
+      <span className="gate-short" aria-hidden="true">{n}</span>
+      <span className="ctrl-label"> {text}</span>
+    </button>
+  )
+}
+
 // ── Join card: after an anonymous visitor's first guide (free mode) ────────────
-// Non-blocking and dismissible. It only names what an account really adds: a higher daily
-// allowance, Chat (needs an account) and the invite link. No countdown, no pressure.
-function JoinCard({ t, isAr, fair, onJoin, onDismiss }) {
+// Non-blocking and dismissible. It says how many free guides are left without an account and
+// names only what an account really adds: more guides, Chat (needs an account) and the invite link.
+function JoinCard({ t, isAr, fair, left = 0, onJoin, onDismiss }) {
   return (
     <div className="glass" role="region" aria-label={t.joinTitle}
       style={{marginTop:'1rem', padding:'0.95rem 1.15rem', position:'relative', direction: isAr ? 'rtl' : 'ltr',
@@ -2260,7 +2363,7 @@ function JoinCard({ t, isAr, fair, onJoin, onDismiss }) {
         <span style={{fontWeight:700, fontSize:'0.9rem', color:'var(--text-primary)'}}>{t.joinTitle}</span>
       </div>
       <div style={{fontSize:'0.8rem', color:'var(--text-secondary)', lineHeight:1.55, marginBottom:'0.75rem', paddingInlineEnd:'1.8rem'}}>
-        {t.joinBody(perksOf(t, fair))}
+        {t.joinBody(perksOf(t, fair), left)}
       </div>
       <button className="submit-btn" style={{flex:'none', padding:'0.55rem 1.1rem', fontSize:'0.85rem'}} onClick={onJoin}>
         <LogIn size={14} /> {t.emailBtnSignup}
@@ -2349,9 +2452,16 @@ export default function App() {
   const [freeMode, setFreeMode]       = useState(true)
   const [fair, setFair]               = useState(null)  // {device_daily, user_daily} from /api/config
   const [joinDismissed, setJoinDismissed] = useState(() => ls.get('alimne_join_dismissed') === '1')
+  // Sign-in gate (free mode): { limit, remaining } = the guides this anonymous device may make / still has.
+  // 3 of 3 until /api/config answers. Only ever shown to, and enforced on, a signed-out visitor.
+  const [anonGate, setAnonGate]       = useState(() => gateFromConfig(null))
+  const [loginGate, setLoginGate]     = useState(null)  // set when the gate opened the sign-in modal: the number for its notice
+  // The nav counter waits for a real number (from /api/config, a finished guide or a refusal) so a device
+  // with none left is never shown "3 free guides left" for a moment. If /api/config never answers, the default shows.
+  const [gateKnown, setGateKnown]     = useState(false)
 
-  const openLogin = (mode = 'signin', notice = null) => {
-    setLoginMode(mode); setLoginNotice(notice); setLoginKey(k => k + 1); setShowLogin(true)
+  const openLogin = (mode = 'signin', notice = null, gateUses = null) => {
+    setLoginMode(mode); setLoginNotice(notice); setLoginGate(gateUses); setLoginKey(k => k + 1); setShowLogin(true)
   }
 
   // Referral
@@ -2372,10 +2482,29 @@ export default function App() {
   const tRef        = useRef(t);        tRef.current = t
   const langRef     = useRef(uiLang);   langRef.current = uiLang
   const freeRef     = useRef(freeMode); freeRef.current = freeMode
+  const gateRef     = useRef(anonGate)   // written by setGate() in step with the state, so a running batch reads the count just set
+  const gateAsked   = useRef(false)      // the gate opened the sign-in modal in this page (see afterSignIn)
+  const cfgSeq      = useRef(0)
   const lastUid     = useRef(null)
   const meSeq       = useRef(0)
   const rehydrating = useRef({})
   const savedQ      = useRef('')
+
+  const setGate = fn => { const next = fn(gateRef.current); gateRef.current = next; setAnonGate(next); setGateKnown(true) }
+  // The sign-in modal, in sign-up mode, saying why: the free guides are used. `n` = the server's number when it sent one.
+  const openGate = (n) => {
+    gateAsked.current = true
+    gateNote.save({ tab: inputTab, yt: keptLink(ytUrl), url: keptLink(pasteUrl) })
+    openLogin('signup', null, posInt(n) || gateRef.current.limit)
+  }
+  // → true when a new generation must NOT be sent (signed out, no free guides left): the modal opens instead
+  const gateBlocks = () => {
+    if (!anonGated({ freeMode: freeRef.current, authEnabled, authLoading, session: sessionRef.current, remaining: gateRef.current.remaining })) return false
+    openGate()
+    return true
+  }
+  // "Create a free account" from the nav counter / the join card: plain sign-up while guides are left, with the reason at 0
+  const openSignUp = () => { if (gateRef.current.remaining > 0) openLogin('signup'); else openGate() }
 
   const quizHistory = (() => { try { return JSON.parse(localStorage.getItem('quizHistory') || '[]') } catch { return [] } })()
 
@@ -2429,29 +2558,37 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ── /api/config: free_mode + fair-use numbers, auth_enabled, and (token mode) the anon counters.
+  // ── /api/config: free_mode + fair-use numbers, auth_enabled, the sign-in gate's numbers (free mode:
+  //    anon_free_limit / anon_remaining / signin_after) and, in token mode, the anon preview counters.
   //    Retried with backoff; if it never loads, auth stays enabled (the Supabase client doesn't
-  //    depend on it) and the client stays in free mode, its default.
+  //    depend on it), the client stays in free mode, its default, and the gate starts at 3 of 3
+  //    (the server still refuses when the real count is lower). Read again after sign-out, when the
+  //    anonymous allowance matters again. A newer call supersedes an older one.
+  const loadConfig = async (tries = 4) => {
+    const seq = ++cfgSeq.current
+    const live = () => seq === cfgSeq.current
+    for (let i = 0; i < tries && live(); i++) {
+      try {
+        const r = await fetchT('/api/config', { headers: { 'X-Device-Id': getDeviceId() } }, 8000)
+        if (!r.ok) throw new Error(`config ${r.status}`)
+        const cfg = await r.json()
+        if (!live()) return
+        setAuthEnabled(cfg.auth_enabled !== false)
+        setFreeMode(cfg.free_mode !== false)
+        if (cfg.fair_use && typeof cfg.fair_use === 'object')
+          setFair({ device_daily: posInt(cfg.fair_use.device_daily), user_daily: posInt(cfg.fair_use.user_daily) })
+        if (cfg.free_mode !== false) setGate(() => gateFromConfig(cfg))
+        if (cfg.anon_free_limit !== undefined)
+          setAnonInfo({ limit: cfg.anon_free_limit, remaining: cfg.anon_remaining ?? cfg.anon_free_limit })
+        return
+      } catch { if (i < tries - 1 && live()) await sleep([1000, 3000, 9000][i] || 9000) }
+    }
+    if (live()) setGateKnown(true)   // no answer: show the default count (the server still decides)
+  }
   useEffect(() => {
-    let live = true
-    ;(async () => {
-      for (let i = 0; i < 4 && live; i++) {
-        try {
-          const r = await fetchT('/api/config', { headers: { 'X-Device-Id': getDeviceId() } }, 8000)
-          if (!r.ok) throw new Error(`config ${r.status}`)
-          const cfg = await r.json()
-          if (!live) return
-          setAuthEnabled(cfg.auth_enabled !== false)
-          setFreeMode(cfg.free_mode !== false)
-          if (cfg.fair_use && typeof cfg.fair_use === 'object')
-            setFair({ device_daily: posInt(cfg.fair_use.device_daily), user_daily: posInt(cfg.fair_use.user_daily) })
-          if (cfg.anon_free_limit !== undefined)
-            setAnonInfo({ limit: cfg.anon_free_limit, remaining: cfg.anon_remaining ?? cfg.anon_free_limit })
-          return
-        } catch { if (i < 3 && live) await sleep([1000, 3000, 9000][i]) }
-      }
-    })()
-    return () => { live = false }
+    loadConfig()
+    return () => { cfgSeq.current++ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // ── Auth state: everything is driven by the listener ───────────────────────
@@ -2468,10 +2605,12 @@ export default function App() {
       if (id && id !== lastUid.current) {
         lastUid.current = id
         // outside the auth lock: calling supabase inside this callback can deadlock
-        setTimeout(() => { fetchUserInfo(); fetchRefStats() }, 0)
+        setTimeout(() => { fetchUserInfo(); fetchRefStats(); afterSignIn() }, 0)
       } else if (!id) {
+        const wasSignedIn = !!lastUid.current   // signed out somewhere else (another tab): signOut() below clears it first
         lastUid.current = null; meSeq.current++
         setUserInfo(null); setUserInfoErr(false); setRefStats(null)
+        if (wasSignedIn && freeRef.current) setTimeout(() => loadConfig(2), 0)
       }
       if (event === 'SIGNED_IN' && sess) setTimeout(applyReferral, 0)
     })
@@ -2520,7 +2659,10 @@ export default function App() {
     if (error) {
       try { Object.keys(localStorage).filter(k => k.startsWith('sb-') && k.endsWith('-auth-token')).forEach(k => localStorage.removeItem(k)) } catch { /* ignore */ }
       window.location.reload()
+      return
     }
+    // Signed out (free mode): the anonymous allowance applies again, so read how much of it this device has left
+    if (freeRef.current) loadConfig(2)
   }
   // Explicit sign-out also clears this tab's guides (shared / library computers)
   const userSignOut = async () => {
@@ -2589,6 +2731,26 @@ export default function App() {
       const d = await r.json().catch(() => ({}))
       if (r.ok && (d.success || d.reason === 'invalid_code')) ls.del('alimne_ref')
     } catch { /* retry on the next sign-in */ }
+  }
+
+  // A sign-in clears the gate: held items are simply ready to run again. When the gate had asked for
+  // this sign-in, its modal closes and a short toast says to carry on. Google sign-in leaves the page
+  // and comes back, so then only the note in sessionStorage says the gate had asked; it also gives
+  // back the link the visitor had typed (a chosen file or pasted text cannot survive leaving the page).
+  const afterSignIn = () => {
+    const note = gateNote.take()
+    setQueue(prev => prev.some(i => GATE_CODES.has(i.errCode))
+      ? prev.map(i => GATE_CODES.has(i.errCode) ? { ...i, errCode: null } : i) : prev)
+    if (!note && !gateAsked.current) return
+    if (note && !gateAsked.current) {
+      const yt = keptLink(note.yt), url = keptLink(note.url)
+      if (yt) setYtUrl(v => v || yt)
+      if (url) setPasteUrl(v => v || url)
+      if ((note.tab === 'youtube' && yt) || (note.tab === 'text' && url)) setInputTab(note.tab)
+    }
+    gateAsked.current = false
+    setShowLogin(false); setLoginNotice(null); setLoginGate(null)
+    toast(tRef.current.gateCleared, 'success')
   }
 
   // Back from Stripe Checkout (?sub=success): confirm, then re-read the plan a
@@ -2675,11 +2837,23 @@ export default function App() {
   const latestItem = id => queueRef.current.find(i => i.id === id)
   const canRestore = it => !!(it && it.guideBlob && it.sig)
 
+  // The server says a free account is needed to make more guides (401 signin_required, or the device
+  // refusal of a server from before the gate). Not an error: the item waits exactly as it was (its
+  // upload, link or text untouched), nothing is left on this device's allowance, and the sign-in modal
+  // opens with the reason.
+  const holdForSignIn = (id, data) => {
+    const n = posInt(data?.free_uses)
+    setGate(g => ({ limit: n || g.limit, remaining: 0 }))
+    if (id) updateItem(id, { status: 'queued', error: null, errCode: 'signin_required', step: null, msg: null, queuePos: 0 })
+    openGate(n)
+  }
+
   // 401 / 402 that a token refresh can't fix. A 402 only exists in token mode (ALIMNE_FREE_MODE=0).
   const handleAuthError = (status, data, id) => {
     const tt = tRef.current
     const code = data?.code
     if (status === 401) {
+      if (!sessionRef.current && GATE_CODES.has(code)) { holdForSignIn(id, data); return true }
       if (sessionRef.current) { expireSession(); if (id) updateItem(id, { status: 'error', error: tt.sessionExpired, step: null }) }
       else { openLogin('signin'); if (id) updateItem(id, { status: 'error', error: tt.loginTitle, step: null }) }
       return true
@@ -2848,6 +3022,9 @@ export default function App() {
         else if (!sessionRef.current) setAnonInfo(a => a ? { ...a, remaining: ev.tokens_remaining } : a)
         else fetchUserInfo()
       }
+      // Sign-in gate: an anonymous guide used one of the free ones (the sample never does). The server's
+      // count when the event carries it (anon_remaining), else one less.
+      if (!demo && freeRef.current && !hadBearer) setGate(g => gateAfterDone(g, ev))
       if (ev.job_id) cacheGuide(id, ev.job_id)
     } else if (ev.step === 'queued') {
       // Waiting for a free generation slot: not an error. The line shows the position, localized.
@@ -2877,7 +3054,10 @@ export default function App() {
         updateItem(id, { status: 'error', error: tt.errNetwork, step: null }); return 'auth'
       }
       if (!demo && (r.status === 401 || r.status === 402)) { handleAuthError(r.status, r.data, id); return 'auth' }
-      // Per-item error with its server code: the card offers Retry, and sign-in on the device refusal
+      // The same sign-in refusal by another road (429 fair_use_device from a server before the gate, or
+      // inside the stream): hold the item and open the sign-in modal, exactly as for the 401
+      if (!demo && !sessionRef.current && GATE_CODES.has(code)) { holdForSignIn(id, r.data); return 'auth' }
+      // Per-item error with its server code: the card offers Retry
       updateItem(id, { status: 'error', error: friendlyErr(tt, r.msg, r.status, r.data), errCode: code || null, step: null })
       return !demo && STOP_CODES.has(code) ? 'stop' : 'error'
     }
@@ -2905,9 +3085,11 @@ export default function App() {
     if (running) return
     const pending = queueRef.current.filter(i => i.file && (i.status === 'queued' || i.status === 'error'))
     if (!pending.length) return
+    if (gateBlocks()) return   // signed out with no free guides left: the sign-in modal opens, the files stay queued
     setRunning(true)
     try {
-      for (const item of pending) {
+      for (const [n, item] of pending.entries()) {
+        if (n > 0 && gateBlocks()) break   // the file before this one used the last free guide: stop here, send nothing
         const res = await runFile(item.id, item.file)
         if (res === 'auth' || res === 'stop') break   // sign-in needed / fair-use or busy refusal: leave the rest queued
       }
@@ -2932,6 +3114,7 @@ export default function App() {
   const processYoutube = () => {
     const url = ytUrl.trim()
     if (!url || running) return
+    if (gateBlocks()) return   // nothing is sent or queued: the link stays in its box for after the sign-in
     const id = uid()
     setQueue(prev => [...prev, { id, file: null, name: url, status: 'processing', jobId: null, error: null, step: 'extract', msg: t.fetchingTranscript, source: { type: 'youtube', url } }])
     setInputTab('upload')
@@ -2955,6 +3138,7 @@ export default function App() {
     const text = pasteText.trim()
     const url  = pasteUrl.trim()
     if ((!text && !url) || running) return
+    if (gateBlocks()) return   // nothing is sent or queued: the text / link stays in its box for after the sign-in
     const name = url ? url.replace(/^https?:\/\//, '').slice(0, 40) : 'Pasted text'
     const id = uid()
     const src = { type: 'text', url, text, name }   // `text` is never persisted
@@ -3004,6 +3188,7 @@ export default function App() {
     if (running || !src) return
     if (src.type === 'file' && !cur.file) { toast(t.reselectFile, 'info'); return }
     if (src.type === 'text' && !src.text && !src.url) { toast(t.repasteText, 'info'); return }
+    if (src.type !== 'sample' && gateBlocks()) return   // a new guide needs a free account now; the sample never does
     if (src.type !== 'sample' && !freeMode && !window.confirm(t.usesCredit)) return   // token mode only: a retry spends a credit
     updateItem(cur.id, { guide: null, guideBlob: null, sig: null, pdfBlob: null, shareUrl: null, partial: false })
     if (src.type === 'file') {
@@ -3176,6 +3361,10 @@ export default function App() {
   const hasHistory   = quizHistory.length > 0
   const isSubscribed = isProUser(userInfo)
   const liveSub      = hasLiveSub(userInfo)
+  // Free-mode lines that quote the number of guides an anonymous visitor gets (token mode: '' → not shown).
+  // A signed-in user is not told about "then a free sign-in": the dropzone shows the plain fair-use line.
+  const heroLine     = say(t.heroFree, anonGate.limit)
+  const dropLine     = freeMode && session ? t.dropFreeUser : say(t.dropFree, anonGate.limit)
 
   const flashItem = flashModal ? queue.find(i => i.id === flashModal) : null
   const quizItem  = quizModal ? queue.find(i => i.id === quizModal) : null
@@ -3283,6 +3472,8 @@ export default function App() {
                           <span className="ctrl-label"> {anonInfo.remaining > 0 ? t.freeLeft(anonInfo.remaining) : t.signInForMore}</span>
                         </button>
                       )}
+                      {/* Free mode: the guides left before a free account is needed. It opens sign-up; at 0 with the reason. */}
+                      {freeMode && gateKnown && <AnonCounter t={t} left={anonGate.remaining} onClick={openSignUp} />}
                       <button
                         className="ctrl-btn"
                         style={{borderColor:'var(--accent)',color:'var(--accent)'}}
@@ -3323,8 +3514,8 @@ export default function App() {
               <div className="hero-badge"><Sparkles size={12} />{t.badge}</div>
               <h1>{t.h1a} <span>{t.h1b}</span></h1>
               <p>{t.sub}</p>
-              {t.heroFree && (
-                <p style={{marginTop:'0.6rem', fontWeight:700, fontSize:'0.95rem', color:'var(--privacy-text, #16a34a)'}}>{t.heroFree}</p>
+              {heroLine && (
+                <p style={{marginTop:'0.6rem', fontWeight:700, fontSize:'0.95rem', color:'var(--privacy-text, #16a34a)'}}>{heroLine}</p>
               )}
             </div>
 
@@ -3380,8 +3571,8 @@ export default function App() {
                   <div className="drop-icon"><Upload size={22} /></div>
                   <div className="drop-title">{t.dropTitle}</div>
                   <div className="drop-sub">{t.dropSub}</div>
-                  {t.dropFree && (
-                    <div className="drop-sub" style={{marginTop:'0.4rem', fontWeight:600, color:'var(--privacy-text, #16a34a)'}}>{t.dropFree}</div>
+                  {dropLine && (
+                    <div className="drop-sub" style={{marginTop:'0.4rem', fontWeight:600, color:'var(--privacy-text, #16a34a)'}}>{dropLine}</div>
                   )}
                 </div>
               )}
@@ -3632,9 +3823,14 @@ export default function App() {
 
                 {/* Items */}
                 {queue.map((item, i) => {
-                  const sc = STATUS_COLOR[badgeKey(item)] || STATUS_COLOR.queued
+                  const badge = badgeKey(item, session)
+                  const sc = STATUS_COLOR[badge] || STATUS_COLOR.queued
                   const failed = item.status === 'expired' || item.status === 'error'
                   const src = item.source || (item.file ? { type: 'file' } : null)
+                  // held for sign-in (the free guides are used): not an error, its file / link / text is still here
+                  const held = offersSignIn(item, session)
+                  // a link or pasted text waiting to run (it was held, the visitor has signed in): files use Generate All
+                  const readySrc = item.status === 'queued' && !held && !!src && src.type !== 'file' && src.type !== 'sample'
                   const restorable = canRestore(item)
                   const regenHint = src?.type === 'file' && !item.file ? t.reselectFile
                     : src?.type === 'text' && !src.text && !src.url ? t.repasteText : null
@@ -3649,6 +3845,7 @@ export default function App() {
                       <div className="queue-item-main">
                         <div className="queue-icon">
                           {item.status === 'processing' ? <Loader2 size={15} className="spin" />
+                            : held                      ? <LogIn size={15} color="var(--accent)" />
                             : item.status === 'done'    ? <CheckCircle2 size={15} color="#22c55e" />
                             : item.status === 'error'   ? <AlertCircle size={15} color="#ef4444" />
                             : item.status === 'expired' ? <AlertCircle size={15} color="#94a3b8" />
@@ -3659,13 +3856,14 @@ export default function App() {
                           {/* own script decides the direction (an Arabic file name stays RTL in an English UI); aligned with the row */}
                           <div className="queue-name" dir="auto" style={{textAlign: isAr ? 'right' : 'left'}}>{item.name}</div>
                           {item.error && <div style={{fontSize:'0.72rem',color:'#ef4444',marginTop:2}}>{item.error}</div>}
-                          {/* the one refusal where an account helps: a higher daily allowance than this anonymous device */}
-                          {offersSignIn(item, session) && (
-                            <button className="ctrl-btn" onClick={() => openLogin('signup')}
+                          {/* held for sign-in: a plain (not red) line and the button that opens the sign-in modal with the reason */}
+                          {held && (<>
+                            <div style={{fontSize:'0.72rem',color:'var(--accent)',fontWeight:600,marginTop:2}}>{t.signInToContinue}</div>
+                            <button className="ctrl-btn" onClick={() => openGate()}
                               style={{marginTop:6, borderColor:'var(--accent)', color:'var(--accent)'}}>
                               <LogIn size={12} /><span> {t.signInFreeCta}</span>
                             </button>
-                          )}
+                          </>)}
                           {item.status === 'expired' && <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{t.expiredNote}</div>}
                           {hint && <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{hint}</div>}
                           {item.status === 'done' && item.partial && <div style={{fontSize:'0.72rem',color:'#fbbf24',marginTop:2}}>{t.partialNote}</div>}
@@ -3676,7 +3874,7 @@ export default function App() {
 
                         <div className="queue-status-badge"
                           style={{background:sc.bg,color:sc.color,border:`1px solid ${sc.border}`}}>
-                          {t[badgeKey(item)] || item.status}
+                          {badge === 'signin' ? t.signIn : (t[badge] || item.status)}
                         </div>
 
                         {!running && (
@@ -3765,6 +3963,16 @@ export default function App() {
                         </div>
                       )}
 
+                      {/* A link / pasted text that was held for sign-in and can run now: one tap, nothing to type again */}
+                      {readySrc && (
+                        <div className="action-row">
+                          <button className="action-btn primary" onClick={() => regenerate(item)}
+                            disabled={running || !!item.busy} style={running ? {opacity:0.6} : undefined}>
+                            <Sparkles size={12} /><span className="action-label"> {t.generateNow}</span>
+                          </button>
+                        </div>
+                      )}
+
                       {/* Public share link (shown after sharing) */}
                       {item.status === 'done' && item.shareUrl && (
                         <div style={{
@@ -3793,7 +4001,7 @@ export default function App() {
 
             {/* After a visitor's first real guide: a quiet, dismissible invitation to create a free account */}
             {showJoinCard({ freeMode, authEnabled, authLoading, session, dismissed: joinDismissed, queue }) && (
-              <JoinCard t={t} isAr={isAr} fair={fair} onJoin={() => openLogin('signup')} onDismiss={dismissJoin} />
+              <JoinCard t={t} isAr={isAr} fair={fair} left={anonGate.remaining} onJoin={openSignUp} onDismiss={dismissJoin} />
             )}
 
             {/* Info pills */}
@@ -3851,10 +4059,10 @@ export default function App() {
           onClose={() => setChatModal(null)} />
       )}
       {showHistory  && <HistoryModal onClose={() => setShowHistory(false)} />}
-      {showTerms    && <TermsModal lang={uiLang} freeMode={freeMode} onClose={() => setShowTerms(false)} />}
+      {showTerms    && <TermsModal lang={uiLang} freeMode={freeMode} freeUses={anonGate.limit} onClose={() => setShowTerms(false)} />}
       {showLogin    && (
-        <LoginModal key={loginKey} onClose={() => { setShowLogin(false); setLoginNotice(null) }}
-          lang={uiLang} sbClient={sb} initialMode={loginMode} freeMode={freeMode} fair={fair}
+        <LoginModal key={loginKey} onClose={() => { setShowLogin(false); setLoginNotice(null); setLoginGate(null) }}
+          lang={uiLang} sbClient={sb} initialMode={loginMode} freeMode={freeMode} fair={fair} gateUses={loginGate}
           initialEmail={ls.get('alimne_lead') || ''} notice={loginNotice} />
       )}
       {showSetPw && sb && <SetPasswordModal onClose={() => setShowSetPw(false)} lang={uiLang} sbClient={sb} />}
@@ -3917,6 +4125,9 @@ export default function App() {
         }
         .chat-input:focus { border-color: var(--accent); }
         .action-btn:disabled { cursor: default; }
+        /* nav counter: the bare number shows only where the nav hides its labels (phones) */
+        .gate-short { display: none; font-weight: 700; }
+        @media (max-width: 600px) { .gate-short { display: inline; } }
         @media print {
           .nav, button, .modal-overlay { display: none !important; }
         }
