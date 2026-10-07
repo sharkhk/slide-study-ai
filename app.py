@@ -4823,8 +4823,8 @@ def _render_shared_guide(row):
         "cards": "بطاقات تعليمية" if is_ar else "Flashcards",
         "quiz":  "اختبار" if is_ar else "Quiz",
         "ptitle":"أنشئ دليل دراستك مجاناً" if is_ar else "Make your own study guide — free",
-        "psub":  "ارفع محاضرة — PowerPoint أو PDF أو رابط YouTube — واحصل على ملخص وبطاقات واختبار خلال ثوانٍ."
-                 if is_ar else "Upload a lecture — PowerPoint, PDF, or a YouTube link — and get notes, flashcards and a quiz in seconds.",
+        "psub":  "ارفع محاضرة — PowerPoint أو PDF أو رابط YouTube — واحصل على ملخص وبطاقات واختبار خلال ثوانٍ. مجاني، دون بطاقة ائتمان."
+                 if is_ar else "Upload a lecture — PowerPoint, PDF, or a YouTube link — and get notes, flashcards and a quiz in seconds. Free, no credit card needed.",
         "pbtn":  "ابدأ مجاناً" if is_ar else "Start free",
     }
     title_raw = _scalar_text(g.get("title")) or "Study Guide"
@@ -6062,11 +6062,42 @@ def _legal_shell(title, body):
 </footer></div></body></html>"""
 
 
+def _legal_free_mode():
+    """True when the legal pages should describe Alimne as free (the default).
+    Same switch as the credit logic: ALIMNE_FREE_MODE=0 brings the old token plans
+    back, and then these pages must say so again (read per request, so the page
+    can never contradict what the app is actually doing)."""
+    return os.environ.get("ALIMNE_FREE_MODE", "1").strip() != "0"
+
+
 @app.route("/privacy")
 def privacy_page():
+    free = _legal_free_mode()
+    acct_use = ("apply the fair-use daily limits to your account" if free
+                else "track your monthly token balance")
+    if free:
+        counters = """<li><strong>Usage counters:</strong> to keep Alimne available to everyone and to prevent abuse, we count how many
+study guides are generated per day. Each counter is stored in our database (Supabase) against a random device
+identifier kept in your browser, your IP address, or your account ID if you are signed in, plus one overall total.
+A counter holds only a number and timestamps \u2014 never your files, text or study guides \u2014 and is used for
+nothing except applying usage limits.</li>"""
+    else:
+        counters = """<li><strong>Usage counters:</strong> to keep the free previews fair, we count how many are used per device. The counter
+is stored in our database (Supabase) against a random device identifier kept in your browser (and, in server memory
+only, your IP address). It holds only a number and timestamps \u2014 never your files, text or study guides \u2014 and
+is used for nothing except applying usage limits.</li>"""
+    if free:
+        payments = """<p>Alimne is free and takes no payments. A small number of people subscribed to a paid plan before
+Alimne became free; those subscriptions are processed by <strong>Stripe, Inc.</strong> We never receive or store
+your full card number \u2014 Stripe handles payment details directly. For those subscribers we store only a Stripe
+customer reference and your subscription status.</p>"""
+    else:
+        payments = """<p>Subscriptions are processed by <strong>Stripe, Inc.</strong> We never receive or store your full card
+number \u2014 Stripe handles payment details directly. We store only a Stripe customer reference and your
+subscription status.</p>"""
     body = """
 <h1>Privacy Policy</h1>
-<div class="updated">Last updated: 26 September 2026</div>
+<div class="updated">Last updated: 7 October 2026</div>
 <p>Alimne ("we", "us"), operated by souc ai, turns your slides, documents, pasted text and
 YouTube videos into study guides and summaries. Privacy is core to how the product is built.
 This policy explains what we handle and why.</p>
@@ -6075,6 +6106,12 @@ This policy explains what we handle and why.</p>
 <strong>in memory only</strong>, are <strong>never written to disk or seen by any human</strong>, and are
 <strong>automatically deleted within 15 minutes</strong> \u2014 or immediately when you press
 "Delete now". We do not sell your data and we do not show ads.</div>
+
+<div class="note" lang="ar" dir="rtl"><strong>باختصار:</strong> تُعالَج ملفاتك ونصوصك <strong>في الذاكرة فقط</strong>،
+ولا تُكتب على القرص ولا يطّلع عليها أي شخص، وتُحذف <strong>تلقائيًا خلال 15 دقيقة</strong> أو فورًا عند طلبك.
+لا نبيع بياناتك ولا نعرض إعلانات. الأدلة المشتركة: إذا اخترتَ «مشاركة» يُخزَّن الدليل الناتج (وليس ملفك الأصلي)
+ليبقى رابطه العام يعمل. ولتطبيق حدود الاستخدام العادل نحتفظ بعدّاد (رقم وتواريخ فقط، دون أي محتوى دراسي) مرتبط بمعرّف
+عشوائي لجهازك أو بعنوان IP أو بحسابك. النص الإنجليزي هو المرجع.</div>
 
 <h2>1. Study content you submit</h2>
 <ul>
@@ -6087,17 +6124,16 @@ only to produce your result and is not used to train models by us.</li>
 file) is stored so its public link keeps working until it is removed.</li>
 </ul>
 
-<h2>2. Account information</h2>
+<h2>2. Account &amp; fair-use information</h2>
 <ul>
 <li>If you sign in, we store your <strong>email address</strong> and a display name/avatar (when provided by
-Google) in our authentication database (Supabase) to identify your account and track your monthly token balance.</li>
+Google) in our authentication database (Supabase) to identify your account and """ + acct_use + """.</li>
 <li>We use a session cookie / local storage entry to keep you signed in.</li>
+""" + counters + """
 </ul>
 
 <h2>3. Payments</h2>
-<p>Subscriptions are processed by <strong>Stripe, Inc.</strong> We never receive or store your full card
-number \u2014 Stripe handles payment details directly. We store only a Stripe customer reference and your
-subscription status.</p>
+""" + payments + """
 
 <h2>4. What we do not do</h2>
 <ul>
@@ -6108,11 +6144,12 @@ subscription status.</p>
 
 <h2>5. Data retention &amp; your rights</h2>
 <p>Study jobs: deleted within 15 minutes (or on demand). Account data: kept until you ask us to delete it.
-You may request access to, or deletion of, your account data at any time by emailing
+Usage counters (section 2): kept in our database until we clear them; we may delete old counters at any time.
+You may request access to, or deletion of, your account data or any usage counters linked to you at any time by emailing
 <a href="mailto:sales@souc.ai">sales@souc.ai</a>.</p>
 
 <h2>6. Third-party services</h2>
-<p>We rely on Supabase (authentication &amp; account database), Stripe (payments), Groq (AI processing),
+<p>We rely on Supabase (authentication, account database &amp; usage counters), Stripe (payments for existing subscribers), Groq (AI processing),
 Render (hosting) and Cloudflare (DNS/network). Each processes data only as needed to provide the service.</p>
 
 <h2>7. Changes &amp; contact</h2>
@@ -6124,30 +6161,56 @@ Email <a href="mailto:sales@souc.ai">sales@souc.ai</a>.</p>
 
 @app.route("/terms")
 def terms_page():
-    body = """
-<h1>Terms &amp; Conditions</h1>
-<div class="updated">Last updated: 26 September 2026</div>
-<p>By using Alimne (the "Service"), operated by souc ai, you agree to these terms.</p>
-
-<h2>1. The Service</h2>
-<p>Alimne converts uploaded slides, documents, pasted text and YouTube videos into study guides,
-summaries, flashcards and quizzes using AI. Output is generated automatically and may contain
-inaccuracies \u2014 always verify important information against the source material.</p>
-
-<h2>2. Plans &amp; billing</h2>
+    free = _legal_free_mode()
+    if free:
+        plans = """<h2>2. Free to use &amp; fair use</h2>
+<ul>
+<li><strong>Alimne is free.</strong> No paid plan, subscription or credit card is required to use the Service,
+and you can try it without signing in.</li>
+<li><strong>Fair use:</strong> to keep the Service available to everyone and to control costs, we apply daily limits
+on how many study guides can be generated (per device, per network and per account, plus an overall daily
+capacity). Signed-in users get a higher daily allowance than anonymous visitors. These limits may change at any
+time, and at busy times you may be asked to wait in a queue or to try again later. We do not promise unlimited use.</li>
+<li><strong>Existing subscribers:</strong> if you subscribed to a paid plan before Alimne became free, you can manage
+or cancel your subscription at any time from within the app. Cancelling stops future charges and access
+continues until the end of the period already paid. Payments for those subscriptions are processed by Stripe;
+charges already made are non-refundable except where required by law.</li>
+</ul>"""
+        summary_ar = """
+<div class="note" lang="ar" dir="rtl"><strong>باختصار:</strong> علّمني <strong>مجاني</strong> \u2014 لا حاجة لاشتراك
+مدفوع ولا لبطاقة ائتمان، ويمكنك تجربته دون تسجيل الدخول. تُطبَّق حدود <strong>استخدام عادل</strong> يومية قد تتغيّر،
+وقد تنتظر دورك في أوقات الازدحام. ومن اشترك سابقًا في خطة مدفوعة يمكنه إدارة اشتراكه أو إلغاءه في أي وقت من داخل
+التطبيق، وتُعالَج مدفوعاته عبر Stripe. النص الإنجليزي هو المرجع.</div>
+"""
+    else:
+        plans = """<h2>2. Plans &amp; billing</h2>
 <ul>
 <li><strong>Free plan:</strong> 3 processing tokens per month. No credit card required.</li>
 <li><strong>Pro plan:</strong> US$2.99 per month, billed via Stripe, including <strong>30 tokens per month</strong>
 and priority processing. Your token allowance renews each billing cycle.</li>
 <li>You can cancel anytime; access continues until the end of the paid period. Charges are non-refundable
 except where required by law.</li>
-</ul>
+</ul>"""
+        summary_ar = ""
+    body = """
+<h1>Terms &amp; Conditions</h1>
+<div class="updated">Last updated: 7 October 2026</div>
+<p>By using Alimne (the "Service"), operated by souc ai, you agree to these terms.</p>
+""" + summary_ar + """
+
+<h2>1. The Service</h2>
+<p>Alimne converts uploaded slides, documents, pasted text and YouTube videos into study guides,
+summaries, flashcards and quizzes using AI. Output is generated automatically and may contain
+inaccuracies \u2014 always verify important information against the source material.</p>
+
+""" + plans + """
 
 <h2>3. Acceptable use</h2>
 <ul>
 <li>Only upload content you have the right to use.</li>
 <li>Do not use the Service for unlawful purposes or to process content that infringes others' rights.</li>
 <li>Do not attempt to disrupt, overload, or reverse-engineer the Service.</li>
+<li>Do not try to get around the usage limits (for example with automated tools, or by rotating devices or networks).</li>
 </ul>
 
 <h2>4. Your content</h2>
