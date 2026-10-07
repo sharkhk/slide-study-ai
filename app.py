@@ -2156,8 +2156,11 @@ def _admin_made_guide(user, activity):
 
 # Subscription states in which Stripe can still charge the customer → the words
 # shown for them. The webhook writes 'active' (for active and trialing), 'past_due'
-# and 'unpaid'; 'canceling' is a subscription set to end with its period.
-# 'canceled' is over: there is nothing left to cancel.
+# and 'unpaid'. 'canceling' (a subscription set to end with its period) is written
+# by nothing in this app: the admin Cancel only asks Stripe for
+# cancel_at_period_end, and the webhook maps a subscription that is still active
+# back to 'active'. So an 'active' row may already be set to cancel, and the page
+# must never say that it renews. 'canceled' is over: there is nothing left to cancel.
 _ADMIN_SUB_BILLING = {"active": "active", "trialing": "trialing", "canceling": "canceling",
                       "past_due": "past due", "unpaid": "unpaid"}
 
@@ -2570,7 +2573,10 @@ function subSort(key, numeric){
 }
 function csvCell(c){
   c = String(c == null ? "" : c);
-  if (/^[=+\-@\t\r]/.test(c)) c = "'" + c;   // a spreadsheet must never run a cell as a formula
+  // A spreadsheet must never run a cell as a formula. Excel and Sheets skip leading blanks and line breaks, so the
+  // first NON-blank character decides (the rule of the Anki export and of the client's csvCell); a leading tab or
+  // carriage return is unsafe by itself.
+  if (/^[ \t\r\n]*[=+\-@]|^[\t\r]/.test(c)) c = "'" + c;
   return '"' + c.replace(/"/g,'""') + '"';
 }
 function subExportCSV(){
@@ -2725,6 +2731,7 @@ _ADMIN_STEP_SUBS = {
     "accounts":  "signed up",
     "activated": "new accounts that made at least 1 guide",
 }
+_ADMIN_STEP_SUB_GATE_ONE = "devices that used their free guide"     # ANON_FREE_USES=1: never "all 1 free guides"
 # how a step's conversion reads, by the step it is measured from (its "base")
 _ADMIN_STEP_OF = {"visits": "of visits", "devices": "of those devices",
                   "gate": "of gate devices", "accounts": "of new accounts"}
@@ -2750,7 +2757,8 @@ def _admin_funnel_html(funnel, gate_limit, errors, totals_cards):
             num, sub, cls = "n/a", f"not applicable: {_ADMIN_GATE_FROM_FIRST}", " na"
         else:
             num = "-" if lost[key] else format(s["value"], ",")
-            sub = _ADMIN_STEP_SUBS[key].format(limit=gate_limit)
+            sub = (_ADMIN_STEP_SUB_GATE_ONE if (key == "gate" and gate_limit == 1)
+                   else _ADMIN_STEP_SUBS[key].format(limit=gate_limit))
             cls = " hero" if key == "accounts" else ""
             if i:
                 # conversion from the step it is measured from; "-" alone when there is nothing to divide by
@@ -2775,8 +2783,10 @@ def _admin_funnel_html(funnel, gate_limit, errors, totals_cards):
         gate_note = _admin_err_note(errors, "gate", "the anonymous-device counters, so the two device steps and "
                                                     "the gate → sign-up rate show no data")
         if not gate_note and not funnel["gate_live"]:
-            gate_note = (f'<p class="note" data-note="gate-not-live">No anonymous device has been counted in the last '
-                         f'{funnel["days"]} days: sign-in gate data starts when the {gate_limit}-guide gate goes live.</p>')
+            # Only what is known. The window is just as empty on the day of a deploy, in a quiet week and while
+            # the counters fail open, and the gate is live in all three: the page cannot say it is not.
+            gate_note = (f'<p class="note" data-note="gate-no-devices">No guide by an anonymous device was counted '
+                         f'in the last {funnel["days"]} days.</p>')
         rate = None if (lost["gate"] or lost["accounts"]) else funnel["gate_signup_rate"]
         rate_card = _admin_card("Gate → sign-up", _admin_pct(rate, cap=1.0),
                                 f'{_admin_n(steps[3]["value"], errors, "users", "funnel")} new accounts ÷ '
@@ -3062,7 +3072,9 @@ def admin_page():
             plan_html = ""
             if legacy_sub:
                 if active:
-                    when = f"renews {renews}" if renews else "active"
+                    # Never "renews": an active subscription may already be set to cancel (see
+                    # _ADMIN_SUB_BILLING), and the date is the end of the paid period either way.
+                    when = f"active · period ends {renews}" if renews else "active"
                 elif status == "canceling":
                     when = f"canceling · ends {renews}" if renews else "canceling"
                 elif status in _ADMIN_SUB_BILLING:
@@ -3142,6 +3154,14 @@ def admin_page():
         made_note = ('<p class="note">Guides made is the lifetime counter on the account, and only the old token '
                      'system adds to it: free mode keeps no per-account total. A "+" means the account has made '
                      f'guides since Alimne went free; "in last {window_h} h" is its running fair-use window.</p>')
+    cancel_note = ""
+    if free and subs_legacy:
+        # After Cancel the row does not change (nothing writes 'canceling'): say so, or it looks as if it failed
+        cancel_note = ('<p class="note" data-note="legacy-cancel">Cancel asks Stripe to end a subscription at the '
+                       'end of the paid period. Stripe keeps it active until then, so after a Cancel the row still '
+                       'reads "active" with the same date: that date is when the paid period ends, cancelled or '
+                       'not. Whether a subscription is already set to cancel is shown in the Stripe dashboard, '
+                       'not here.</p>')
     users_pills = f'<span class="pill blue">{_admin_n(stats["total"], errors, "users", "signups")} users</span>'
     if free and subs_legacy:
         users_pills += f'<span class="pill green">{subs_legacy:,} legacy subscribers</span>'
@@ -3168,6 +3188,7 @@ def admin_page():
   </div>
   {shown_note}
   {made_note}
+  {cancel_note}
 </section>"""
 
     # ── Generations (durable usage events — counts anon + demo, survives restarts) ─

@@ -733,20 +733,43 @@ def test_empty_database_shows_zeros_and_the_gate_note(client, monkeypatch):
     html = _page(client)
     assert [_num(html, k) for k in ("signups-today", "signups-total", "funnel-devices", "funnel-gate")] == ["0"] * 4
     assert _num(html, "gate-signup-rate") == "-"
-    assert "sign-in gate data starts when the 3-guide gate goes live" in html
+    assert GATE_QUIET_NOTE in html and 'data-note="gate-no-devices"' in html
+    for claim in GATE_NOT_LIVE_CLAIMS:
+        assert claim not in html, claim
     assert "No users yet." in html and "could not load" not in html.lower()
     assert _num(html, "budget-pct") == "0%"
     assert sb.queries, "the dashboard never asked the database"
 
 
-def test_gate_note_follows_the_configured_limit_and_goes_away_with_data(client, monkeypatch):
+# What the page says when no anonymous device was counted in the window, and what it must never say:
+# that the gate "is not live" / "goes live". It cannot know that. The same empty window shows on the day
+# of the deploy, in any later quiet week, and while the counters fail open, and the gate is live in all three.
+GATE_QUIET_NOTE = "No guide by an anonymous device was counted in the last 7 days."
+GATE_NOT_LIVE_CLAIMS = ("goes live", "not live", "gate data starts", 'data-note="gate-not-live"')
+
+
+def test_quiet_week_note_makes_no_claim_about_the_gate_and_goes_away_with_data(client, monkeypatch):
     monkeypatch.setattr(appmod, "ANON_FREE_USES", 5)
     _use(monkeypatch, FakeSB())
-    assert "sign-in gate data starts when the 5-guide gate goes live" in _page(client)
+    html = _page(client)
+    assert GATE_QUIET_NOTE in html and "5-guide gate" not in html
+    for claim in GATE_NOT_LIVE_CLAIMS:
+        assert claim not in html, claim
     _use(monkeypatch, sample_db(gate_limit=5))
     html = _page(client)
-    assert "gate data starts when" not in html
+    assert GATE_QUIET_NOTE not in html and 'data-note="gate-no-devices"' not in html
     assert (_num(html, "funnel-devices"), _num(html, "funnel-gate")) == ("120", "40")
+
+
+def test_quiet_week_note_is_true_while_the_gate_is_live_and_refusing(client, monkeypatch):
+    # A device used its 3 guides 8 days ago: it is still refused today (the allowance is a lifetime one), so the
+    # gate is as live as it gets. The 7-day window is simply empty. The note must say that and nothing more.
+    rows = [_counter(appmod._anon_gate(f"{d:032x}", "203.0.113.7")[0], 3, NOW - timedelta(days=8, hours=d)) for d in range(5)]
+    html = _page_of(client, monkeypatch, FakeSB({"anon_usage": rows}))
+    assert (_num(html, "funnel-devices"), _num(html, "funnel-gate")) == ("0", "0")
+    assert GATE_QUIET_NOTE in html
+    for claim in GATE_NOT_LIVE_CLAIMS:
+        assert claim not in html, claim
 
 
 @pytest.mark.parametrize("setting", [0, -1, "0"])
@@ -756,8 +779,8 @@ def test_gate_set_to_zero_reads_as_sign_in_from_the_first_guide(client, monkeypa
     html = _page_of(client, monkeypatch, sb)
     assert 'data-note="gate-from-first"' in html
     assert "sign-in required from the first guide" in html
-    # not the "the gate is not live yet" note, and never a made-up 1-guide gate
-    assert "gate data starts when" not in html and 'data-note="gate-not-live"' not in html
+    # not the "no anonymous device" note (nobody can be one), and never a made-up 1-guide gate
+    assert GATE_QUIET_NOTE not in html and 'data-note="gate-no-devices"' not in html
     for wrong in ("1-guide gate", "0-guide gate", "all 1 free guides", "all 0 free guides"):
         assert wrong not in html, wrong
     # the two device steps and the gate rate are "not applicable", not a real 0
@@ -778,7 +801,7 @@ def test_gate_set_to_zero_reads_as_sign_in_from_the_first_guide(client, monkeypa
 def test_gate_set_to_zero_on_an_empty_or_failing_database(client, monkeypatch):
     monkeypatch.setattr(appmod, "ANON_FREE_USES", 0)
     html = _page_of(client, monkeypatch, FakeSB())
-    assert 'data-note="gate-from-first"' in html and "gate data starts when" not in html
+    assert 'data-note="gate-from-first"' in html and 'data-note="gate-no-devices"' not in html
     assert (_num(html, "funnel-devices"), _num(html, "funnel-accounts")) == ("n/a", "0")
     assert re.search(r'data-conv="accounts">-<', html)                          # 0 visits: nothing to divide by
     sb = sample_db()
@@ -796,10 +819,23 @@ def test_gate_set_to_zero_on_an_empty_or_failing_database(client, monkeypatch):
 def test_a_one_guide_gate_is_still_a_gate(client, monkeypatch):
     monkeypatch.setattr(appmod, "ANON_FREE_USES", 1)
     html = _page_of(client, monkeypatch, FakeSB())
-    assert "sign-in gate data starts when the 1-guide gate goes live" in html
+    assert GATE_QUIET_NOTE in html
     assert 'data-note="gate-from-first"' not in html and _num(html, "funnel-devices") == "0"
     html = _page_of(client, monkeypatch, sample_db(gate_limit=1))
     assert (_num(html, "funnel-devices"), _num(html, "funnel-gate")) == ("120", "120")
+
+
+def test_a_one_guide_gate_reads_in_the_singular(client, monkeypatch):
+    # docs/FREE-MODE.md offers ANON_FREE_USES=1 as a tightening step and as a smoke test: the owner will see it
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 1)
+    for sb in (FakeSB(), sample_db(gate_limit=1)):
+        html = _page_of(client, monkeypatch, sb)
+        assert "devices that used their free guide" in html
+        for wrong in ("all 1 free guides", "1 free guides", "their free guides"):
+            assert wrong not in html, wrong
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 2)
+    html = _page_of(client, monkeypatch, FakeSB())
+    assert "devices that used all 2 free guides" in html and "their free guide" not in html
 
 
 def test_sample_week_numbers(client, monkeypatch):
@@ -886,7 +922,7 @@ def test_one_failing_query_never_takes_the_page_down(client, monkeypatch, down):
         for key in ("funnel-devices", "funnel-gate", "gate-signup-rate", "budget-used", "budget-pct",
                     "funnel-activated", "accounts-active"):       # "made a guide" needs the per-account counters
             assert _num(html, key) == "-", key
-        assert "gate data starts when" not in html               # "could not load" is not "the gate is not live"
+        assert GATE_QUIET_NOTE not in html                       # "could not load" is not "nothing was counted"
         assert re.search(r'data-conv="devices">-<', html) and re.search(r'data-conv="accounts">-<', html)
     else:
         assert _num(html, "funnel-devices") == "120" and _num(html, "budget-pct") == "61%"
@@ -1260,7 +1296,7 @@ def test_free_mode_users_table(client, monkeypatch):
     assert [r["data-joined"] for r in d.rows] == sorted((r["data-joined"] for r in d.rows), reverse=True)  # newest first
     # legacy badge: only the active and the canceling subscriber, each with its date
     assert html.count("legacy subscriber<") == 2
-    assert "renews 2026-10-26" in html and "ends 2026-10-13" in html
+    assert "active · period ends 2026-10-26" in html and "ends 2026-10-13" in html
     assert [r["data-email"] for r in d.rows if r["data-legacy"] == "1"] == ["user4@example.com", "user2@example.com"]
     # Cancel: every legacy subscriber, the one that is already set to end included
     assert _cancels(d) == sorted([f"cancelSub('{_uid(2)}','user2@example.com')",
@@ -1306,6 +1342,53 @@ def _subscribers_db():
 BILLABLE = (2, 4, 11, 12, 13, 14, 15, 17, 18)          # user numbers that may still be paying
 
 
+def test_free_mode_never_says_an_active_subscription_renews(client, monkeypatch):
+    # Nothing in the app ever writes 'canceling': Cancel only asks Stripe for cancel_at_period_end, and the webhook
+    # maps a subscription that is still active back to 'active'. So after the owner cancels, the row still reads
+    # 'active' with the same date, and "renews <date>" would be a false statement about a paying customer's billing
+    # (the subscription ENDS on that date). The date is the end of the paid period, and that is all the page knows.
+    html = _page_of(client, monkeypatch, _subscribers_db())
+    cell = _user_row_html(html, "user2@example.com")
+    assert "active · period ends 2026-10-26" in cell
+    section = html[html.index('id="sec-users"'):]
+    shown = re.sub(r"<[^>]+>", " ", section[:section.index("</section>")])
+    assert "user2@example.com" in shown and "legacy subscriber" in shown
+    assert "renew" not in shown.lower(), "the page cannot know whether a subscription renews"
+    # an active subscription with no date on file still reads 'active', with no date and no promise
+    sb = sample_db()
+    sb.tables["users"][1].update(subscription_period_end=None)
+    cell = _user_row_html(_page_of(client, monkeypatch, sb), "user2@example.com")
+    assert re.search(r">active</span>", cell) and "period ends" not in cell
+    assert "renew" not in re.sub(r"<[^>]+>", " ", cell).lower()
+    # the CSV / sort column keeps the bare date under a header that is true either way
+    assert _doc(html).rows and {r["data-email"]: r for r in _doc(html).rows}["user2@example.com"]["data-renews"] == "2026-10-26"
+    assert '"Renews / ends"' in html
+
+
+def test_free_mode_says_why_a_cancelled_subscription_still_reads_active(client, monkeypatch):
+    # After Cancel the row does not change (see above): the page has to say so, or the owner cannot tell that it worked
+    html = _page_of(client, monkeypatch, sample_db())
+    note = re.search(r'<p class="note" data-note="legacy-cancel">(.*?)</p>', html, re.S)
+    assert note, "no note under the Users table about what Cancel does to the row"
+    text = re.sub(r"<[^>]+>", "", note.group(1))
+    for must in ("Cancel", "end of the paid period", "active", "until", "Stripe"):
+        assert must in text, must
+    assert "renew" not in text.lower()
+    # only where there is a legacy subscriber to cancel, and never in token mode's place
+    sb = sample_db()
+    for u in sb.tables["users"]:
+        u.update(subscription_status="free", subscription_id=None, subscription_period_end=None)
+    assert 'data-note="legacy-cancel"' not in _page_of(client, monkeypatch, sb)
+
+
+def test_legacy_mode_plan_cell_is_unchanged(client, monkeypatch, legacy_tokens):
+    # ALIMNE_FREE_MODE=0 keeps its old badge and bare date: no new words there
+    html = _page_of(client, monkeypatch, sample_db())
+    cell = _user_row_html(html, "user2@example.com")
+    assert "● active" in cell and ">2026-10-26<" in cell
+    assert "period ends" not in html and 'data-note="legacy-cancel"' not in html
+
+
 def test_free_mode_every_subscriber_who_may_still_pay_keeps_badge_filter_and_cancel(client, monkeypatch):
     """The owner must always be able to find and cancel a paying legacy subscriber:
     'past_due' / 'unpaid' / 'canceling' are still Stripe subscriptions that bill."""
@@ -1321,7 +1404,7 @@ def test_free_mode_every_subscriber_who_may_still_pay_keeps_badge_filter_and_can
     # the badge, with the status in words
     assert html.count("legacy subscriber<") == len(BILLABLE)
     assert f"{len(BILLABLE)} legacy subscribers" in html
-    for i, words in ((2, "renews 2026-10-26"), (4, "canceling"), (4, "ends 2026-10-13"), (11, "past due"),
+    for i, words in ((2, "active · period ends 2026-10-26"), (4, "canceling"), (4, "ends 2026-10-13"), (11, "past due"),
                      (11, "2026-10-05"), (12, "unpaid"), (13, "past due"), (14, "trialing"),
                      (14, "2026-10-10"), (15, "Stripe subscription on file"), (17, "past due"),
                      (18, "incomplete")):
@@ -1402,6 +1485,39 @@ def test_free_mode_sort_filter_and_csv_cover_the_new_columns(client, monkeypatch
     for label in ("Export CSV", "Refresh", "Clear Log", "Sign out"):
         assert label in html, label
     assert "on every device" in html
+
+
+def _page_csv_guard(html):
+    # The formula guard of the page's own csvCell, as a Python regex (the JS literal uses nothing the two
+    # engines read differently).
+    js ="\n".join(_doc(html).scripts)
+    fn = js[js.index("function csvCell"):]
+    fn = fn[:fn.index("\n}") + 2]
+    m = re.search(r'''if \(/(.+)/\.test\(c\)\) c = "'" \+ c;''', fn)
+    assert m, f"csvCell has no formula guard: {fn}"
+    return re.compile(m.group(1))
+
+
+# A spreadsheet runs a cell as a formula when its first NON-BLANK character is one of = + - @ (Excel and Sheets
+# skip leading spaces and line breaks), and a leading tab or carriage return is dangerous by itself. The Name
+# column is whatever a visitor typed at sign-up.
+CSV_FORMULAS = ["=1+1", "+cmd|' /C calc'!A0", "-2+3", "@SUM(A1)",
+                ' =HYPERLINK("http://evil","x")', "\n=1+1", "  +cmd|' /C calc'!A0", "\t=1+1", "\r=1+1",
+                "\r\n@x", " \t\n -1", "\tx", "\rx"]
+CSV_PLAIN = ["user@example.com", "Aisha Khan", "2026-10-07", "12", "", "a=b", "x -1", " plain", "\nplain",
+             "legacy subscriber (active)", "عائشة خان"]
+
+
+def test_users_csv_never_exports_a_formula(client, monkeypatch):
+    guard = _page_csv_guard(_page_of(client, monkeypatch, sample_db()))
+    for cell in CSV_FORMULAS:
+        assert guard.search(cell), f"{cell!r} would be exported as a formula"
+    for cell in CSV_PLAIN:
+        assert not guard.search(cell), f"{cell!r} is plain text and must be exported as it is"
+    # the same rule as the app's two other CSV writers (the Anki export here, csvCell in the client)
+    with open(appmod.__file__, encoding="utf-8") as fh:
+        server = fh.read()
+    assert 'stripped = v.lstrip(" \\t\\r\\n")' in server and 'stripped[:1] in ("=", "+", "-", "@")' in server
 
 
 def test_legacy_mode_brings_tokens_and_revenue_back(client, monkeypatch, legacy_tokens):
