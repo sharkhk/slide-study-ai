@@ -79,8 +79,10 @@ from unittest.mock import MagicMock
 import app as appmod
 
 # Claims that were true for the token/Pro system and are false for a free product.
+# "3 guides" was the old Free plan (3 a month). The one true use of the number today is the
+# sign-in gate - "your FIRST 3 guides need no account" - so only that form is let through.
 STALE_PRICING = re.compile(
-    r"free trial|free preview|\b30 guides\b|\b3 guides\b|\$\s?2\.99|\b2\.99\b|"
+    r"free trial|free preview|\b30 guides\b|(?<!first )\b3 guides\b|\$\s?2\.99|\b2\.99\b|"
     r"\b(?:3|30) (?:processing )?tokens\b|tokens/mo|tokens per month|"
     r"\bfree plan\b|\bpro plan\b|\b3 a month\b|\b2 free\b|one free try|"
     r"upgrade to continue|no_tokens",
@@ -88,6 +90,17 @@ STALE_PRICING = re.compile(
 )
 # "Unlimited" is never promised (daily fair-use caps). Saying we do NOT promise it is fine.
 UNLIMITED = re.compile(r"(?<!not promise )\bunlimited\b|غير محدود|بلا حدود|بدون حدود", re.IGNORECASE)
+
+# "No sign-up needed" stopped being true on its own (the sign-in gate): only the first
+# ANON_FREE_USES guides need no account, after that a free account is required. A page may say
+# that - with the number - but it must never make the unqualified claim again. These are the
+# unqualified forms, English and Arabic.
+NO_ACCOUNT_UNQUALIFIED = re.compile(
+    r"without signing[ -]?(?:in|up)|without (?:an? )?(?:account|login|sign-?up)|"
+    r"no sign-?(?:up|in)\b|no (?:account|login|registration) (?:is )?(?:needed|required|necessary)|"
+    r"دون تسجيل|بدون تسجيل|بلا تسجيل|دون حساب|بدون حساب|بلا حساب|لا حاجة (?:إلى|ل)\s?حساب|لا حاجة (?:إلى|ل)\s?(?:ال)?تسجيل",
+    re.IGNORECASE,
+)
 
 # sha256 of the og.png that shipped before the free launch: it had "Free plan - 3
 # tokens/mo, Pro $2.99/mo - 30 tokens" painted into the picture (shown on every
@@ -139,6 +152,11 @@ def _read(rel):
         return fh.read()
 
 
+def _flat(html):
+    """The page with every run of whitespace as one space (the source wraps its lines)."""
+    return re.sub(r"\s+", " ", html)
+
+
 # ── /terms ───────────────────────────────────────────────────────────────────
 def test_terms_say_alimne_is_free_with_fair_use(client):
     html = _page(client, "/terms")
@@ -148,6 +166,51 @@ def test_terms_say_alimne_is_free_with_fair_use(client):
     assert "may change" in html
     assert "We do not promise unlimited use." in html
     assert "queue" in html           # busy-time behaviour is disclosed
+
+
+def test_terms_say_when_a_free_account_is_required(client):
+    # The product rule (the sign-in gate): the first 3 guides need no account, after that a free
+    # account is required, and the fair-use daily limits are limits on accounts.
+    html = _flat(_page(client, "/terms"))
+    assert "<strong>Free account:</strong>" in html
+    assert "Your first 3 study guides need no account; after that, a free account is required to make more." in html
+    assert "Creating an account is free" in html
+    assert "never need an account" in html              # the sample lecture, and guides already made
+    assert "daily limits on how many study guides an account can generate" in html
+    assert "try it without signing in" not in html      # the old, now unqualified, claim
+
+
+def test_terms_arabic_summary_states_the_account_rule(client):
+    html = _flat(_page(client, "/terms"))
+    assert "أول 3 أدلة دراسة لا تحتاج إلى حساب، وبعدها يلزم إنشاء حساب مجاني لإنشاء المزيد." in html
+    assert "تُطبَّق على الحسابات حدود" in html           # fair use applies to accounts
+    assert "دون تسجيل الدخول" not in html                # the old, now unqualified, claim
+
+
+@pytest.mark.parametrize("n,en,ar", [
+    (5, "Your first 5 study guides need no account; after that, a free account is required to make more.",
+        "أول 5 أدلة دراسة لا تحتاج إلى حساب"),
+    (12, "Your first 12 study guides need no account;", "أول 12 دليلًا دراسيًا لا تحتاج إلى حساب"),
+    (2, "Your first 2 study guides need no account;", "أول دليلين دراسيين لا يحتاجان إلى حساب"),
+    (1, "Your first study guide needs no account; after that, a free account is required to make more.",
+        "دليلك الدراسي الأول لا يحتاج إلى حساب"),
+    (0, "A free account is required to make study guides.", "يلزم إنشاء حساب مجاني لإنشاء أدلة الدراسة."),
+], ids=["5", "12", "2", "1", "0"])
+def test_the_account_rule_on_the_terms_page_is_the_real_allowance(client, monkeypatch, n, en, ar):
+    # The number is not typed into the page: it is the ANON_FREE_USES the charge logic enforces,
+    # so the page cannot go stale when the knob changes.
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", n)
+    html = _flat(_page(client, "/terms"))
+    assert en in html and ar in html
+    assert "first 3 study guides" not in html and "أول 3 أدلة" not in html
+    assert not STALE_PRICING.findall(html) and not UNLIMITED.findall(html)
+    assert not NO_ACCOUNT_UNQUALIFIED.findall(html)
+
+
+@pytest.mark.parametrize("path", ["/terms", "/privacy"])
+def test_legal_pages_never_say_no_account_is_needed_without_the_qualifier(client, path):
+    html = _page(client, path)
+    assert not NO_ACCOUNT_UNQUALIFIED.findall(html), NO_ACCOUNT_UNQUALIFIED.findall(html)
 
 
 def test_terms_keep_legacy_subscribers_able_to_cancel(client):
@@ -170,7 +233,8 @@ def test_terms_have_an_arabic_summary(client):
 
 
 def test_terms_acceptable_use_forbids_evading_limits(client):
-    assert "Do not try to get around the usage limits" in _page(client, "/terms")
+    html = _flat(_page(client, "/terms"))
+    assert "Do not try to get around the usage limits or the account requirement" in html
 
 
 # ── /privacy ─────────────────────────────────────────────────────────────────
@@ -189,8 +253,14 @@ def test_privacy_has_no_stale_claims(client):
 
 def test_privacy_discloses_usage_counters_and_free_payments(client):
     html = _page(client, "/privacy")
+    flat = _flat(html)
     assert "<strong>Usage counters:</strong>" in html
-    assert "random device\nidentifier kept in your browser, your IP address, or your account ID" in html
+    # every identifier a counter is kept against is still named...
+    assert "random device identifier stored in your browser" in flat
+    assert "your IP address, or your account ID if you are signed in" in flat
+    # ...and the page no longer calls the device counter a daily one: it is what decides when a
+    # free account becomes required, and it is kept
+    assert "when a free account becomes required" in flat and "is not reset daily" in flat
     assert "never your files, text or study guides" in html
     assert "Alimne is free and takes no payments" in html
     assert "processed by <strong>Stripe, Inc.</strong>" in html
@@ -218,9 +288,15 @@ def test_terms_and_privacy_describe_the_token_plans_when_free_mode_is_off(client
     assert "<strong>Free plan:</strong>" in terms and "<strong>Pro plan:</strong>" in terms
     assert "Alimne is free" not in terms
     assert 'lang="ar" dir="rtl"' not in terms          # the Arabic "free" summary would be false now
+    # ...and nothing of the free-mode sign-in gate leaks into the token-mode pages
+    assert "<strong>Free account:</strong>" not in terms and "need no account" not in terms
+    assert ("Do not try to get around the usage limits (for example with automated tools, "
+            "or by rotating devices or networks).") in _flat(terms)
     priv = _page(client, "/privacy")
     assert "track your monthly token balance" in priv
     assert "Alimne is free and takes no payments" not in priv
+    assert "to keep the free previews fair, we count how many are used per device" in _flat(priv)
+    assert "when a free account becomes required" not in _flat(priv)
     for promise in PRIVACY_PROMISES:                    # privacy promises hold in both modes
         assert promise in priv, promise
 
@@ -257,6 +333,8 @@ def test_shared_guide_and_404_have_no_stale_claims(client, monkeypatch):
     for html in pages:
         assert not STALE_PRICING.findall(html), STALE_PRICING.findall(html)
         assert not UNLIMITED.findall(html), UNLIMITED.findall(html)
+        # the growth CTA promises "free" and "no credit card", never "no sign-up"
+        assert not NO_ACCOUNT_UNQUALIFIED.findall(html), NO_ACCOUNT_UNQUALIFIED.findall(html)
 
 
 # ── index.html metadata + static files ───────────────────────────────────────
@@ -318,3 +396,22 @@ def test_stale_claim_patterns_catch_each_old_claim():
         assert STALE_PRICING.search(f"xx {phrase} xx"), phrase
     assert UNLIMITED.search("Unlimited study guides")
     assert not UNLIMITED.search("We do not promise unlimited use.")
+    # the old plan claim is still caught; the sign-in gate's own sentence is not
+    for phrase in ["3 guides a month", "Free: 3 guides", "get 3 guides free every month"]:
+        assert STALE_PRICING.search(f"xx {phrase} xx"), phrase
+    for fine in ["Your first 3 guides need no account.", "your first 3 study guides need no account",
+                 "You've used your 3 free guides."]:
+        assert not STALE_PRICING.search(fine), fine
+
+
+def test_no_account_pattern_catches_each_unqualified_claim_and_allows_the_qualified_one():
+    for phrase in ["and you can try it without signing in.", "Free. No card. No sign-up needed.", "no signup",
+                   "No account needed", "no login required", "use it without an account", "without sign-up",
+                   "ويمكنك تجربته دون تسجيل الدخول", "مجاني للاستخدام · بدون حساب", "لا حاجة إلى حساب",
+                   "بلا حساب", "دون حساب"]:
+        assert NO_ACCOUNT_UNQUALIFIED.search(f"xx {phrase} xx"), phrase
+    for fine in ["Your first 3 study guides need no account; after that, a free account is required to make more.",
+                 "never need an account", "Create a free account to keep going - it's still free.",
+                 "أول 3 أدلة دراسة لا تحتاج إلى حساب، وبعدها يلزم إنشاء حساب مجاني لإنشاء المزيد.",
+                 "We store a counter against your account ID if you are signed in."]:
+        assert not NO_ACCOUNT_UNQUALIFIED.search(fine), fine

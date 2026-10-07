@@ -2,8 +2,16 @@
 
 Alimne is **free for everyone**: no tokens, no credits, no paywall, no subscription upsell.
 The AI (Groq) still costs money per guide and the server is small, so free is kept safe with
-four things: fair-use daily caps, a global daily budget breaker, a generation queue, and a
-per-minute rate limit. We say "free" and "fair use". We never say "unlimited".
+five things: the sign-in gate, fair-use daily caps, a global daily budget breaker, a generation
+queue, and a per-minute rate limit. We say "free" and "fair use". We never say "unlimited".
+
+**The sign-in gate (owner's rule, 2026-10-07):** a visitor may make **3 guides without an
+account**. After those 3 they must **sign in (create a free account)** to make more. Signing in
+is free and stays free; a signed-in user has the daily account allowance (`FAIR_USER_DAILY`).
+The sample lecture stays free, uncounted and needs no account. Opening, downloading and restoring
+guides that were already made never needs an account: only making a NEW guide is gated. So we
+never say "no sign-up needed" on its own any more. The true sentence is "your first 3 guides
+need no account" (section 3, "The sign-in gate").
 
 This file is the operator's manual: the knobs, how to switch free mode off, how fair use
 works, what the server can actually carry, how to control cost, what to watch, and the
@@ -23,7 +31,10 @@ code default applies.
 | Variable | Default | What it does |
 |---|---|---|
 | `ALIMNE_FREE_MODE` | `1` (on) | `0`, `false`, `no` or `off` (any case) brings the old token system back exactly (see section 2). Anything else, or unset, is on. |
-| `FAIR_DEVICE_DAILY` | `10` | Guides per **anonymous device** (header `X-Device-Id`) per 24 h window. |
+| `ANON_FREE_USES` | `3` | The sign-in gate: guides an **anonymous device** (header `X-Device-Id`) may make before a free account is required. A **lifetime** allowance, not a daily one. `0` means an account is required from the very first guide (decided without the database, so it cannot fail open). Blank, malformed or negative: `3`. |
+| `ANON_USES_WINDOW_HOURS` | `87600` | The window the gate counter is read with (about 10 years, which is what makes the allowance a lifetime one). Set `24` and the 3 guides come back every day. `0`, negative or malformed: the default. Capped at `876000` (100 years): a window the database cannot compute would make the counter error, and an erroring counter fails open. |
+| `FAIR_ANON_IP_DAILY` | `30` | Anonymous guides per **IP address** per 24 h window, **across all devices**. This is what stops someone getting endless free guides by rotating the device id (or clearing the browser). `0` means no anonymous guides at all. Signed-in users are not counted here. |
+| `FAIR_DEVICE_DAILY` | `10` | **Retired.** It used to be the anonymous allowance per device per day; the sign-in gate replaced it. Still read, but it grants nothing in free mode (it only appears in the token-mode `/api/config` payload, unchanged). |
 | `FAIR_IP_DAILY` | `250` | Guides per **IP address** (an IPv6 address counts as its whole /64) per 24 h window. Generous on purpose: campuses, hostels and mobile carriers put hundreds of students behind one IP. |
 | `FAIR_USER_DAILY` | `40` | Guides per **signed-in user** (user id) per 24 h window. |
 | `FAIR_GLOBAL_DAILY` | `2000` | Guides across **all users** per 24 h window. This is the budget breaker. |
@@ -51,15 +62,17 @@ Change knobs off-peak when you can, and tell nobody to panic when you cannot.
 Set `ALIMNE_FREE_MODE=0` (or `false`, `no`, `off`, in any case) and redeploy/restart. The old
 behaviour returns exactly: tokens are consumed and refunded, 402 `no_tokens` / `signin_for_more`
 come back, Stripe checkout works again, signup token grants and the referral reward are promised
-and awarded again. The fair-use counters, the chat meter, the demo cache and the generation
-queue are all off in token mode.
+and awarded again. The sign-in gate, the fair-use counters, the chat meter, the demo cache and the
+generation queue are all off in token mode (it has its own, older rule: 2 anonymous previews per
+device, then 402 `signin_for_more`).
 
 What follows the switch automatically:
 
 - `/terms` and `/privacy` use the very same parsed value as the credit logic (one parser, the
   `FREE_MODE` constant). When free mode is off they describe the token plans again (Free plan /
-  Pro plan); otherwise they say Alimne is free. The page can never contradict what the app is
-  doing, whichever off-value you type. Covered by `tests/test_copy_truth.py`.
+  Pro plan); otherwise they say Alimne is free and state the account rule with the real
+  `ANON_FREE_USES` number. The page can never contradict what the app is doing, whichever
+  off-value you type. Covered by `tests/test_copy_truth.py`.
 
 What does **not** follow (static files, they cannot read the environment):
 
@@ -71,8 +84,8 @@ Never touched by free mode, in either direction: `/api/stripe/webhook` and
 `/api/stripe/portal`. People who subscribed before the change can always manage or cancel.
 
 Use the rollback for a real emergency only. For a cost spike the right tool is usually to
-lower `FAIR_GLOBAL_DAILY` or `FAIR_DEVICE_DAILY` (section 5), which keeps the product free
-and degrades gracefully.
+lower `FAIR_GLOBAL_DAILY`, `FAIR_ANON_IP_DAILY` or `ANON_FREE_USES` (section 5), which keeps
+the product free and degrades gracefully.
 
 ---
 
@@ -81,21 +94,40 @@ and degrades gracefully.
 **Counters.** Each generation (`/api/summarize-stream`, `/api/youtube`, `/api/summarize-text`,
 non-demo) is charged against **every applicable counter**:
 
-| Who | Counters charged |
+| Who | Counters charged, in this order |
 |---|---|
-| Anonymous visitor | `fair:dev:<device>` + `fair:ip:<ip>` + `fair:global:anon` + `fair:global` |
+| Anonymous visitor | `gate:dev:<device>` + `fair:anonip:<ip>` + `fair:ip:<ip>` + `fair:global:anon` + `fair:global` |
+| Anonymous, no valid device id | `gate:noid:<ip>` + `fair:anonip:<ip>` + `fair:ip:<ip>` + `fair:global:anon` + `fair:global` |
 | Signed-in user | `fair:user:<user id>` + `fair:ip:<ip>` + `fair:global` |
 
-`fair:global:anon` is the anonymous slice of the global budget (`FAIR_ANON_SHARE_PCT`, 60% by
-default). Anonymous traffic can only ever use that slice, so the other 40% of `fair:global` is
-kept for signed-in users. When the slice is used up an anonymous visitor gets the `fair_use_device`
-message ("sign in free for a higher daily allowance"), which is true: signed-in users still have
-room. For an IPv6 client `<ip>` is its /64, not the single address (rotating inside a /64 buys
+**The sign-in gate.** `gate:dev:<device>` is the visitor's free guides: limit `ANON_FREE_USES`
+(3), read with the long window `ANON_USES_WINDOW_HOURS` (about 10 years), so it does **not**
+reset after a day. The 4th guide is refused with **401 `signin_required`**. A signed-in request
+never touches a gate key and is never refused by it, whatever the device did before signing in.
+
+- **No device id.** A request without a valid `X-Device-Id` (a script, or a browser with storage
+  switched off) is counted under `gate:noid:<ip>`: the same 3, per IP, per 24 h. Leaving the
+  header out can never dodge the gate.
+- **Rotating device ids.** A new id gets a new 3, so `fair:anonip:<ip>` caps anonymous guides per
+  IP at `FAIR_ANON_IP_DAILY` (30) a day across all devices. When it is used up the answer is also
+  `signin_required`: an account is the way forward, and accounts are not counted there.
+- **The anonymous pool.** `fair:global:anon` is the anonymous slice of the global budget
+  (`FAIR_ANON_SHARE_PCT`, 60% by default). Anonymous traffic can only ever use that slice, so the
+  other 40% of `fair:global` is kept for signed-in users. When the slice is used up an anonymous
+  visitor gets `signin_required` too, which is true: signed-in users still have room.
+- **A refusal never burns a free guide.** If a later counter refuses (the network, the pool, the
+  global budget), the gate unit that was taken first is given back with the others.
+- **What the client is told.** `/api/config` reports the allowance and what this device has left;
+  the SSE `done` event of an anonymous guide carries `anon_remaining` (see "Config the client
+  reads" below).
+
+For an IPv6 client `<ip>` is its /64, not the single address (rotating inside a /64 buys
 nothing). The counter lookups of one request share a 3-second time budget; if the database is
 slow the rest fail open instead of pinning a web thread.
 
-**The demo.** "Try a sample" runs on a fixed lecture, so it is made **once per language** and
-cached in memory for 6 hours. Every later demo is a fresh, independent job (own 15-minute life,
+**The demo.** "Try a sample" is never gated: it needs no account, takes none of the visitor's 3
+free guides and works even with `ANON_FREE_USES=0`. It runs on a fixed lecture, so it is made
+**once per language** and cached in memory for 6 hours. Every later demo is a fresh, independent job (own 15-minute life,
 own "Delete now") served from the cache at **zero AI cost and zero fair-use units**. The one real
 run per language takes one unit from `fair:global`, so the breaker bounds it, and it is refused
 with `busy_today` when the breaker has tripped and nothing is cached. A failed or partial run is
@@ -107,12 +139,16 @@ Chat also stops with `busy_today` once the global budget is used up (it reads `f
 does not spend from it). A failed question gives its unit back.
 
 **Storage.** The counters reuse the existing durable RPCs `anon_consume(p_key, p_limit,
-p_window_hours=24)`, `anon_remaining` and `anon_refund(p_key)` (migrations 009 and 012) with the new
-key prefixes above. Rows live in `public.anon_usage`. No new migration is needed.
+p_window_hours)`, `anon_remaining` and `anon_refund(p_key)` (migrations 009 and 012) with the
+key prefixes above (`fair:*` and `gate:*`). Rows live in `public.anon_usage`. No new migration is
+needed, for the gate either.
 
-**Windows.** A counter's 24 h window starts at its first use and resets 24 h later (that is how
-`anon_consume` works). It is a fixed window per key, not a sliding one. For `fair:global` this
-means the daily budget resets at an arbitrary hour, not at midnight.
+**Windows.** A `fair:*` counter's 24 h window starts at its first use and resets 24 h later (that
+is how `anon_consume` works). It is a fixed window per key, not a sliding one. For `fair:global`
+this means the daily budget resets at an arbitrary hour, not at midnight. The gate counter
+`gate:dev:*` works the same way with the long window, so in practice it never resets. The window
+is an argument of every call, not something stored in the row: changing `ANON_USES_WINDOW_HOURS`
+takes effect on the next request.
 
 **Order.** Validation first (a bad file never costs anyone a slot or a count), then a check that
 there is a slot or a seat in line (a full house answers `busy` before anything is charged and
@@ -120,34 +156,47 @@ before the YouTube probe or URL fetch), then charge all counters, then queue for
 slot. If one counter is exhausted, the ones already taken are rolled back (`anon_refund`) and the
 request is refused.
 
-**Refunds.** The counters are given back exactly once (the existing single-owner charge/refund
-machinery) when the **server** fails or the visitor leaves **before any paid AI work started**:
+**Refunds.** The counters, the visitor's free guide included, are given back exactly once (the
+existing single-owner charge/refund machinery) when the **server** fails or the visitor leaves
+**before any paid AI work started**:
 validation after the charge, `busy`, a failed or hollow guide, the visitor closing the page while
 queued or while the file is still being read. Once the first paid AI call (the overview pass, or
 the Whisper transcription) has started, the units are **spent**: closing the connection later does
 not refund them. Otherwise a script could run full-cost generations for free by dropping the
-socket just before the last event, with every counter, the global breaker included, still at
-zero. A server-side failure after paid work (an error, a guide with no notes) still refunds,
+socket just before the last event, with every counter, the gate and the global breaker included,
+still at zero. A server-side failure after paid work (an error, a guide with no notes) still refunds,
 because the visitor did nothing wrong and the failure cannot be chosen from outside.
 
 **Fail open.** If the RPC is missing or errors, the request is allowed and the problem is logged.
 A database hiccup must never block a real student. The flip side, and a launch risk: **if the
-RPCs are missing the caps silently do not apply.** Verify them before launch (section 8).
+RPCs are missing the caps silently do not apply, and neither does the sign-in gate** (anonymous
+visitors would simply keep going). Verify them before launch (section 8) and watch the log for
+`failing open`. The one exception is `ANON_FREE_USES=0`: that refusal is decided without the
+database.
 
 **Refusals** (JSON `{error, code, retry_after_s?}`):
 
 | HTTP | `code` | Meaning |
 |---|---|---|
-| 429 | `fair_use_device` | This anonymous device used its daily allowance, or the anonymous slice of the global budget is used up. The message tells the visitor to sign in free for a higher allowance. This is the signup funnel. |
-| 429 | `fair_use_ip` | This IP used its daily allowance (shared networks can hit it). |
+| 401 | `signin_required` | **The sign-in gate.** This anonymous visitor used the free guides (`gate:*`), or this IP used its anonymous allowance for today (`fair:anonip:*`), or the anonymous slice of the global budget is used up (`fair:global:anon`). The body also carries `free_uses` (the `ANON_FREE_USES` number). The message says: "You've used your 3 free guides. Create a free account to keep going - it's still free." (Arabic for an Arabic request, always with the real number). This is the signup funnel. |
+| 429 | `fair_use_ip` | This IP used its daily allowance, signed-in and anonymous together (shared networks can hit it). |
 | 429 | `fair_use_user` | This signed-in account used its daily allowance (guides, or chat questions). |
 | 503 | `busy_today` | The global daily budget is used up. Everyone (and chat) is refused until the window resets. |
 | 503 | `busy` | **Before the stream:** no free slot and no seat in line. Nothing was charged. The JSON carries `retry_after_s`. |
 | 200 | `busy` | **Inside the stream:** the request waited in line and `GEN_QUEUE_WAIT_S` ran out. It arrives as an SSE `error` event on an HTTP 200 response, so it never shows in Render's 5xx metric. Its units are refunded. |
 | 429 | (rate limit) | More than `RATE_SUMMARIZE_PER_MIN` requests from one IP in a minute (`RATE_PRECHECK_PER_MIN` for the YouTube probe and URL fetch; 10 a minute per user for chat). |
 
-No `402` is returned in free mode. SSE `done` events keep their shape; `tokens_remaining` may be
-missing or null and the client tolerates both.
+No `402` is returned in free mode. `fair_use_device` (429) is retired: the server never sends it
+any more, `signin_required` replaced it (the client still understands the old code). The 401 is
+not an auth error: its code is never `auth_required`, `token_expired` or `token_invalid`, and a
+request that carries a bad token is still answered by the auth check first. An older cached
+client treats any 401 from an anonymous request as "open the sign-in dialog", which is the right
+outcome.
+
+SSE `done` events keep their shape; `tokens_remaining` may be missing or null and the client
+tolerates both. For an **anonymous** guide in free mode `done` adds `anon_remaining`: the free
+guides this device has left (2, 1, 0). It is best effort: it is left out when the counter could
+not be read, for signed-in users, for the demo and in token mode.
 
 **Queue.** A process-wide `BoundedSemaphore` of `min(GEN_MAX_CONCURRENT, WEB_THREADS - 1)` slots
 wraps the generation work. When all slots are busy the request may take one of the (at most
@@ -157,9 +206,13 @@ line. The line is strictly first come, first served: a later arrival never passe
 one, so the place the student is told is the place they get. The slot is released in a `finally`
 on every path: done, error, client disconnect.
 
-**Config the client reads.** `/api/config` adds `free_mode` and
-`fair_use {device_daily, user_daily}`. `/api/auth/me` adds `free_mode: true`. In free mode
-`/api/stripe/checkout` answers `410 free_now` and creates no Stripe session.
+**Config the client reads.** In free mode `/api/config` returns `free_mode: true`,
+`anon_free_limit` and `signin_after` (both the `ANON_FREE_USES` number), `anon_remaining` (the free
+guides this device has left: a read-only lookup of its gate counter that never blocks the page,
+falling back to the full allowance when the database is slow or down) and
+`fair_use {anon_free_uses, user_daily, device_daily}`. `device_daily` is kept only so an older
+cached client does not break; it equals `anon_free_uses`. `/api/auth/me` adds `free_mode: true`.
+In free mode `/api/stripe/checkout` answers `410 free_now` and creates no Stripe session.
 
 ---
 
@@ -182,7 +235,8 @@ Guides live in an in-memory job store for 15 minutes.
   slot is taken, so the gate does not count them. They are bounded by their own per-IP limit
   (`RATE_PRECHECK_PER_MIN`, 5 a minute) and by the full-house check, and each network call has
   its own timeout, but there is no total deadline on a slow YouTube. Watch for it in the first
-  week.
+  week. (The YouTube probe also runs before the sign-in gate is checked, so a visitor who is past
+  their free guides waits for the probe before being asked to sign in.)
 - **Peak-hour arithmetic.** Throughput is roughly `slots / seconds-per-guide`. Example: if a guide
   takes about 60 s, 2 slots serve about 120 guides an hour. `FAIR_GLOBAL_DAILY=2000` looks
   comfortable, but traffic is peaky (exam season, evenings): in practice the slots, not the
@@ -217,7 +271,10 @@ Keep the code comments honest (`_REHYDRATE_SLOTS` is written for 8).
 
 ## 5. Cost-control levers (cheapest and gentlest first)
 
-1. **`FAIR_DEVICE_DAILY`** (anonymous allowance). Lowering it pushes more visitors to sign in.
+1. **`ANON_FREE_USES`** (free guides before sign-in) and **`FAIR_ANON_IP_DAILY`** (anonymous
+   guides per IP a day). Lowering them pushes more visitors to sign in; `ANON_FREE_USES=0` asks
+   for an account from the first guide (the sample lecture still works without one). If you
+   change `ANON_FREE_USES`, update the client copy that names the number (section 7).
 2. **`FAIR_USER_DAILY`** and **`FAIR_IP_DAILY`**.
 3. **`FAIR_GLOBAL_DAILY`**, the breaker. Every guide, and the one real demo run per language,
    takes a unit from it, so guide spend is at most `FAIR_GLOBAL_DAILY x cost-per-guide` a day.
@@ -242,12 +299,12 @@ straight away (after the restart the variable change causes).
 | Where | Look at | Worry when |
 |---|---|---|
 | Render > Metrics | CPU, memory, restarts, 5xx rate, response time | CPU above about 80% for minutes; memory above about 400 of 512 MB; any restart or out-of-memory kill |
-| Render > Logs | Search for these exact phrases. `failing open` (a counter could not be read: the caps are not applying), `fair-use refusal code=` (one line for every `fair_use_*` / `busy_today` refusal, with the code), `generation busy` (one line for every `busy`, whether it came before the stream as a 503 or inside it), `passed 80% of its daily limit` and `is used up` (a global pool: the cue to look at the Groq bill), `time budget` (the database was slow), `client left after the AI work started` (units kept), and Groq 429s | Any `failing open` line at launch; many `generation busy` lines in one hour; the `80%` line before evening |
+| Render > Logs | Search for these exact phrases. `failing open` (a counter could not be read: the caps are not applying), `fair-use refusal code=` (one line for every `signin_required` / `fair_use_*` / `busy_today` refusal, with the code), `generation busy` (one line for every `busy`, whether it came before the stream as a 503 or inside it), `passed 80% of its daily limit` and `is used up` (a global pool: the cue to look at the Groq bill), `time budget` (the database was slow), `client left after the AI work started` (units kept), and Groq 429s | Any `failing open` line at launch; many `generation busy` lines in one hour; the `80%` line before evening |
 | Groq console | Requests and tokens per day, 429s, spend against your limit | Spend trending past the limit you set; many 429s (raise the Groq tier or lower concurrency) |
 | Supabase > Auth | Signups per day, provider mix (Google vs email), email errors and rate-limit errors in Auth logs | Signups fail or confirmation emails do not arrive (section 8, custom SMTP) |
 | Supabase > SQL | The queries below | `fair:global` near its limit before evening; one device or IP far above the rest |
 | `/admin` (existing dashboard) | Usage events and visit stats, if migrations 008 and 011 are applied | Guides per day versus visits (conversion) |
-| The funnel | `fair_use_device` refusals versus new signups the same day | Many device refusals and few signups: the sign-in prompt is not converting |
+| The funnel | `fair-use refusal code=signin_required` lines versus new signups the same day | Many sign-in refusals and few signups: the sign-in prompt is not converting, or sign-up itself is broken (confirmation emails, Google OAuth: section 8) |
 
 Read-only queries for the Supabase SQL editor:
 
@@ -259,15 +316,23 @@ select proname from pg_proc where proname in ('anon_consume','anon_remaining','a
 select key, count, window_start, last_at from public.anon_usage
 where key in ('fair:global', 'fair:global:anon');
 
--- heaviest devices / IPs / users / chat users in the current windows
+-- heaviest IPs / users / chat users in the current windows
 select key, count, last_at from public.anon_usage
-where key like 'fair:dev:%' or key like 'fair:ip:%' or key like 'fair:user:%' or key like 'fair:chat:%'
+where key like 'fair:anonip:%' or key like 'fair:ip:%' or key like 'fair:user:%' or key like 'fair:chat:%'
 order by count desc limit 20;
+
+-- the sign-in gate: how many devices have started, and how many have used all their free guides
+-- (replace 3 with your ANON_FREE_USES)
+select count(*) as devices, count(*) filter (where count >= 3) as at_the_gate
+from public.anon_usage where key like 'gate:dev:%';
 ```
 
 Housekeeping (optional, run by hand now and then): counters are never purged automatically. Old
 `fair:` rows hold only a count and timestamps, but there is no reason to keep them forever (the
-privacy page says old counters may be deleted at any time).
+privacy page says old counters may be deleted at any time). The query below only touches `fair:`
+rows, on purpose: **do not delete `gate:` rows.** A deleted `gate:dev:` row hands that device its
+free guides back. (The `fair:dev:` rows left over from before the gate are unused and are cleaned
+up by the same query.)
 
 ```sql
 delete from public.anon_usage
@@ -284,15 +349,23 @@ if you ever set `ALIMNE_FREE_MODE=0`).
 
 | Place | Says |
 |---|---|
-| `/terms`, `/privacy` (`app.py`) | Free, fair use, limits may change, no unlimited promise, legacy subscribers can manage or cancel in the app, Stripe for them, usage counters disclosed. Follow `ALIMNE_FREE_MODE`. |
+| `/terms`, `/privacy` (`app.py`) | Free; your first 3 study guides need no account, after that a free account is required (the number is the real `ANON_FREE_USES`, never typed in); fair-use daily limits apply to accounts; limits may change; no unlimited promise; legacy subscribers can manage or cancel in the app, Stripe for them; usage counters disclosed, including that the device counter is not a daily one. Follow `ALIMNE_FREE_MODE`. |
+| The sign-in refusal (`_signin_required_text` in `app.py`) | "You've used your 3 free guides. Create a free account to keep going - it's still free.", English and Arabic, with the real number (singular and zero forms included). |
 | In-app Terms (`TERMS_*` in `frontend/src/App_dev.jsx`) | The same promises as `/terms` and `/privacy`, in English and Arabic, including the opt-in sharing and the usage counters. `tests/test_free_mode_client.py` checks both languages say the same things and scans the Arabic copy for token, plan, price and "unlimited" claims. |
 | `/s/<slug>` shared guide and its 404 | "Make your own study guide - free" growth call to action with UTM tags, English and Arabic. |
 | `frontend/index.html` and `dist/index.html` | Title and meta tags for a free product. `dist/` is committed and Render does not build it, so both files must carry the same tags. |
 | `frontend/public/og.png` and `dist/og.png` | The social preview picture. The meta tags point at `og.png?v=free` so WhatsApp, X and LinkedIn refetch it instead of showing the cached old one. |
-| `tests/test_copy_truth.py` | Fails on stale plan claims (free trial, 3 tokens, Pro price, 30 guides), on "unlimited", on storage claims, on a changed privacy promise, and on the old `og.png` coming back. |
+| `tests/test_copy_truth.py` | Fails on stale plan claims (free trial, 3 tokens, Pro price, 30 guides), on "unlimited", on an unqualified "no sign-up / no account needed" claim on the server-rendered pages, on storage claims, on a changed privacy promise, and on the old `og.png` coming back. |
+| `tests/test_signin_gate.py` | The gate itself: 3 guides then 401, the lifetime window, the counters and their order, refunds, fail open, the demo, `/api/config`, the refusal text, token mode untouched, the knobs. |
 
 Rule: if you change the limits or the counters, update `/privacy` (it describes the counters)
 and run `python -m pytest -q`.
+
+Rule for the number: the server-rendered pages and the refusal read `ANON_FREE_USES`, so they
+follow the knob by themselves. The **static** client copy does not (the React strings read
+`/api/config`, but `index.html` meta tags and `og.png` cannot). If you change `ANON_FREE_USES`,
+check every place that says "3" by hand, and never ship "no sign-up needed" without "for your
+first 3 guides".
 
 ---
 
@@ -309,7 +382,9 @@ Do these before announcing, in this order.
 **Supabase**
 - [ ] Run the RPC check from section 6. All three (`anon_consume`, `anon_remaining`,
       `anon_refund`) must exist, or fair use fails open and does nothing.
-- [ ] **Custom SMTP for email sign-ups.** Supabase's built-in email sender is for testing only
+- [ ] **Custom SMTP for email sign-ups. This is a blocker now:** after 3 guides a visitor MUST
+      sign up to go on, so a sign-up that does not work is a dead end. Supabase's built-in email
+      sender is for testing only
       (very low hourly limit, not meant for real users). Without your own SMTP, sign-up
       confirmation emails stall exactly when a class signs up together. Set up SMTP (for example
       Resend) on a verified `alimne.app` sender (SPF and DKIM), raise the Auth email rate limit,
@@ -353,12 +428,17 @@ Do these before announcing, in this order.
 **Smoke test after the deploy**
 - [ ] `curl -s https://alimne.app/api/config` shows `"free_mode": true` and the `fair_use`
       numbers.
-- [ ] Generate a guide with no sign-in. No token message anywhere.
-- [ ] Sign in and generate again. No token or upgrade prompt, and the account allowance is the
-      higher one.
+- [ ] `curl -s https://alimne.app/api/config` also shows `"signin_after": 3` and
+      `"anon_free_limit": 3`.
+- [ ] In a fresh private window make 3 guides with no sign-in. No token message anywhere. The
+      4th asks you to create a free account (HTTP 401 `signin_required`), and the 3 guides you
+      made still open and download.
+- [ ] "Try a sample" still works in that same window, with no account.
+- [ ] Sign in and generate again. No token or upgrade prompt, no sign-in prompt, and the account
+      allowance is the daily one.
 - [ ] Open `/terms`, `/privacy` and a shared guide `/s/<slug>`: free wording, English and Arabic.
-- [ ] (Optional) set `FAIR_DEVICE_DAILY=2` for a test, hit the cap and read the sign-in message,
-      then set it back.
+- [ ] (Optional) set `ANON_FREE_USES=1` for a test, make one guide, read the sign-in message on
+      the second, then set it back. (Each change restarts the service.)
 - [ ] Tap "Try a sample" twice: the second one appears instantly (served from the cache) and
       the logs show no second AI run.
 - [ ] Look at Render > Logs for `failing open` (there should be none) and note that the
@@ -374,16 +454,35 @@ Do these before announcing, in this order.
 
 - The PDF footer ("Made with alimne.app - turn any lecture into a study guide") and the print
   and view pages make no pricing claim and were left alone.
-- Numbers in the Arabic and English copy are deliberately absent ("daily limits", not "10 a
-  day"): the caps are env knobs and will change, and the pages must not go stale when they do.
+- The daily caps are deliberately absent from the Arabic and English copy ("daily limits", not
+  "40 a day"): they are env knobs and will change, and the pages must not go stale when they do.
+  The one number that does appear is the free-guide allowance ("your first 3 guides"), because it
+  is the product rule; the server-rendered pages take it from `ANON_FREE_USES` (section 7).
 
 ## 10. Known limits (so nobody is surprised)
 
+- **The sign-in gate counts devices, and a device is a random id kept in the browser.** A visitor
+  who clears the site data, opens a private window or switches browser gets a new id and 3 more
+  guides. That is bounded, not open-ended: `FAIR_ANON_IP_DAILY` (30 anonymous guides per IP a
+  day, across all devices) and then the anonymous slice of the global budget. A hard, per-person
+  limit is only possible with an account, which is exactly what the gate asks for.
+- **A busy shared network can meet the gate early.** `FAIR_ANON_IP_DAILY` is per IP: on a campus
+  or hostel behind one address, once 30 anonymous guides were made in a day the next anonymous
+  visitor is asked to sign in before using their own 3. Signed-in users are not affected. Raise
+  the knob if the refusal log shows this happening to real classes.
+- **A request with no device id is counted per IP, per day.** That is a script, or a browser with
+  storage switched off (the normal client always sends an id). Its 3 guides come back the next
+  day, and it shares them with everybody else on that IP who sends no id.
+- **The gate fails open.** If the database cannot answer, anonymous visitors are let through
+  (and the log says `failing open`). Section 3 explains why, and what to watch.
+- **Everyone starts at 3 on the day the gate ships.** The gate uses new counter keys, so guides
+  made before it (under the old daily device counter) are not counted against the 3.
 - **Client IP trust.** The per-IP counters and rate limits use the address from the
   `CF-Connecting-IP` header when `CF_ORIGIN_SECRET` is not set (the existing behaviour: Render's
   own edge sits behind Cloudflare and stamps it). If the header ever reaches the app unreplaced,
   one client could pose as many IPs and the per-IP caps (not the global ones) would stop
-  working. Two things limit the damage: anonymous traffic as a whole is capped by the anonymous
+  working, `FAIR_ANON_IP_DAILY` included: together with a rotating device id that is a way past
+  the sign-in gate, bounded only by the anonymous slice of the global budget. Two things limit the damage: anonymous traffic as a whole is capped by the anonymous
   slice of the global budget, and the rate-limit table prunes expired entries so a flood of fake
   addresses cannot grow memory without end. It was left unchanged on purpose: if the header were
   distrusted without checking, every student would share one or two Cloudflare addresses and

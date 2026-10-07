@@ -7,8 +7,9 @@ limit. This file pins the SERVER side of that:
 
   A. a generation spends NO token and never answers 402 (anonymous or signed in);
      the demo stays free and unmetered
-  B. device / user / ip / global caps refuse with the right code and status, say
-     "sign in free" to an anonymous visitor, and roll back the counters already taken
+  B. the sign-in gate (anonymous) and the user / ip / global caps refuse with the right
+     code and status, tell an anonymous visitor to create a free account, and roll back
+     the counters already taken (the gate itself is pinned in tests/test_signin_gate.py)
   C. every counter FAILS OPEN (no database, RPC missing / raising / odd reply)
   D. exactly-once refunds: failure, hollow guide, client disconnect, success
   E. the generation semaphore: wait + 'queued' events, 'busy' + refund on timeout,
@@ -207,8 +208,9 @@ def _has_arabic(s):
 
 def _keys(dev=DEV, ip=IP):
     """Every counter an ANONYMOUS generation takes one unit from, in charge order:
-    the device, the IP, the anonymous slice of the global budget, the global budget."""
-    return [f"fair:dev:{dev}", f"fair:ip:{ip}", "fair:global:anon", "fair:global"]
+    the sign-in gate (the device's free guides), anonymous guides from this IP today,
+    the IP, the anonymous slice of the global budget, the global budget."""
+    return [f"gate:dev:{dev}", f"fair:anonip:{ip}", f"fair:ip:{ip}", "fair:global:anon", "fair:global"]
 
 
 def _post_text(client, device=DEV, headers=None, **body):
@@ -241,7 +243,7 @@ def test_anonymous_generation_spends_no_token(client, auth_on, sb, llm, no_token
     done = evs[-1]
     assert done["step"] == "done"
     assert done.get("tokens_remaining") is None          # omitted: there is no balance
-    assert sb.counts == {k: 1 for k in _keys()}          # device + ip + global, nothing else
+    assert sb.counts == {k: 1 for k in _keys()}          # gate + ip + global counters, nothing else
     assert no_tokens == []
 
 
@@ -255,13 +257,14 @@ def test_signed_in_generation_spends_no_token(client, auth_on, sb, llm, no_token
 
 
 def test_no_402_is_ever_returned_in_free_mode(client, auth_on, sb, llm, no_tokens):
-    # An anonymous device that used to hit 'signin_for_more' after 2 previews now
-    # just keeps going until its fair-use allowance, with no 402 on the way.
-    for _ in range(appmod.FAIR_DEVICE_DAILY):
+    # An anonymous device makes its free guides and is then asked to sign in: a 401
+    # 'signin_required', never the token system's 402 (and never a token touched).
+    for _ in range(appmod.ANON_FREE_USES):
         r = _post_text(client)
         assert r.status_code == 200 and _sse_events(r)[-1]["step"] == "done"
     r = _post_text(client)
-    assert r.status_code == 429 and r.get_json()["code"] == "fair_use_device"
+    assert r.status_code == 401 and r.get_json()["code"] == "signin_required"
+    assert no_tokens == []
 
 
 def test_file_and_text_done_events_keep_their_shape(client, auth_on, sb, llm):
@@ -272,10 +275,10 @@ def test_file_and_text_done_events_keep_their_shape(client, auth_on, sb, llm):
 
 
 def test_demo_is_free_for_the_visitor(client, auth_on, sb, llm, no_tokens, monkeypatch):
-    # The visitor's own counters (device, IP, anonymous slice) are all exhausted — the demo does
-    # not care and takes none of them. A real (uncached) run costs real AI money, so it takes one
-    # unit from the GLOBAL budget only (see J2: cached copies cost nothing at all).
-    for k in _keys()[:3]:
+    # The visitor's own counters (the sign-in gate, the IP ones, the anonymous slice) are all
+    # exhausted — the demo does not care and takes none of them. A real (uncached) run costs real
+    # AI money, so it takes one unit from the GLOBAL budget only (see J2: cached copies cost nothing).
+    for k in _keys()[:4]:
         sb.counts[k] = 10 ** 6
     before = dict(sb.counts)
     r = client.post("/api/summarize-text", json={"demo": True, "language": "en"}, headers={"X-Device-Id": DEV})
@@ -285,23 +288,24 @@ def test_demo_is_free_for_the_visitor(client, auth_on, sb, llm, no_tokens, monke
     assert no_tokens == []
 
 
-def test_anonymous_without_a_device_id_is_counted_per_ip_at_the_device_allowance(client, auth_on, sb, llm):
+def test_anonymous_without_a_device_id_is_counted_per_ip_at_the_gate(client, auth_on, sb, llm):
     r = _post_text(client, device=None)
     assert _sse_events(r)[-1]["step"] == "done"
-    assert sb.counts == {f"fair:dev:noid-{IP}": 1, f"fair:ip:{IP}": 1, "fair:global:anon": 1, "fair:global": 1}
+    assert sb.counts == {f"gate:noid:{IP}": 1, f"fair:anonip:{IP}": 1, f"fair:ip:{IP}": 1,
+                         "fair:global:anon": 1, "fair:global": 1}
 
 
 def test_a_malformed_device_id_counts_as_none(client, auth_on, sb, llm):
     r = _post_text(client, device="bad id!")
     assert _sse_events(r)[-1]["step"] == "done"
-    assert f"fair:dev:noid-{IP}" in sb.counts
+    assert f"gate:noid:{IP}" in sb.counts
 
 
 def test_unknown_ip_is_not_lumped_into_one_shared_counter(monkeypatch, sb):
     monkeypatch.setattr(appmod, "_client_ip", lambda: "unknown")
     with appmod.app.test_request_context("/", headers={"X-Device-Id": DEV}):
         charge, err = appmod._charge_credit(None, appmod.request)
-    assert err is None and charge.fair_keys == (f"fair:dev:{DEV}", "fair:global:anon", "fair:global")
+    assert err is None and charge.fair_keys == (f"gate:dev:{DEV}", "fair:global:anon", "fair:global")
 
 
 def test_validation_errors_spend_nothing_and_never_wait_for_a_slot(client, auth_on, sb, monkeypatch):
@@ -325,23 +329,26 @@ def test_validation_errors_spend_nothing_and_never_wait_for_a_slot(client, auth_
 # ── B. the caps ──────────────────────────────────────────────────────────────────
 ANON_CASES = [
     # exhausted counter, refusal code, status, counters already taken that must be rolled back
-    ("dev",    "fair_use_device", 429, []),
-    ("ip",     "fair_use_ip",     429, ["dev"]),
-    ("anon",   "fair_use_device", 429, ["dev", "ip"]),      # the anonymous slice of the global budget
-    ("global", "busy_today",      503, ["dev", "ip", "anon"]),
+    ("gate",   "signin_required", 401, []),                         # the device's free guides are used
+    ("anonip", "signin_required", 401, ["gate"]),                   # anonymous guides from this IP today
+    ("ip",     "fair_use_ip",     429, ["gate", "anonip"]),
+    ("anon",   "signin_required", 401, ["gate", "anonip", "ip"]),   # the anonymous slice of the global budget
+    ("global", "busy_today",      503, ["gate", "anonip", "ip", "anon"]),
 ]
 
 
 @pytest.mark.parametrize("which,code,status,taken_before", ANON_CASES, ids=[c[0] for c in ANON_CASES])
 def test_exhausted_counter_refuses_and_rolls_back_the_ones_already_taken(
         client, auth_on, sb, llm, no_tokens, which, code, status, taken_before):
-    key = {"dev": f"fair:dev:{DEV}", "ip": f"fair:ip:{IP}", "anon": "fair:global:anon", "global": "fair:global"}
+    key = {"gate": f"gate:dev:{DEV}", "anonip": f"fair:anonip:{IP}", "ip": f"fair:ip:{IP}",
+           "anon": "fair:global:anon", "global": "fair:global"}
     sb.counts[key[which]] = 10 ** 6                          # far past any cap
     r = _post_text(client)
     assert r.status_code == status
     d = r.get_json()
     assert d["code"] == code and d["error"]
-    assert d["code"] not in ("no_tokens", "signin_for_more")
+    assert d["code"] not in ("no_tokens", "signin_for_more", "fair_use_device")
+    assert d.get("free_uses") == (appmod.ANON_FREE_USES if code == "signin_required" else None)
     # the exhausted counter was not touched; every one taken before it was given back
     assert sb.counts[key[which]] == 10 ** 6
     assert all(sb.counts.get(key[w], 0) == 0 for w in key if w != which)
@@ -364,9 +371,12 @@ def test_user_counter_refusal_and_rollback(client, auth_on, sb, llm, no_tokens):
 
 @pytest.mark.parametrize("name,post", ENDPOINTS, ids=[e[0] for e in ENDPOINTS])
 def test_every_generation_endpoint_enforces_the_caps(client, auth_on, sb, llm, name, post):
-    sb.counts[f"fair:dev:{DEV}"] = 10 ** 6
+    sb.counts[f"gate:dev:{DEV}"] = 10 ** 6
     r = post(client)
-    assert r.status_code == 429 and r.get_json()["code"] == "fair_use_device"
+    assert r.status_code == 401 and r.get_json()["code"] == "signin_required"
+    sb.counts = {f"fair:ip:{IP}": 10 ** 6}
+    r = post(client)
+    assert r.status_code == 429 and r.get_json()["code"] == "fair_use_ip"
 
 
 def _status(resp):
@@ -377,13 +387,17 @@ def _status(resp):
 
 
 def test_caps_are_the_configured_knobs(client, auth_on, sb, llm, monkeypatch):
-    monkeypatch.setattr(appmod, "FAIR_DEVICE_DAILY", 2)
-    assert [_status(_post_text(client)) for _ in range(3)] == [200, 200, 429]
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 2)
+    assert [_status(_post_text(client)) for _ in range(3)] == [200, 200, 401]
     monkeypatch.setattr(appmod, "FAIR_USER_DAILY", 1)
     h = {"Authorization": f"Bearer {_tok('user-9')}"}
     assert [_status(_post_text(client, headers=h)) for _ in range(2)] == [200, 429]
     sb.counts = {}
-    monkeypatch.setattr(appmod, "FAIR_DEVICE_DAILY", 10)
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 3)
+    monkeypatch.setattr(appmod, "FAIR_ANON_IP_DAILY", 2)
+    assert [_status(_post_text(client, device=f"device-cccc-000{i}")) for i in range(3)] == [200, 200, 401]
+    sb.counts = {}
+    monkeypatch.setattr(appmod, "FAIR_ANON_IP_DAILY", 30)
     monkeypatch.setattr(appmod, "FAIR_IP_DAILY", 1)
     assert [_status(_post_text(client, device=f"device-bbbb-000{i}")) for i in range(2)] == [200, 429]
     sb.counts = {}
@@ -405,7 +419,8 @@ def test_counters_use_the_documented_rpc_and_window(monkeypatch, sb):
     with appmod.app.test_request_context("/", headers={"X-Device-Id": DEV}):
         charge, err = appmod._charge_credit(None, appmod.request)
     assert err is None
-    assert seen == [("anon_consume", {"p_key": f"fair:dev:{DEV}", "p_limit": 10, "p_window_hours": 24}),
+    assert seen == [("anon_consume", {"p_key": f"gate:dev:{DEV}", "p_limit": 3, "p_window_hours": 87600}),
+                    ("anon_consume", {"p_key": f"fair:anonip:{IP}", "p_limit": 30, "p_window_hours": 24}),
                     ("anon_consume", {"p_key": f"fair:ip:{IP}", "p_limit": 250, "p_window_hours": 24}),
                     ("anon_consume", {"p_key": "fair:global:anon", "p_limit": 1200, "p_window_hours": 24}),
                     ("anon_consume", {"p_key": "fair:global", "p_limit": 2000, "p_window_hours": 24})]
@@ -413,7 +428,7 @@ def test_counters_use_the_documented_rpc_and_window(monkeypatch, sb):
 
 
 def test_refusal_text_is_bilingual_and_never_says_unlimited(client, auth_on, sb, llm):
-    for code, key in (("fair_use_device", f"fair:dev:{DEV}"), ("fair_use_ip", f"fair:ip:{IP}"),
+    for code, key in (("signin_required", f"gate:dev:{DEV}"), ("fair_use_ip", f"fair:ip:{IP}"),
                       ("busy_today", "fair:global")):
         sb.counts = {key: 10 ** 6}
         en = _post_text(client).get_json()
@@ -421,16 +436,16 @@ def test_refusal_text_is_bilingual_and_never_says_unlimited(client, auth_on, sb,
         assert en["code"] == ar["code"] == code
         assert not _has_arabic(en["error"]) and _has_arabic(ar["error"])
         assert "unlimited" not in en["error"].lower()
-    sb.counts = {f"fair:dev:{DEV}": 10 ** 6}
-    assert "sign in free" in _post_text(client).get_json()["error"].lower()
-    assert "سجّل الدخول" in _post_text(client, language="ar").get_json()["error"]
+    sb.counts = {f"gate:dev:{DEV}": 10 ** 6}
+    assert "create a free account" in _post_text(client).get_json()["error"].lower()
+    assert "أنشئ حسابًا مجانيًا" in _post_text(client, language="ar").get_json()["error"]
     # a file upload (multipart) and an Accept-Language header pick the language too
     r = _post_file(client, language="auto", headers={"Accept-Language": "ar"})
-    assert r.status_code == 429 and _has_arabic(r.get_json()["error"])
+    assert r.status_code == 401 and _has_arabic(r.get_json()["error"])
 
 
 def test_a_signed_in_user_is_not_held_to_the_anonymous_device_cap(client, auth_on, sb, llm):
-    sb.counts[f"fair:dev:{DEV}"] = 10 ** 6                    # the device is used up…
+    sb.counts[f"gate:dev:{DEV}"] = 10 ** 6                    # the device's free guides are used up…
     r = _post_text(client, headers={"Authorization": f"Bearer {_tok('user-3')}"})
     assert _sse_events(r)[-1]["step"] == "done"               # …but the account has its own allowance
 
@@ -471,14 +486,14 @@ def test_one_counter_failing_still_charges_the_others_and_refunds_only_those(sb,
     sb.consume_raises["fair:global"] = RuntimeError("timeout")
     with appmod.app.test_request_context("/", headers={"X-Device-Id": DEV}):
         charge, err = appmod._charge_credit(None, appmod.request)
-    assert err is None and charge.fair_keys == tuple(_keys()[:3])
+    assert err is None and charge.fair_keys == tuple(_keys()[:4])
     assert charge.refund() is True
-    assert sb.names("anon_refund") == _keys()[:3]             # never the unknown one
-    assert sb.counts == {k: 0 for k in _keys()[:3]}
+    assert sb.names("anon_refund") == _keys()[:4]             # never the unknown one
+    assert sb.counts == {k: 0 for k in _keys()[:4]}
 
 
 def test_a_failing_counter_does_not_hide_an_exhausted_one(sb):
-    sb.consume_raises[f"fair:dev:{DEV}"] = RuntimeError("blip")
+    sb.consume_raises[f"gate:dev:{DEV}"] = RuntimeError("blip")
     sb.counts[f"fair:ip:{IP}"] = 10 ** 6
     with appmod.app.test_request_context("/", headers={"X-Device-Id": DEV}):
         charge, err = appmod._charge_credit(None, appmod.request)
@@ -833,32 +848,34 @@ def test_default_rate_limit_lets_a_whole_class_behind_one_ip_through(client):
 def test_config_reports_free_mode_and_the_allowances(client):
     d = client.get("/api/config").get_json()
     assert d["free_mode"] is True
-    assert d["fair_use"] == {"device_daily": 10, "user_daily": 40}
-    assert d["anon_free_limit"] == 10 and d["anon_remaining"] == 10     # kept for older clients
+    # device_daily is kept only for an older cached client: it mirrors the free guides before sign-in
+    assert d["fair_use"] == {"anon_free_uses": 3, "user_daily": 40, "device_daily": 3}
+    assert d["anon_free_limit"] == 3 and d["anon_remaining"] == 3 and d["signin_after"] == 3
     for k in ("supabase_url", "supabase_anon_key", "stripe_publishable_key", "auth_enabled"):
         assert k in d
 
 
-def test_config_anon_remaining_is_the_device_daily_remainder(client, sb):
-    sb.counts[f"fair:dev:{DEV}"] = 4
+def test_config_anon_remaining_is_the_free_guides_left_on_the_device(client, sb):
+    sb.counts[f"gate:dev:{DEV}"] = 2
     d = client.get("/api/config", headers={"X-Device-Id": DEV}).get_json()
-    assert d["anon_remaining"] == 6 and d["anon_free_limit"] == 10
-    assert sb.calls == [("anon_remaining", f"fair:dev:{DEV}")]           # read-only: nothing consumed
+    assert d["anon_remaining"] == 1 and d["anon_free_limit"] == 3
+    assert sb.calls == [("anon_remaining", f"gate:dev:{DEV}")]           # read-only: nothing consumed
 
 
 def test_config_never_waits_on_a_slow_db_in_free_mode(client, monkeypatch):
     monkeypatch.setattr(appmod, "_get_sb", lambda: MagicMock())
-    monkeypatch.setattr(appmod, "_fair_device_remaining", lambda dev: time.sleep(2.5) or 0)
+    monkeypatch.setattr(appmod, "_anon_gate_remaining", lambda gate: time.sleep(2.5) or 0)
     t0 = time.time()
     d = client.get("/api/config", headers={"X-Device-Id": DEV}).get_json()
-    assert time.time() - t0 < 2.2 and d["anon_remaining"] == 10          # falls back to the full allowance
+    assert time.time() - t0 < 2.2 and d["anon_remaining"] == 3           # falls back to the full allowance
 
 
 def test_config_knobs_show_up(client, monkeypatch):
-    monkeypatch.setattr(appmod, "FAIR_DEVICE_DAILY", 7)
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 7)
     monkeypatch.setattr(appmod, "FAIR_USER_DAILY", 55)
     d = client.get("/api/config").get_json()
-    assert d["fair_use"] == {"device_daily": 7, "user_daily": 55} and d["anon_free_limit"] == 7
+    assert d["fair_use"] == {"anon_free_uses": 7, "user_daily": 55, "device_daily": 7}
+    assert d["anon_free_limit"] == 7 and d["signin_after"] == 7
 
 
 def test_auth_me_adds_free_mode_and_keeps_every_field(client, auth_on, monkeypatch):
@@ -1018,6 +1035,7 @@ def test_legacy_config_keeps_the_old_numbers(client, legacy):
     d = client.get("/api/config").get_json()
     assert d["free_mode"] is False
     assert d["anon_free_limit"] == appmod.ANON_FREE_LIMIT
+    assert d["fair_use"] == {"device_daily": 10, "user_daily": 40} and "signin_after" not in d
 
 
 def test_legacy_referral_reward_is_still_awarded(legacy, monkeypatch):
@@ -1063,7 +1081,8 @@ import app as A
 print(json.dumps({k: getattr(A, k) for k in (
     "FREE_MODE", "FAIR_DEVICE_DAILY", "FAIR_IP_DAILY", "FAIR_USER_DAILY", "FAIR_GLOBAL_DAILY",
     "FAIR_ANON_SHARE_PCT", "FAIR_CHAT_DAILY", "WEB_THREADS", "GEN_MAX_CONCURRENT", "GEN_MAX_WAITING",
-    "GEN_QUEUE_WAIT_S", "RATE_SUMMARIZE_PER_MIN", "RATE_PRECHECK_PER_MIN")}))
+    "GEN_QUEUE_WAIT_S", "RATE_SUMMARIZE_PER_MIN", "RATE_PRECHECK_PER_MIN",
+    "ANON_FREE_USES", "ANON_USES_WINDOW_HOURS", "FAIR_ANON_IP_DAILY")}))
 """
 
 
@@ -1081,21 +1100,26 @@ def test_knob_defaults_and_overrides_at_import():
     assert _knobs() == {"FREE_MODE": True, "FAIR_DEVICE_DAILY": 10, "FAIR_IP_DAILY": 250, "FAIR_USER_DAILY": 40,
                         "FAIR_GLOBAL_DAILY": 2000, "FAIR_ANON_SHARE_PCT": 60, "FAIR_CHAT_DAILY": 100,
                         "WEB_THREADS": 4, "GEN_MAX_CONCURRENT": 2, "GEN_MAX_WAITING": 1, "GEN_QUEUE_WAIT_S": 45.0,
-                        "RATE_SUMMARIZE_PER_MIN": 30, "RATE_PRECHECK_PER_MIN": 5}
+                        "RATE_SUMMARIZE_PER_MIN": 30, "RATE_PRECHECK_PER_MIN": 5,
+                        "ANON_FREE_USES": 3, "ANON_USES_WINDOW_HOURS": 87600, "FAIR_ANON_IP_DAILY": 30}
     k = _knobs(ALIMNE_FREE_MODE="0", FAIR_DEVICE_DAILY="7", FAIR_IP_DAILY="99", FAIR_USER_DAILY="5",
                FAIR_GLOBAL_DAILY="123", FAIR_ANON_SHARE_PCT="40", FAIR_CHAT_DAILY="9", WEB_THREADS="8",
                GEN_MAX_CONCURRENT="5", GEN_MAX_WAITING="2", GEN_QUEUE_WAIT_S="9.5", RATE_SUMMARIZE_PER_MIN="12",
-               RATE_PRECHECK_PER_MIN="3")
+               RATE_PRECHECK_PER_MIN="3", ANON_FREE_USES="5", ANON_USES_WINDOW_HOURS="720", FAIR_ANON_IP_DAILY="12")
     assert k == {"FREE_MODE": False, "FAIR_DEVICE_DAILY": 7, "FAIR_IP_DAILY": 99, "FAIR_USER_DAILY": 5,
                  "FAIR_GLOBAL_DAILY": 123, "FAIR_ANON_SHARE_PCT": 40, "FAIR_CHAT_DAILY": 9, "WEB_THREADS": 8,
                  "GEN_MAX_CONCURRENT": 5, "GEN_MAX_WAITING": 2, "GEN_QUEUE_WAIT_S": 9.5,
-                 "RATE_SUMMARIZE_PER_MIN": 12, "RATE_PRECHECK_PER_MIN": 3}
-    # nonsense falls back to the defaults; a zero slot count / rate / thread count would lock everyone out
+                 "RATE_SUMMARIZE_PER_MIN": 12, "RATE_PRECHECK_PER_MIN": 3,
+                 "ANON_FREE_USES": 5, "ANON_USES_WINDOW_HOURS": 720, "FAIR_ANON_IP_DAILY": 12}
+    # nonsense falls back to the defaults; a zero slot count / rate / thread count would lock everyone out,
+    # and a zero-hour gate window would hand the free guides back at once
     k = _knobs(ALIMNE_FREE_MODE="1", FAIR_DEVICE_DAILY="lots", GEN_MAX_CONCURRENT="0", GEN_QUEUE_WAIT_S="soon",
-               RATE_SUMMARIZE_PER_MIN="0", WEB_THREADS="1", RATE_PRECHECK_PER_MIN="0", FAIR_ANON_SHARE_PCT="0")
+               RATE_SUMMARIZE_PER_MIN="0", WEB_THREADS="1", RATE_PRECHECK_PER_MIN="0", FAIR_ANON_SHARE_PCT="0",
+               ANON_FREE_USES="-2", ANON_USES_WINDOW_HOURS="0", FAIR_ANON_IP_DAILY="many")
     assert k["FREE_MODE"] is True and k["FAIR_DEVICE_DAILY"] == 10 and k["GEN_MAX_CONCURRENT"] == 2
     assert k["GEN_QUEUE_WAIT_S"] == 45.0 and k["RATE_SUMMARIZE_PER_MIN"] == 30
     assert k["WEB_THREADS"] == 4 and k["RATE_PRECHECK_PER_MIN"] == 5 and k["FAIR_ANON_SHARE_PCT"] == 60
+    assert (k["ANON_FREE_USES"], k["ANON_USES_WINDOW_HOURS"], k["FAIR_ANON_IP_DAILY"]) == (3, 87600, 30)
 
 
 def test_the_free_mode_code_adds_no_import_time_threads_or_lazy_imports():
@@ -1178,16 +1202,16 @@ def test_disconnect_before_any_ai_work_still_refunds(sb, monkeypatch, step):
 
 def test_a_script_that_closes_the_socket_after_every_paid_run_hits_the_cap(client, auth_on, sb, monkeypatch):
     """The reviewed exploit: read until 'Quiz ready', drop the socket, repeat. The counters
-    must keep counting, so the device cap stops it exactly where it stops a normal client."""
+    must keep counting, so the sign-in gate stops it exactly where it stops a normal client."""
     _fake_llm(monkeypatch)
-    for _ in range(appmod.FAIR_DEVICE_DAILY):
+    for _ in range(appmod.ANON_FREE_USES):
         r = _post_text(client)
         assert _read_until(r, b"Quiz ready")
         r.close()
-    assert sb.counts[f"fair:dev:{DEV}"] == appmod.FAIR_DEVICE_DAILY
-    assert sb.counts["fair:global"] == appmod.FAIR_DEVICE_DAILY
+    assert sb.counts[f"gate:dev:{DEV}"] == appmod.ANON_FREE_USES
+    assert sb.counts["fair:global"] == appmod.ANON_FREE_USES
     r = _post_text(client)
-    assert r.status_code == 429 and r.get_json()["code"] == "fair_use_device"
+    assert r.status_code == 401 and r.get_json()["code"] == "signin_required"
 
 
 def test_file_stream_disconnect_after_paid_work_keeps_the_units(client, auth_on, sb, llm):
@@ -1436,7 +1460,8 @@ def test_token_mode_chat_is_untouched(client, auth_on, sb, chat_llm, legacy_toke
 # ── J4. a reserved pool for signed-in users ──────────────────────────────────────
 def test_anonymous_requests_are_also_charged_to_the_anonymous_pool(client, auth_on, sb, llm):
     assert _sse_events(_post_text(client))[-1]["step"] == "done"
-    assert sb.counts == {f"fair:dev:{DEV}": 1, f"fair:ip:{IP}": 1, "fair:global:anon": 1, "fair:global": 1}
+    assert sb.counts == {f"gate:dev:{DEV}": 1, f"fair:anonip:{IP}": 1, f"fair:ip:{IP}": 1,
+                         "fair:global:anon": 1, "fair:global": 1}
 
 
 def test_signed_in_requests_never_touch_the_anonymous_pool(client, auth_on, sb, llm):
@@ -1447,9 +1472,11 @@ def test_signed_in_requests_never_touch_the_anonymous_pool(client, auth_on, sb, 
 def test_anonymous_traffic_cannot_use_up_the_signed_in_reserve(client, auth_on, sb, llm, monkeypatch):
     monkeypatch.setattr(appmod, "FAIR_GLOBAL_DAILY", 5)          # the anonymous pool is 60%: 3
     codes = [_status(_post_text(client, device=f"device-aaaa-000{i}")) for i in range(5)]
-    assert codes == [200, 200, 200, 429, 429]
+    assert codes == [200, 200, 200, 401, 401]
     refused = _post_text(client, device="device-aaaa-0009")
-    assert refused.get_json()["code"] == "fair_use_device" and "sign in free" in refused.get_json()["error"].lower()
+    assert refused.get_json()["code"] == "signin_required"            # a free account is the way to the reserve
+    assert "create a free account" in refused.get_json()["error"].lower()
+    assert sb.counts.get("gate:dev:device-aaaa-0009", 0) == 0         # and the refusal did not burn a free guide
     h = {"Authorization": f"Bearer {_tok('user-7')}"}
     assert [_status(_post_text(client, headers=h)) for _ in range(2)] == [200, 200]   # the reserve is intact
     r = _post_text(client, headers=h)
@@ -1471,7 +1498,7 @@ def test_a_tripped_global_budget_gives_the_anonymous_pool_unit_back(client, auth
     sb.counts["fair:global"] = 10 ** 6
     r = _post_text(client)
     assert r.status_code == 503 and r.get_json()["code"] == "busy_today"
-    assert sb.counts.get("fair:global:anon", 0) == 0 and sb.counts[f"fair:dev:{DEV}"] == 0
+    assert sb.counts.get("fair:global:anon", 0) == 0 and sb.counts[f"gate:dev:{DEV}"] == 0
 
 
 def test_a_global_counter_logs_when_it_passes_80_percent(sb, caplog):
@@ -1691,24 +1718,24 @@ def test_the_lower_limit_never_exceeds_the_general_knob(client, monkeypatch):
 # ── J7. the counters share one time budget ───────────────────────────────────────
 def test_the_counters_share_one_time_budget_then_fail_open(sb, monkeypatch, caplog):
     monkeypatch.setattr(appmod, "_FAIR_BUDGET_S", 0.25)
-    real = appmod._fair_consume
-    def slow(key, limit):
+    real = appmod._fair_take
+    def slow(key, limit, window_hours=24):
         time.sleep(0.2)
-        return real(key, limit)
-    monkeypatch.setattr(appmod, "_fair_consume", slow)
+        return real(key, limit, window_hours)
+    monkeypatch.setattr(appmod, "_fair_take", slow)
     t0 = time.monotonic()
     with caplog.at_level("WARNING", logger="app"):
         charge = _charged(sb)
-    assert time.monotonic() - t0 < 0.7                           # four 0.2 s lookups would take 0.8 s
+    assert time.monotonic() - t0 < 0.7                           # five 0.2 s lookups would take 1.0 s
     assert charge.fair_keys == tuple(_keys()[:2]) and "time budget" in caplog.text
 
 
 # ── J8. refusals leave a trace the operator can alert on ─────────────────────────
 def test_every_fair_use_refusal_is_logged(client, auth_on, sb, llm, caplog):
-    sb.counts[f"fair:dev:{DEV}"] = 10 ** 6
+    sb.counts[f"gate:dev:{DEV}"] = 10 ** 6
     with caplog.at_level("INFO", logger="app"):
-        assert _post_text(client).status_code == 429
-    assert "fair-use refusal" in caplog.text and "fair_use_device" in caplog.text
+        assert _post_text(client).status_code == 401
+    assert "fair-use refusal" in caplog.text and "signin_required" in caplog.text
     caplog.clear()
     sb.counts = {"fair:global": 10 ** 6}
     with caplog.at_level("INFO", logger="app"):

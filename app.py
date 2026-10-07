@@ -805,12 +805,14 @@ def _anon_durable_refund(dev):
 
 # ── Free mode: fair use instead of tokens ──────────────────────────────────────
 # ALIMNE_FREE_MODE (default ON; "0" restores the old token system exactly) makes
-# Alimne free for everyone. Generation is then limited only by FAIR-USE counters
-# (24 h windows that start at a key's first use; the existing durable anon_consume
-# / anon_refund RPCs from migrations 009 + 012, under 'fair:*' keys — no new SQL),
-# a process-wide cap on simultaneous generations (a small queue instead of an
-# error), and a per-IP per-minute rate limit. All knobs are plain env reads, done
-# once at import.
+# Alimne free for everyone. Generation is then limited only by the SIGN-IN GATE (an
+# anonymous visitor's first ANON_FREE_USES guides need no account; after those a
+# free account is required), FAIR-USE counters (24 h windows that start at a key's
+# first use), a process-wide cap on simultaneous generations (a small queue instead
+# of an error), and a per-IP per-minute rate limit. Gate and counters live in the
+# existing durable anon_consume / anon_refund RPCs from migrations 009 + 012, under
+# 'gate:*' and 'fair:*' keys — no new SQL. All knobs are plain env reads, done once
+# at import.
 def _env_num(name, default, cast=int, minimum=0):
     """Plain os.environ read; unset, blank, malformed or below `minimum` → default."""
     raw = os.environ.get(name)
@@ -832,7 +834,7 @@ def _env_switch(name, default=True):
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 FREE_MODE              = _env_switch("ALIMNE_FREE_MODE")
-FAIR_DEVICE_DAILY      = _env_num("FAIR_DEVICE_DAILY", 10)      # anonymous, per X-Device-Id
+FAIR_DEVICE_DAILY      = _env_num("FAIR_DEVICE_DAILY", 10)      # RETIRED for anonymous visitors (the sign-in gate below replaced it). Still read, only so the legacy /api/config payload stays what it was
 FAIR_IP_DAILY          = _env_num("FAIR_IP_DAILY", 250)         # per IP (campuses / carriers share one)
 FAIR_USER_DAILY        = _env_num("FAIR_USER_DAILY", 40)        # signed-in, per user id
 FAIR_GLOBAL_DAILY      = _env_num("FAIR_GLOBAL_DAILY", 2000)    # everyone — the daily budget breaker
@@ -848,6 +850,24 @@ _FAIR_WINDOW_HOURS     = 24
 _FAIR_BUDGET_S         = 3.0    # all the counter lookups of one request share this much time, then fail open
 _CHAT_USER_PER_MIN     = 10     # chat questions per signed-in user per minute
 
+# The sign-in gate: an anonymous visitor may make ANON_FREE_USES guides without an
+# account; after those they must sign in (a free account) to make more. It is a
+# LIFETIME allowance per device, not a daily one: its counter is read with the long
+# ANON_USES_WINDOW_HOURS window instead of 24 h. FAIR_ANON_IP_DAILY caps anonymous
+# guides per IP a day across ALL devices, so rotating the device id buys little.
+_ANON_USES_WINDOW_MAX_H = 876000   # 100 years. A window Postgres cannot subtract from now() makes the RPC raise, and a raising RPC fails OPEN
+
+def _anon_gate_knobs():
+    """The sign-in gate's knobs from the environment → (ANON_FREE_USES,
+    ANON_USES_WINDOW_HOURS, FAIR_ANON_IP_DAILY). Blank, malformed or negative →
+    the default. ANON_FREE_USES=0 is meaningful (sign in from the very first
+    guide); a zero window is not (it would hand the free guides back at once)."""
+    return (_env_num("ANON_FREE_USES", 3),
+            min(_env_num("ANON_USES_WINDOW_HOURS", 87600, minimum=1), _ANON_USES_WINDOW_MAX_H),
+            _env_num("FAIR_ANON_IP_DAILY", 30))
+
+ANON_FREE_USES, ANON_USES_WINDOW_HOURS, FAIR_ANON_IP_DAILY = _anon_gate_knobs()
+
 # Running + waiting generations can never reach the web-thread count, whatever the
 # knobs say: a waiting request holds a gunicorn thread exactly like a running one, and
 # at least one thread must stay free for /healthz, /api/config and the static files
@@ -856,30 +876,47 @@ _CHAT_USER_PER_MIN     = 10     # chat questions per signed-in user per minute
 _GEN_SLOTS    = max(1, min(GEN_MAX_CONCURRENT, WEB_THREADS - 1))
 _GEN_WAIT_MAX = max(0, min(GEN_MAX_WAITING, WEB_THREADS - 1 - _GEN_SLOTS))
 
-def _fair_consume(key, limit):
-    """Take one unit from a fair-use counter → True (taken), False (exhausted) or
-    None (unknown: no database, RPC missing/erroring/odd reply). None FAILS OPEN —
-    a DB hiccup must never block a real student — but it is logged, and nothing
-    is refunded for it (the RPC may or may not have counted)."""
+def _counter_label(key):
+    """A counter's name for the logs — never the device id, IP or user id it is
+    keyed by: 'dev', 'ip', 'global', … for fair:* keys, 'gate:dev' / 'gate:noid'
+    for the sign-in gate."""
+    parts = key.split(":")
+    return parts[1] if parts[0] == "fair" else ":".join(parts[:2])
+
+def _fair_take(key, limit, window_hours=_FAIR_WINDOW_HOURS):
+    """Take one unit from a counter → (taken, remaining). `taken` is True, False
+    (exhausted) or None (unknown: no database, RPC missing/erroring/odd reply).
+    None FAILS OPEN — a DB hiccup must never block a real student — but it is
+    logged, and nothing is refunded for it (the RPC may or may not have counted).
+    `remaining` is the units left after this one, or None when the reply had no
+    usable number."""
     sb = _get_sb()
     if sb is None:
-        return None
+        return None, None
     try:
         res = sb.rpc("anon_consume", {"p_key": key, "p_limit": limit,
-                                      "p_window_hours": _FAIR_WINDOW_HOURS}).execute()
+                                      "p_window_hours": window_hours}).execute()
         d = res.data if isinstance(res.data, dict) else {}
         if "ok" not in d:
             _log.error("fair-use %s counter: unexpected RPC reply %r — failing open",
-                       key.split(":")[1], res.data)
-            return None
+                       _counter_label(key), res.data)
+            return None, None
         ok = bool(d["ok"])
+        left = d.get("remaining")
+        if not isinstance(left, int) or isinstance(left, bool):
+            left = None
         if ok and key.startswith("fair:global"):
-            _fair_watch(key, limit, d.get("remaining"))
-        return ok
+            _fair_watch(key, limit, left)
+        return ok, left
     except Exception as exc:
         _log.error("fair-use %s counter failed — failing open: %s: %s",
-                   key.split(":")[1], type(exc).__name__, exc)
-        return None
+                   _counter_label(key), type(exc).__name__, exc)
+        return None, None
+
+def _fair_consume(key, limit):
+    """Take one unit from a 24 h fair-use counter → True (taken), False (exhausted)
+    or None (unknown — fails open, see _fair_take)."""
+    return _fair_take(key, limit)[0]
 
 def _fair_watch(key, limit, remaining):
     """One log line (warning level, so it shows in Render's logs) when a daily
@@ -903,7 +940,7 @@ def _fair_refund_key(key):
         sb.rpc("anon_refund", {"p_key": key}).execute()
         return True
     except Exception as exc:
-        _log.warning("fair-use %s refund failed: %s: %s", key.split(":")[1], type(exc).__name__, exc)
+        _log.warning("fair-use %s refund failed: %s: %s", _counter_label(key), type(exc).__name__, exc)
         return False
 
 def _fair_refund(keys):
@@ -914,36 +951,37 @@ def _fair_refund(keys):
             ok = False
     return ok
 
-def _fair_device_remaining(dev):
-    """Units left on this device's daily counter, for the /api/config badge →
-    int, or None to fall back to the full allowance."""
-    sb = _get_sb()
-    if not dev or sb is None:
-        return None
-    try:
-        res = sb.rpc("anon_remaining", {"p_key": f"fair:dev:{dev}", "p_limit": FAIR_DEVICE_DAILY,
-                                        "p_window_hours": _FAIR_WINDOW_HOURS}).execute()
-        return int(res.data) if res.data is not None else None
-    except Exception:
-        return None
-
-def _fair_remaining_key(key, limit):
+def _fair_remaining_key(key, limit, window_hours=_FAIR_WINDOW_HOURS):
     """Units left on a counter, read-only (anon_remaining) → int, or None when unknown."""
     sb = _get_sb()
     if sb is None:
         return None
     try:
         res = sb.rpc("anon_remaining", {"p_key": key, "p_limit": limit,
-                                        "p_window_hours": _FAIR_WINDOW_HOURS}).execute()
+                                        "p_window_hours": window_hours}).execute()
         return int(res.data) if res.data is not None else None
     except Exception:
         return None
 
+def _anon_gate(dev, ip):
+    """The sign-in gate counter of an anonymous request → (key, window hours).
+    A device id: that device's lifetime allowance. No (valid) device id — a script,
+    or a browser with storage switched off: the allowance is counted per IP, per
+    24 h, so leaving the header out can never dodge the gate."""
+    if dev:
+        return f"gate:dev:{dev}", ANON_USES_WINDOW_HOURS
+    ipk = _ip_bucket(ip) if ip and ip != "unknown" else ""
+    return f"gate:noid:{ipk or 'unknown'}", _FAIR_WINDOW_HOURS
+
+def _anon_gate_remaining(gate):
+    """Free guides left on a gate counter (`gate` = _anon_gate(...)), read-only →
+    int, or None when unknown."""
+    key, window = gate
+    return _fair_remaining_key(key, ANON_FREE_USES, window)
+
 # fair-use refusal code → (HTTP status, English, Arabic). Never says "unlimited".
+# ('fair_use_device' is retired: the sign-in gate answers 'signin_required' instead.)
 _FAIR_REFUSALS = {
-    "fair_use_device": (429,
-        "You've reached today's free limit on this device. Sign in free for a higher daily allowance, or try again later.",
-        "لقد وصلت إلى الحد المجاني اليومي على هذا الجهاز. سجّل الدخول مجانًا لتحصل على حد يومي أعلى، أو حاول مرة أخرى لاحقًا."),
     "fair_use_user": (429,
         "You've reached today's fair-use limit for your account. It resets within 24 hours — please try again later.",
         "لقد وصلت إلى حد الاستخدام العادل اليومي لحسابك. يُعاد ضبطه خلال 24 ساعة — يُرجى المحاولة لاحقًا."),
@@ -955,10 +993,61 @@ _FAIR_REFUSALS = {
         "وصل الموقع إلى طاقته المجانية لهذا اليوم. يُرجى المحاولة لاحقًا."),
 }
 
+_AR_THE_COUNT = {3: "الثلاثة", 4: "الأربعة", 5: "الخمسة", 6: "الستة", 7: "السبعة",
+                 8: "الثمانية", 9: "التسعة", 10: "العشرة"}
+
+def _signin_required_text(ar=False):
+    """The sign-in refusal in words, with the REAL allowance (ANON_FREE_USES), so
+    the number can never go stale. Signing in is free and stays free: it never
+    mentions a price, a plan or "unlimited"."""
+    n = ANON_FREE_USES
+    if ar:
+        tail = "أنشئ حسابًا مجانيًا للمتابعة — ما زال الاستخدام مجانيًا."
+        if n <= 0:
+            return "أنشئ حسابًا مجانيًا لإنشاء أدلة الدراسة — الاستخدام مجاني."
+        if n == 1:
+            return "لقد استخدمت دليلك المجاني. " + tail
+        if n == 2:
+            return "لقد استخدمت دليلَيك المجانيَّين. " + tail
+        return "لقد استخدمت أدلتك المجانية %s. " % _AR_THE_COUNT.get(n, "الـ%d" % n) + tail
+    tail = "Create a free account to keep going - it's still free."
+    if n <= 0:
+        return "Create a free account to make study guides - it's free."
+    if n == 1:
+        return "You've used your free guide. " + tail
+    return "You've used your %d free guides. " % n + tail
+
+def _anon_rule_text():
+    """The account rule in words, for the legal pages → (English, Arabic): how many
+    guides need no account, from the REAL allowance (ANON_FREE_USES). Never the
+    bare "no sign-up needed": that is only true for those first guides."""
+    n = ANON_FREE_USES
+    if n <= 0:
+        return ("A free account is required to make study guides.",
+                "يلزم إنشاء حساب مجاني لإنشاء أدلة الدراسة.")
+    if n == 1:
+        return ("Your first study guide needs no account; after that, a free account is required to make more.",
+                "دليلك الدراسي الأول لا يحتاج إلى حساب، وبعده يلزم إنشاء حساب مجاني لإنشاء المزيد.")
+    if n == 2:
+        ar = "أول دليلين دراسيين لا يحتاجان إلى حساب، وبعدهما يلزم إنشاء حساب مجاني لإنشاء المزيد."
+    elif n <= 10:
+        ar = "أول %d أدلة دراسة لا تحتاج إلى حساب، وبعدها يلزم إنشاء حساب مجاني لإنشاء المزيد." % n
+    else:
+        ar = "أول %d دليلًا دراسيًا لا تحتاج إلى حساب، وبعدها يلزم إنشاء حساب مجاني لإنشاء المزيد." % n
+    return ("Your first %d study guides need no account; after that, a free account is required to make more." % n, ar)
+
 def _fair_refusal(code, ar=False):
-    status, en, ar_msg = _FAIR_REFUSALS[code]
+    """A fair-use refusal as (JSON response, status). 'signin_required' is the
+    sign-in gate: 401 (an account is needed — nothing is "too many") with
+    `free_uses`, so the client can word its own prompt."""
+    extra = {}
+    if code == "signin_required":
+        status, msg, extra = 401, _signin_required_text(ar), {"free_uses": max(0, ANON_FREE_USES)}
+    else:
+        status, en, ar_msg = _FAIR_REFUSALS[code]
+        msg = ar_msg if ar else en
     _log.info("fair-use refusal code=%s status=%s", code, status)   # so 'many refusals' can be alerted on
-    return jsonify({"error": ar_msg if ar else en, "code": code}), status
+    return jsonify({"error": msg, "code": code, **extra}), status
 
 def _ip_bucket(ip):
     """The key an address is counted under: IPv4 as is; an IPv6 address by its /64
@@ -984,44 +1073,58 @@ def _fair_anon_limit():
 
 def _fair_charge(uid, req, data=None):
     """Free-mode stand-in for the token charge → (_Charge, None) or (None, response).
-    Takes one unit from EVERY applicable counter — the account (signed in) or the
-    device (anonymous), then the IP, then (anonymous only) the anonymous slice of the
-    global budget, then the global daily budget — and rolls the ones already taken
-    back when a later one is exhausted. A counter that can't be read fails open (see
-    _fair_consume), and all the lookups of one request share _FAIR_BUDGET_S: a slow
-    database costs a request a few seconds at most, never a pinned web thread."""
+    Takes one unit from EVERY applicable counter and rolls the ones already taken
+    back when a later one is exhausted.
+      signed in: the account, the IP, the global daily budget.
+      anonymous: the SIGN-IN GATE (ANON_FREE_USES guides per device, for good — see
+                 _anon_gate), anonymous guides from this IP today, the IP, the
+                 anonymous slice of the global budget, the global daily budget.
+    An anonymous visitor past the gate — or on a network, or on a day, whose
+    anonymous allowance is used up — is answered 401 'signin_required': a free
+    account is the way forward in each of those cases. A signed-in request never
+    touches a gate key.
+    A counter that can't be read fails open (see _fair_take), and all the lookups
+    of one request share _FAIR_BUDGET_S: a slow database costs a request a few
+    seconds at most, never a pinned web thread."""
     ip  = (_client_ip() or "")[:64]
     ipk = _ip_bucket(ip)
     dev = _device_id(req)
-    plan = []
+    has_ip = bool(ip) and ip != "unknown"
+    day = _FAIR_WINDOW_HOURS
+    gate_key = None
+    plan = []                            # (counter key, limit, window hours, refusal code)
     if uid:
-        plan.append((f"fair:user:{uid}", FAIR_USER_DAILY, "fair_use_user"))
-    elif dev:
-        plan.append((f"fair:dev:{dev}", FAIR_DEVICE_DAILY, "fair_use_device"))
-    elif ip and ip != "unknown":
-        # No (valid) device id: a script, not our client. Count it per IP at the
-        # device allowance so skipping the header never dodges the device cap.
-        plan.append((f"fair:dev:noid-{ipk}", FAIR_DEVICE_DAILY, "fair_use_device"))
-    if ip and ip != "unknown":
-        plan.append((f"fair:ip:{ipk}", FAIR_IP_DAILY, "fair_use_ip"))
+        plan.append((f"fair:user:{uid}", FAIR_USER_DAILY, day, "fair_use_user"))
+    else:
+        if ANON_FREE_USES <= 0:
+            # No free guides at all: decided here, without the database, so a DB
+            # hiccup can never fail this one open.
+            return None, _fair_refusal("signin_required", _wants_ar(data))
+        gate_key, gate_window = _anon_gate(dev, ip)
+        plan.append((gate_key, ANON_FREE_USES, gate_window, "signin_required"))
+        if has_ip:
+            plan.append((f"fair:anonip:{ipk}", FAIR_ANON_IP_DAILY, day, "signin_required"))
+    if has_ip:
+        plan.append((f"fair:ip:{ipk}", FAIR_IP_DAILY, day, "fair_use_ip"))
     if not uid:
-        # Refused with the device message on purpose: "sign in free" is the true answer.
-        plan.append(("fair:global:anon", _fair_anon_limit(), "fair_use_device"))
-    plan.append(("fair:global", FAIR_GLOBAL_DAILY, "busy_today"))
-    taken = []
+        plan.append(("fair:global:anon", _fair_anon_limit(), day, "signin_required"))
+    plan.append(("fair:global", FAIR_GLOBAL_DAILY, day, "busy_today"))
+    taken, anon_left = [], None
     t0 = time.monotonic()
-    for i, (key, limit, code) in enumerate(plan):
+    for i, (key, limit, window, code) in enumerate(plan):
         if i and time.monotonic() - t0 > _FAIR_BUDGET_S:
             _log.warning("fair-use counters over their %.1fs time budget — failing open for %s and the rest",
-                         _FAIR_BUDGET_S, key.split(":")[1])
+                         _FAIR_BUDGET_S, _counter_label(key))
             break
-        got = _fair_consume(key, limit)
+        got, left = _fair_take(key, limit, window)
         if got is False:
-            _fair_refund(taken)          # an exhausted counter must not cost the others
+            _fair_refund(taken)          # an exhausted counter must not cost the others (the free use included)
             return None, _fair_refusal(code, _wants_ar(data))
         if got is True:
             taken.append(key)
-    return _Charge(uid=uid, ip=ip, dev=dev, fair_keys=tuple(taken)), None
+            if key == gate_key and left is not None:
+                anon_left = max(0, left)
+    return _Charge(uid=uid, ip=ip, dev=dev, fair_keys=tuple(taken), anon_left=anon_left), None
 
 def _gen_rate_limit():
     """Per-IP per-minute cap on the generation endpoints: RATE_SUMMARIZE_PER_MIN in
@@ -1054,9 +1157,10 @@ class _Charge:
     In free mode `fair_keys` lists the fair-use counters that were charged (an
     empty tuple when none could be read); None means a legacy token/preview
     charge. Either way, refund() gives back exactly what was taken, exactly once."""
-    def __init__(self, uid=None, ip=None, dev=None, tok_left=None, fair_keys=None):
+    def __init__(self, uid=None, ip=None, dev=None, tok_left=None, fair_keys=None, anon_left=None):
         self.uid, self.ip, self.dev, self.tok_left = uid, ip, dev, tok_left
         self.fair_keys = fair_keys
+        self.anon_left = anon_left   # free mode, anonymous: free guides left after this one (None: unknown, or not anonymous)
         self.refunded = False   # True once the credit really went back
         self.work_started = False   # paid AI work (Groq / Whisper) has begun
         self._settled = False
@@ -4115,31 +4219,44 @@ def _cfg_fast(lookup, dev):
 def _anon_durable_remaining_fast(dev):
     return _cfg_fast(_anon_durable_remaining, dev)
 
-def _fair_device_remaining_fast(dev):
-    return _cfg_fast(_fair_device_remaining, dev)
+def _anon_gate_remaining_fast(gate):
+    return _cfg_fast(_anon_gate_remaining, gate)
 
 @app.route("/api/config")
 def api_config():
-    """Return public keys the frontend needs to initialise Supabase and Stripe."""
+    """Return public keys the frontend needs to initialise Supabase and Stripe.
+    Free mode also describes the sign-in gate: how many guides need no account
+    (anon_free_limit / signin_after) and how many this device has left."""
     dev = _device_id(request)
-    if FREE_MODE:
-        # anon_free_limit / anon_remaining stay for older clients: here they mirror
-        # the device's daily fair-use allowance (the current client ignores both).
-        d = _fair_device_remaining_fast(dev)
-        anon_limit, anon_left = FAIR_DEVICE_DAILY, d if d is not None else FAIR_DEVICE_DAILY
-    else:
-        d = _anon_durable_remaining_fast(dev)
-        anon_limit, anon_left = ANON_FREE_LIMIT, d if d is not None else _anon_remaining(_client_ip())
-    return jsonify({
+    out = {
         "supabase_url":          SUPABASE_URL,
         "supabase_anon_key":     SUPABASE_ANON_KEY,
         "stripe_publishable_key": STRIPE_PUBLISHABLE_KEY,
         "auth_enabled":          _AUTH_ENABLED,
-        "anon_free_limit":       anon_limit,
-        "anon_remaining":        anon_left,
-        "free_mode":             FREE_MODE,
-        "fair_use":              {"device_daily": FAIR_DEVICE_DAILY, "user_daily": FAIR_USER_DAILY},
-    })
+    }
+    if FREE_MODE:
+        anon_limit = max(0, ANON_FREE_USES)
+        # Read-only and never blocking: a slow or missing database shows the full
+        # allowance (the charge itself is what enforces the gate).
+        d = _anon_gate_remaining_fast(_anon_gate(dev, _client_ip())) if anon_limit else None
+        out.update({
+            "anon_free_limit": anon_limit,
+            "anon_remaining":  min(anon_limit, max(0, d)) if d is not None else anon_limit,
+            "free_mode":       True,
+            # device_daily is kept only so an older cached client does not break.
+            "fair_use":        {"anon_free_uses": anon_limit, "user_daily": FAIR_USER_DAILY,
+                                "device_daily": anon_limit},
+            "signin_after":    anon_limit,
+        })
+    else:
+        d = _anon_durable_remaining_fast(dev)
+        out.update({
+            "anon_free_limit": ANON_FREE_LIMIT,
+            "anon_remaining":  d if d is not None else _anon_remaining(_client_ip()),
+            "free_mode":       False,
+            "fair_use":        {"device_daily": FAIR_DEVICE_DAILY, "user_daily": FAIR_USER_DAILY},
+        })
+    return jsonify(out)
 
 
 # ── Auth — current user ────────────────────────────────────────────────────────
@@ -4936,6 +5053,8 @@ def summarize_stream():
                          "keywords":   len(overview.get("keywords",   [])),
                          "flashcards": len(overview.get("flashcards", [])),
                          "mcqs":       len(overview.get("mcqs",       []))})
+            if charge.anon_left is not None:   # free mode, anonymous: free guides left before sign-in
+                done["anon_remaining"] = charge.anon_left
             if _is_partial(overview, include_quiz, include_mcq):
                 done["partial"] = True
             yield _sse(done)
@@ -6088,6 +6207,8 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
                          "mcqs":       len(overview.get("mcqs",       []))}
             if tok_left is not None:
                 done_data["tokens_remaining"] = tok_left
+            if charge is not None and charge.anon_left is not None:   # free mode, anonymous: free guides left before sign-in
+                done_data["anon_remaining"] = charge.anon_left
             if _is_partial(overview, include_quiz, include_mcq):
                 done_data["partial"] = True
             yield _sse(done_data)
@@ -6668,10 +6789,12 @@ def privacy_page():
                 else "track your monthly token balance")
     if free:
         counters = """<li><strong>Usage counters:</strong> to keep Alimne available to everyone and to prevent abuse, we count how many
-study guides are generated (and chat questions asked) per day. Each counter is stored in our database (Supabase) against a random device
-identifier kept in your browser, your IP address, or your account ID if you are signed in, plus overall daily totals.
-A counter holds only a number and timestamps \u2014 never your files, text or study guides \u2014 and is used for
-nothing except applying usage limits.</li>"""
+study guides are generated (and chat questions asked). For visitors who are not signed in, one counter records how many
+study guides have been made from your browser, so that we know when a free account becomes required; it is kept
+against a random device identifier stored in your browser and is not reset daily. The other counters are daily
+ones, kept against your IP address, or your account ID if you are signed in, plus overall daily totals. Each
+counter is stored in our database (Supabase) and holds only a number and timestamps \u2014 never your files, text or study guides \u2014
+and is used for nothing except applying usage limits.</li>"""
     else:
         counters = """<li><strong>Usage counters:</strong> to keep the free previews fair, we count how many are used per device. The counter
 is stored in our database (Supabase) against a random device identifier kept in your browser (and, in server memory
@@ -6754,13 +6877,19 @@ Email <a href="mailto:sales@souc.ai">sales@souc.ai</a>.</p>
 def terms_page():
     free = _legal_free_mode()
     if free:
+        # The account rule is worded from the REAL allowance (ANON_FREE_USES), so this
+        # page can never promise more free guides than the charge logic gives.
+        rule_en, rule_ar = _anon_rule_text()
+        evade = "the usage limits or the account requirement (for example with automated tools, or by resetting or rotating devices or networks)"
         plans = """<h2>2. Free to use &amp; fair use</h2>
 <ul>
-<li><strong>Alimne is free.</strong> No paid plan, subscription or credit card is required to use the Service,
-and you can try it without signing in.</li>
+<li><strong>Alimne is free.</strong> No paid plan, subscription or credit card is required to use the Service.</li>
+<li><strong>Free account:</strong> """ + rule_en + """ Creating an account is free, and the
+Service stays free once you have one. The sample lecture, and opening, downloading or restoring study guides you
+have already made, never need an account. The number of study guides that need no account may change.</li>
 <li><strong>Fair use:</strong> to keep the Service available to everyone and to control costs, we apply daily limits
-on how many study guides can be generated (per device, per network and per account, plus an overall daily
-capacity). Signed-in users get a higher daily allowance than anonymous visitors. These limits may change at any
+on how many study guides an account can generate, as well as limits per network and an overall daily
+capacity. These limits may change at any
 time, and at busy times you may be asked to wait in a queue or to try again later. We do not promise unlimited use.</li>
 <li><strong>Existing subscribers:</strong> if you subscribed to a paid plan before Alimne became free, you can manage
 or cancel your subscription at any time from within the app. Cancelling stops future charges and access
@@ -6769,11 +6898,13 @@ charges already made are non-refundable except where required by law.</li>
 </ul>"""
         summary_ar = """
 <div class="note" lang="ar" dir="rtl"><strong>باختصار:</strong> علّمني <strong>مجاني</strong> \u2014 لا حاجة لاشتراك
-مدفوع ولا لبطاقة ائتمان، ويمكنك تجربته دون تسجيل الدخول. تُطبَّق حدود <strong>استخدام عادل</strong> يومية قد تتغيّر،
+مدفوع ولا لبطاقة ائتمان. """ + rule_ar + """ إنشاء الحساب مجاني، ويبقى الاستخدام مجانيًا بعده.
+تُطبَّق على الحسابات حدود <strong>استخدام عادل</strong> يومية قد تتغيّر،
 وقد تنتظر دورك في أوقات الازدحام. ومن اشترك سابقًا في خطة مدفوعة يمكنه إدارة اشتراكه أو إلغاءه في أي وقت من داخل
 التطبيق، وتُعالَج مدفوعاته عبر Stripe. النص الإنجليزي هو المرجع.</div>
 """
     else:
+        evade = "the usage limits (for example with automated tools, or by rotating devices or networks)"
         plans = """<h2>2. Plans &amp; billing</h2>
 <ul>
 <li><strong>Free plan:</strong> 3 processing tokens per month. No credit card required.</li>
@@ -6801,7 +6932,7 @@ inaccuracies \u2014 always verify important information against the source mater
 <li>Only upload content you have the right to use.</li>
 <li>Do not use the Service for unlawful purposes or to process content that infringes others' rights.</li>
 <li>Do not attempt to disrupt, overload, or reverse-engineer the Service.</li>
-<li>Do not try to get around the usage limits (for example with automated tools, or by rotating devices or networks).</li>
+<li>Do not try to get around """ + evade + """.</li>
 </ul>
 
 <h2>4. Your content</h2>
