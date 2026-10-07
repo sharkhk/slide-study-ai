@@ -205,9 +205,14 @@ def test_privacy_has_an_arabic_summary_that_keeps_the_promises(client):
 
 
 # ── rollback: ALIMNE_FREE_MODE=0 brings the token plans back, so the pages must too ──
-@pytest.mark.parametrize("value", ["0", " 0 "])
+@pytest.mark.parametrize("value", ["0", " 0 ", "false", "FALSE", "no", "off", "Off"])
 def test_terms_and_privacy_describe_the_token_plans_when_free_mode_is_off(client, monkeypatch, value):
+    # The legal pages follow the FREE_MODE constant — the very value the credit logic uses, parsed
+    # once at import by ONE parser. So every natural way to switch free mode off turns the pages
+    # back to the token plans too (they used to say "free" for anything but a literal 0).
     monkeypatch.setenv("ALIMNE_FREE_MODE", value)
+    monkeypatch.setattr(appmod, "FREE_MODE", appmod._env_switch("ALIMNE_FREE_MODE"))
+    assert appmod.FREE_MODE is False and appmod._legal_free_mode() is False
     terms = _page(client, "/terms")
     assert "<h2>2. Plans &amp; billing</h2>" in terms
     assert "<strong>Free plan:</strong>" in terms and "<strong>Pro plan:</strong>" in terms
@@ -220,11 +225,12 @@ def test_terms_and_privacy_describe_the_token_plans_when_free_mode_is_off(client
         assert promise in priv, promise
 
 
-@pytest.mark.parametrize("value", [None, "1", "", "true"])
+@pytest.mark.parametrize("value", [None, "1", "", "true", "yes", "on"])
 def test_free_mode_is_the_default(client, monkeypatch, value):
     if value is not None:
         monkeypatch.setenv("ALIMNE_FREE_MODE", value)
-    assert appmod._legal_free_mode() is True
+    monkeypatch.setattr(appmod, "FREE_MODE", appmod._env_switch("ALIMNE_FREE_MODE"))
+    assert appmod.FREE_MODE is True and appmod._legal_free_mode() is True
     assert "Alimne is free" in _page(client, "/terms")
 
 

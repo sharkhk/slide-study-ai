@@ -22,14 +22,19 @@ code default applies.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `ALIMNE_FREE_MODE` | `1` (on) | `0` brings the old token system back exactly (see section 2). |
+| `ALIMNE_FREE_MODE` | `1` (on) | `0`, `false`, `no` or `off` (any case) brings the old token system back exactly (see section 2). Anything else, or unset, is on. |
 | `FAIR_DEVICE_DAILY` | `10` | Guides per **anonymous device** (header `X-Device-Id`) per 24 h window. |
-| `FAIR_IP_DAILY` | `250` | Guides per **IP address** per 24 h window. Generous on purpose: campuses, hostels and mobile carriers put hundreds of students behind one IP. |
+| `FAIR_IP_DAILY` | `250` | Guides per **IP address** (an IPv6 address counts as its whole /64) per 24 h window. Generous on purpose: campuses, hostels and mobile carriers put hundreds of students behind one IP. |
 | `FAIR_USER_DAILY` | `40` | Guides per **signed-in user** (user id) per 24 h window. |
 | `FAIR_GLOBAL_DAILY` | `2000` | Guides across **all users** per 24 h window. This is the budget breaker. |
-| `GEN_MAX_CONCURRENT` | `3` | Generations running at the same time, process-wide. |
-| `GEN_QUEUE_WAIT_S` | `45` | How long a request waits for a free slot before giving up with `busy`. |
+| `FAIR_ANON_SHARE_PCT` | `60` | The share (1 to 100) of `FAIR_GLOBAL_DAILY` that **anonymous** visitors may use together. The rest is reserved for signed-in users, so anonymous traffic can never lock out the people the sign-up funnel is built for. `100` removes the reservation. |
+| `FAIR_CHAT_DAILY` | `100` | Chat questions per **signed-in user** per 24 h window (`0` switches chat off). |
+| `WEB_THREADS` | `4` | The gunicorn `--threads` value the service really runs with. The two knobs below are clamped so that running + waiting generations are always at most `WEB_THREADS - 1` (section 4). |
+| `GEN_MAX_CONCURRENT` | `2` | Generations running at the same time, process-wide. |
+| `GEN_MAX_WAITING` | `1` | Requests allowed to **wait** for a slot. Each waiter holds a web thread, so this is capped too. One more is answered `busy` at once. |
+| `GEN_QUEUE_WAIT_S` | `45` | How long a waiting request waits for a free slot before giving up with `busy`. |
 | `RATE_SUMMARIZE_PER_MIN` | `30` | Per-IP, per-minute limit on the generation endpoints (it used to be a hard-coded 5, which blocked a whole class sharing one IP). |
+| `RATE_PRECHECK_PER_MIN` | `5` | Per-IP, per-minute limit for work that runs **before** a slot is taken and holds a web thread outside the generation gate: the YouTube duration probe (`/api/youtube`) and the server-side URL fetch (`/api/summarize-text` with a `url`). Never above `RATE_SUMMARIZE_PER_MIN`. |
 
 Related settings that already existed and matter for cost: `GROQ_API_KEY`, `GROQ_MODEL`
 (`openai/gpt-oss-120b` in `render.yaml`), `GROQ_TPM_LIMIT` (`200000` in `render.yaml`; the code
@@ -43,15 +48,18 @@ Change knobs off-peak when you can, and tell nobody to panic when you cannot.
 
 ## 2. Turning free mode off (rollback)
 
-Set `ALIMNE_FREE_MODE=0` and redeploy/restart. The old behaviour returns exactly: tokens are
-consumed and refunded, 402 `no_tokens` / `signin_for_more` come back, Stripe checkout works
-again, signup token grants and the referral reward are promised and awarded again.
+Set `ALIMNE_FREE_MODE=0` (or `false`, `no`, `off`, in any case) and redeploy/restart. The old
+behaviour returns exactly: tokens are consumed and refunded, 402 `no_tokens` / `signin_for_more`
+come back, Stripe checkout works again, signup token grants and the referral reward are promised
+and awarded again. The fair-use counters, the chat meter, the demo cache and the generation
+queue are all off in token mode.
 
 What follows the switch automatically:
 
-- `/terms` and `/privacy` read the variable on every request. With `0` they describe the token
-  plans again (Free plan / Pro plan); with anything else they say Alimne is free. The page can
-  never contradict what the app is doing. Covered by `tests/test_copy_truth.py`.
+- `/terms` and `/privacy` use the very same parsed value as the credit logic (one parser, the
+  `FREE_MODE` constant). When free mode is off they describe the token plans again (Free plan /
+  Pro plan); otherwise they say Alimne is free. The page can never contradict what the app is
+  doing, whichever off-value you type. Covered by `tests/test_copy_truth.py`.
 
 What does **not** follow (static files, they cannot read the environment):
 
@@ -75,25 +83,52 @@ non-demo) is charged against **every applicable counter**:
 
 | Who | Counters charged |
 |---|---|
-| Anonymous visitor | `fair:dev:<device>` + `fair:ip:<ip>` + `fair:global` |
+| Anonymous visitor | `fair:dev:<device>` + `fair:ip:<ip>` + `fair:global:anon` + `fair:global` |
 | Signed-in user | `fair:user:<user id>` + `fair:ip:<ip>` + `fair:global` |
 
-The demo path stays free and unmetered. No token is consumed in free mode.
+`fair:global:anon` is the anonymous slice of the global budget (`FAIR_ANON_SHARE_PCT`, 60% by
+default). Anonymous traffic can only ever use that slice, so the other 40% of `fair:global` is
+kept for signed-in users. When the slice is used up an anonymous visitor gets the `fair_use_device`
+message ("sign in free for a higher daily allowance"), which is true: signed-in users still have
+room. For an IPv6 client `<ip>` is its /64, not the single address (rotating inside a /64 buys
+nothing). The counter lookups of one request share a 3-second time budget; if the database is
+slow the rest fail open instead of pinning a web thread.
+
+**The demo.** "Try a sample" runs on a fixed lecture, so it is made **once per language** and
+cached in memory for 6 hours. Every later demo is a fresh, independent job (own 15-minute life,
+own "Delete now") served from the cache at **zero AI cost and zero fair-use units**. The one real
+run per language takes one unit from `fair:global`, so the breaker bounds it, and it is refused
+with `busy_today` when the breaker has tripped and nothing is cached. A failed or partial run is
+never cached. A restart clears the cache (the next demo makes it again).
+
+**Chat.** A chat question is an AI call too. Per signed-in user: at most 10 per minute and
+`FAIR_CHAT_DAILY` per 24 h window (counter `fair:chat:user:<user id>`, 429 `fair_use_user`).
+Chat also stops with `busy_today` once the global budget is used up (it reads `fair:global`, it
+does not spend from it). A failed question gives its unit back.
 
 **Storage.** The counters reuse the existing durable RPCs `anon_consume(p_key, p_limit,
-p_window_hours=24)` and `anon_refund(p_key)` (migrations 009 and 012) with the new key prefixes
-above. Rows live in `public.anon_usage`. No new migration is needed.
+p_window_hours=24)`, `anon_remaining` and `anon_refund(p_key)` (migrations 009 and 012) with the new
+key prefixes above. Rows live in `public.anon_usage`. No new migration is needed.
 
 **Windows.** A counter's 24 h window starts at its first use and resets 24 h later (that is how
 `anon_consume` works). It is a fixed window per key, not a sliding one. For `fair:global` this
 means the daily budget resets at an arbitrary hour, not at midnight.
 
-**Order.** Validation first (a bad file never costs anyone a slot or a count), then charge all
-counters, then queue for a generation slot. If one counter is exhausted, the ones already taken
-are rolled back (`anon_refund`) and the request is refused.
+**Order.** Validation first (a bad file never costs anyone a slot or a count), then a check that
+there is a slot or a seat in line (a full house answers `busy` before anything is charged and
+before the YouTube probe or URL fetch), then charge all counters, then queue for a generation
+slot. If one counter is exhausted, the ones already taken are rolled back (`anon_refund`) and the
+request is refused.
 
-**Refunds.** If a generation fails or the visitor abandons it, the counters are given back
-exactly once (the existing single-owner charge/refund machinery).
+**Refunds.** The counters are given back exactly once (the existing single-owner charge/refund
+machinery) when the **server** fails or the visitor leaves **before any paid AI work started**:
+validation after the charge, `busy`, a failed or hollow guide, the visitor closing the page while
+queued or while the file is still being read. Once the first paid AI call (the overview pass, or
+the Whisper transcription) has started, the units are **spent**: closing the connection later does
+not refund them. Otherwise a script could run full-cost generations for free by dropping the
+socket just before the last event, with every counter, the global breaker included, still at
+zero. A server-side failure after paid work (an error, a guide with no notes) still refunds,
+because the visitor did nothing wrong and the failure cannot be chosen from outside.
 
 **Fail open.** If the RPC is missing or errors, the request is allowed and the problem is logged.
 A database hiccup must never block a real student. The flip side, and a launch risk: **if the
@@ -103,20 +138,24 @@ RPCs are missing the caps silently do not apply.** Verify them before launch (se
 
 | HTTP | `code` | Meaning |
 |---|---|---|
-| 429 | `fair_use_device` | This anonymous device used its daily allowance. The message tells the visitor to sign in free for a higher one. This is the signup funnel. |
+| 429 | `fair_use_device` | This anonymous device used its daily allowance, or the anonymous slice of the global budget is used up. The message tells the visitor to sign in free for a higher allowance. This is the signup funnel. |
 | 429 | `fair_use_ip` | This IP used its daily allowance (shared networks can hit it). |
-| 429 | `fair_use_user` | This signed-in account used its daily allowance. |
-| 503 | `busy_today` | The global daily budget is used up. Everyone is refused until the window resets. |
-| 503 | `busy` | The queue wait (`GEN_QUEUE_WAIT_S`) ran out. Try again in a moment. |
-| 429 | (rate limit) | More than `RATE_SUMMARIZE_PER_MIN` requests from one IP in a minute. |
+| 429 | `fair_use_user` | This signed-in account used its daily allowance (guides, or chat questions). |
+| 503 | `busy_today` | The global daily budget is used up. Everyone (and chat) is refused until the window resets. |
+| 503 | `busy` | **Before the stream:** no free slot and no seat in line. Nothing was charged. The JSON carries `retry_after_s`. |
+| 200 | `busy` | **Inside the stream:** the request waited in line and `GEN_QUEUE_WAIT_S` ran out. It arrives as an SSE `error` event on an HTTP 200 response, so it never shows in Render's 5xx metric. Its units are refunded. |
+| 429 | (rate limit) | More than `RATE_SUMMARIZE_PER_MIN` requests from one IP in a minute (`RATE_PRECHECK_PER_MIN` for the YouTube probe and URL fetch; 10 a minute per user for chat). |
 
 No `402` is returned in free mode. SSE `done` events keep their shape; `tokens_remaining` may be
 missing or null and the client tolerates both.
 
-**Queue.** A process-wide `BoundedSemaphore(GEN_MAX_CONCURRENT)` wraps the generation work. When
-all slots are busy the request waits up to `GEN_QUEUE_WAIT_S`, sending SSE events
+**Queue.** A process-wide `BoundedSemaphore` of `min(GEN_MAX_CONCURRENT, WEB_THREADS - 1)` slots
+wraps the generation work. When all slots are busy the request may take one of the (at most
+`GEN_MAX_WAITING`) seats in line and waits up to `GEN_QUEUE_WAIT_S`, sending SSE events
 `{"step":"queued","position":<n>,"msg":"..."}` about every 3 s so the student sees a place in
-line. The slot is released in a `finally` on every path: done, error, client disconnect.
+line. The line is strictly first come, first served: a later arrival never passes an earlier
+one, so the place the student is told is the place they get. The slot is released in a `finally`
+on every path: done, error, client disconnect.
 
 **Config the client reads.** `/api/config` adds `free_mode` and
 `fair_use {device_daily, user_daily}`. `/api/auth/me` adds `free_mode: true`. In free mode
@@ -130,19 +169,30 @@ The current Render service: **1 gunicorn worker, 0.5 CPU, 512 MB RAM, 1 instance
 The live start command uses `--threads 4`; `render.yaml` says `--threads 8` (see drift note below).
 Guides live in an in-memory job store for 15 minutes.
 
-- **3 concurrent generations** (`GEN_MAX_CONCURRENT`). Each one holds a Flask thread for its whole
-  run (the stream), so with 4 threads only one thread is left for everything else.
-- **A queued request also holds a thread** while it waits (the wait happens inside the request).
-  With 4 threads: 3 running + 1 waiting = every thread busy. Anything else, including
-  `/healthz`, waits in gunicorn's backlog. If Render's health check times out repeatedly it
-  restarts the service, and a restart wipes every in-memory guide. **Do not launch free mode on
-  4 threads.** Use 8 (what `render.yaml` already says) and watch memory.
+- **Every generation holds a web thread for its whole run (the stream), and so does a request
+  that is waiting in line.** With 4 threads the code therefore allows at most 3 generation
+  requests in total: **2 running + 1 waiting** (the defaults). The fourth is answered `busy` at
+  once, with nothing charged, and **at least one thread is always free** for `/healthz`,
+  `/api/config` and the static files. This is enforced in code, not by convention: whatever you
+  set, `min(GEN_MAX_CONCURRENT, WEB_THREADS - 1)` slots plus the seats in line stay at most
+  `WEB_THREADS - 1`. (Before this limit, 3 running + 1 waiting took all 4 threads, `/healthz` sat
+  in gunicorn's backlog behind them, and Render restarted the service, wiping every in-memory
+  guide.) Covered by `tests/test_free_mode.py`, section J.
+- **The pre-slot work.** The YouTube duration probe and the server-side URL fetch run before a
+  slot is taken, so the gate does not count them. They are bounded by their own per-IP limit
+  (`RATE_PRECHECK_PER_MIN`, 5 a minute) and by the full-house check, and each network call has
+  its own timeout, but there is no total deadline on a slow YouTube. Watch for it in the first
+  week.
 - **Peak-hour arithmetic.** Throughput is roughly `slots / seconds-per-guide`. Example: if a guide
-  takes about 60 s, 3 slots serve about 180 guides an hour (about 4,300 a day if saturated all
-  day). `FAIR_GLOBAL_DAILY=2000` looks comfortable, but traffic is peaky (exam season, evenings):
-  400 guides in a single hour is more than 180, the queue grows, 45 s waits expire, and students
-  see `busy`. In practice the slots, not the budget, are the limit at peak. Measure the real
-  seconds-per-guide in the first week and revisit.
+  takes about 60 s, 2 slots serve about 120 guides an hour. `FAIR_GLOBAL_DAILY=2000` looks
+  comfortable, but traffic is peaky (exam season, evenings): in practice the slots, not the
+  budget, are the limit at peak, and students see the queue line or `busy` first. That is the
+  safe failure. Measure the real seconds-per-guide in the first week and revisit. To serve more
+  you need more threads, not more knobs (next point).
+- **Raising the numbers: threads first.** The two generation knobs only help when the web-thread
+  count really goes up. On a bigger plan with `--threads 8`, set the environment variables
+  `WEB_THREADS=8`, `GEN_MAX_CONCURRENT=4` and `GEN_MAX_WAITING=3` together (4 + 3 = 7 = threads
+  minus one). If you raise only the knobs, the code clamps them back to what 4 threads can carry.
 - **Groq's own limit.** Calls are paced under `GROQ_TPM_LIMIT` tokens per minute across the whole
   process. If the pacer is the bottleneck, more slots will not help.
 - **Memory.** Each in-flight request holds its upload in RAM (up to 50 MB; typical slide decks are
@@ -150,14 +200,16 @@ Guides live in an in-memory job store for 15 minutes.
 
 **Drift to resolve before launch:** the Render dashboard start command (`--threads 4`) and
 `render.yaml` (`--threads 8`) disagree. The dashboard wins in production. Make them match, on
-purpose, and keep the code comments honest (`_REHYDRATE_SLOTS` is written for 8).
+purpose, and set `WEB_THREADS` to the same number (the default, 4, matches the live service).
+Keep the code comments honest (`_REHYDRATE_SLOTS` is written for 8).
 
 **Upgrade path: scale UP, never out.** The job store and the Groq pacer are per process:
 
 - Do **not** add instances and do **not** raise `--workers` above 1. A guide created on one
   instance cannot be found by the other (students would get "guide expired" at random).
-- Move to a bigger Render plan (more CPU and RAM) and raise `--threads` and `GEN_MAX_CONCURRENT`
-  together, keeping at least 2 threads free for light endpoints and queued waiters.
+- Move to a bigger Render plan (more CPU and RAM) and raise `--threads`, `WEB_THREADS`,
+  `GEN_MAX_CONCURRENT` and `GEN_MAX_WAITING` together, keeping at least one thread free (the code
+  insists on it).
 - Only when one big instance is not enough: move the job store to shared storage (Redis or the
   database) first, then scale out.
 
@@ -167,11 +219,15 @@ purpose, and keep the code comments honest (`_REHYDRATE_SLOTS` is written for 8)
 
 1. **`FAIR_DEVICE_DAILY`** (anonymous allowance). Lowering it pushes more visitors to sign in.
 2. **`FAIR_USER_DAILY`** and **`FAIR_IP_DAILY`**.
-3. **`FAIR_GLOBAL_DAILY`**, the hard ceiling: worst-case daily AI spend is roughly
-   `FAIR_GLOBAL_DAILY x cost-per-guide`. Read cost-per-guide from the Groq dashboard after the
+3. **`FAIR_GLOBAL_DAILY`**, the breaker. Every guide, and the one real demo run per language,
+   takes a unit from it, so guide spend is at most `FAIR_GLOBAL_DAILY x cost-per-guide` a day.
+   Two things sit beside that number, both small: chat questions (each far cheaper than a guide;
+   they stop when the breaker trips, and each user is held to `FAIR_CHAT_DAILY` a day) and the
+   demo (two builds per 6 hours at most). Read cost-per-guide from the Groq dashboard after the
    first days (tokens per guide times price), then set the number so the ceiling is a bill you
-   are happy to pay.
-4. **`GEN_MAX_CONCURRENT` / `GEN_QUEUE_WAIT_S`**: slow the spend rate instead of refusing.
+   are happy to pay. `FAIR_ANON_SHARE_PCT` decides how much of it anonymous visitors can use.
+4. **`GEN_MAX_CONCURRENT` / `GEN_MAX_WAITING` / `GEN_QUEUE_WAIT_S`**: slow the spend rate instead
+   of refusing (but never above what `WEB_THREADS` can carry, section 4).
 5. **`GROQ_MODEL`**: a cheaper model, if quality allows.
 6. **A Groq spend limit and alert** in the Groq console (the real backstop, section 8).
 7. **`ALIMNE_FREE_MODE=0`**: last resort (section 2).
@@ -186,7 +242,7 @@ straight away (after the restart the variable change causes).
 | Where | Look at | Worry when |
 |---|---|---|
 | Render > Metrics | CPU, memory, restarts, 5xx rate, response time | CPU above about 80% for minutes; memory above about 400 of 512 MB; any restart or out-of-memory kill |
-| Render > Logs | Fail-open lines (the existing wording is "anon durable consume failed" / "anon durable refund failed"; search for `anon_consume` and `fair` too), `busy` refusals, `fair_use_*` refusals, Groq 429s | Any fail-open line at launch (caps are not applying); many `busy` in one hour |
+| Render > Logs | Search for these exact phrases. `failing open` (a counter could not be read: the caps are not applying), `fair-use refusal code=` (one line for every `fair_use_*` / `busy_today` refusal, with the code), `generation busy` (one line for every `busy`, whether it came before the stream as a 503 or inside it), `passed 80% of its daily limit` and `is used up` (a global pool: the cue to look at the Groq bill), `time budget` (the database was slow), `client left after the AI work started` (units kept), and Groq 429s | Any `failing open` line at launch; many `generation busy` lines in one hour; the `80%` line before evening |
 | Groq console | Requests and tokens per day, 429s, spend against your limit | Spend trending past the limit you set; many 429s (raise the Groq tier or lower concurrency) |
 | Supabase > Auth | Signups per day, provider mix (Google vs email), email errors and rate-limit errors in Auth logs | Signups fail or confirmation emails do not arrive (section 8, custom SMTP) |
 | Supabase > SQL | The queries below | `fair:global` near its limit before evening; one device or IP far above the rest |
@@ -199,12 +255,13 @@ Read-only queries for the Supabase SQL editor:
 -- are the RPCs there? (must return 3 rows; if not, the caps do not apply)
 select proname from pg_proc where proname in ('anon_consume','anon_remaining','anon_refund');
 
--- the global budget right now
-select key, count, window_start, last_at from public.anon_usage where key = 'fair:global';
+-- the global budget right now (the whole budget, then the anonymous slice of it)
+select key, count, window_start, last_at from public.anon_usage
+where key in ('fair:global', 'fair:global:anon');
 
--- heaviest devices / IPs / users in the current windows
+-- heaviest devices / IPs / users / chat users in the current windows
 select key, count, last_at from public.anon_usage
-where key like 'fair:dev:%' or key like 'fair:ip:%' or key like 'fair:user:%'
+where key like 'fair:dev:%' or key like 'fair:ip:%' or key like 'fair:user:%' or key like 'fair:chat:%'
 order by count desc limit 20;
 ```
 
@@ -214,7 +271,7 @@ privacy page says old counters may be deleted at any time).
 
 ```sql
 delete from public.anon_usage
-where key like 'fair:%' and key <> 'fair:global'
+where key like 'fair:%' and key not in ('fair:global', 'fair:global:anon')
   and last_at < now() - interval '30 days';
 ```
 
@@ -228,6 +285,7 @@ if you ever set `ALIMNE_FREE_MODE=0`).
 | Place | Says |
 |---|---|
 | `/terms`, `/privacy` (`app.py`) | Free, fair use, limits may change, no unlimited promise, legacy subscribers can manage or cancel in the app, Stripe for them, usage counters disclosed. Follow `ALIMNE_FREE_MODE`. |
+| In-app Terms (`TERMS_*` in `frontend/src/App_dev.jsx`) | The same promises as `/terms` and `/privacy`, in English and Arabic, including the opt-in sharing and the usage counters. `tests/test_free_mode_client.py` checks both languages say the same things and scans the Arabic copy for token, plan, price and "unlimited" claims. |
 | `/s/<slug>` shared guide and its 404 | "Make your own study guide - free" growth call to action with UTM tags, English and Arabic. |
 | `frontend/index.html` and `dist/index.html` | Title and meta tags for a free product. `dist/` is committed and Render does not build it, so both files must carry the same tags. |
 | `frontend/public/og.png` and `dist/og.png` | The social preview picture. The meta tags point at `og.png?v=free` so WhatsApp, X and LinkedIn refetch it instead of showing the cached old one. |
@@ -275,8 +333,11 @@ Do these before announcing, in this order.
 - [ ] Sign in with a brand-new Google account and confirm you land on `https://alimne.app`.
 
 **Render**
-- [ ] Make the live start command and `render.yaml` agree, with **`--threads 8`** (section 4),
-      `--workers 1`. Do not launch on 4 threads.
+- [ ] Make the live start command and `render.yaml` agree (today the dashboard says
+      `--threads 4` and `render.yaml` says `--threads 8`), always with `--workers 1`, and set
+      the `WEB_THREADS` variable to the same number. On 4 threads the defaults are safe (2
+      generations running + 1 waiting, one thread always free). On 8 threads also set
+      `GEN_MAX_CONCURRENT=4` and `GEN_MAX_WAITING=3` (section 4).
 - [ ] Add alerts for failed deploys and out-of-memory events. Check `healthCheckPath` is
       `/healthz`.
 - [ ] Know the upgrade path: bigger plan (scale up), never more instances or workers (section 4).
@@ -298,6 +359,10 @@ Do these before announcing, in this order.
 - [ ] Open `/terms`, `/privacy` and a shared guide `/s/<slug>`: free wording, English and Arabic.
 - [ ] (Optional) set `FAIR_DEVICE_DAILY=2` for a test, hit the cap and read the sign-in message,
       then set it back.
+- [ ] Tap "Try a sample" twice: the second one appears instantly (served from the cache) and
+      the logs show no second AI run.
+- [ ] Look at Render > Logs for `failing open` (there should be none) and note that the
+      `fair-use refusal code=` and `generation busy` lines exist, so you can count them later.
 - [ ] Paste `https://alimne.app` into WhatsApp and LinkedIn: the preview shows "Free for
       everyone". (The picture URL changed, so old caches are bypassed.)
 - [ ] Update bios and pinned posts on the Alimne social accounts that still mention tokens or a
@@ -311,3 +376,24 @@ Do these before announcing, in this order.
   and view pages make no pricing claim and were left alone.
 - Numbers in the Arabic and English copy are deliberately absent ("daily limits", not "10 a
   day"): the caps are env knobs and will change, and the pages must not go stale when they do.
+
+## 10. Known limits (so nobody is surprised)
+
+- **Client IP trust.** The per-IP counters and rate limits use the address from the
+  `CF-Connecting-IP` header when `CF_ORIGIN_SECRET` is not set (the existing behaviour: Render's
+  own edge sits behind Cloudflare and stamps it). If the header ever reaches the app unreplaced,
+  one client could pose as many IPs and the per-IP caps (not the global ones) would stop
+  working. Two things limit the damage: anonymous traffic as a whole is capped by the anonymous
+  slice of the global budget, and the rate-limit table prunes expired entries so a flood of fake
+  addresses cannot grow memory without end. It was left unchanged on purpose: if the header were
+  distrusted without checking, every student would share one or two Cloudflare addresses and
+  hit the per-IP cap together. **Check once on production** (the admin visitor log shows the
+  address recorded for a request you send with a made-up `CF-Connecting-IP`). The DNS records
+  are grey-cloud, so a Cloudflare rule cannot stamp `X-Origin-Verify`.
+- **The YouTube probe has no total deadline.** Each network call has a timeout, and the
+  per-IP limit and full-house check bound how often it runs, but one slow YouTube answer can
+  still hold a web thread for a while.
+- **Old `fair:` rows are never purged automatically.** Use the housekeeping query in section 6
+  now and then. A full database makes the counters fail open, which the `failing open` log line
+  makes visible.
+- **A global counter is a fixed 24 h window**, so the budget can reset at an odd hour (section 3).

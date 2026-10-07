@@ -18,6 +18,7 @@ for _var in (
     "GROQ_API_KEY", "RENDER", "PRODUCTION",
     "ALIMNE_FREE_MODE", "FAIR_DEVICE_DAILY", "FAIR_IP_DAILY", "FAIR_USER_DAILY",
     "FAIR_GLOBAL_DAILY", "GEN_MAX_CONCURRENT", "GEN_QUEUE_WAIT_S", "RATE_SUMMARIZE_PER_MIN",
+    "FAIR_ANON_SHARE_PCT", "FAIR_CHAT_DAILY", "WEB_THREADS", "GEN_MAX_WAITING", "RATE_PRECHECK_PER_MIN",
 ):
     os.environ.pop(_var, None)
 
@@ -30,9 +31,11 @@ def _free_mode_and_no_slot_leaks(monkeypatch):
     be the leak that slowly starves production of generation capacity."""
     import app as appmod
     monkeypatch.setattr(appmod, "FREE_MODE", True)
+    appmod._demo_cache.clear()       # the cached sample guide must never leak from one test into the next
     real_sem = appmod._gen_sem       # a test that swaps in a tiny semaphore asserts on its own
     yield
-    assert real_sem._value == appmod.GEN_MAX_CONCURRENT, "a generation slot was never released"
+    appmod._demo_cache.clear()
+    assert real_sem._value == appmod._GEN_SLOTS, "a generation slot was never released"
     assert appmod._gen_waiting == [], "a request is still waiting for a generation slot"
 
 

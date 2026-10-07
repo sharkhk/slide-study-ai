@@ -1,4 +1,5 @@
 import io
+import copy
 import re
 import sys
 import uuid
@@ -821,15 +822,39 @@ def _env_num(name, default, cast=int, minimum=0):
         return default
     return v if v >= minimum else default
 
-FREE_MODE              = os.environ.get("ALIMNE_FREE_MODE", "1").strip().lower() not in ("0", "false", "no", "off")
+def _env_switch(name, default=True):
+    """A boolean env switch: unset or blank → `default`; "0", "false", "no", "off"
+    (any case) → False; anything else → True. The ONE parser for ALIMNE_FREE_MODE,
+    so the credit logic and the legal pages can never disagree about it."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+FREE_MODE              = _env_switch("ALIMNE_FREE_MODE")
 FAIR_DEVICE_DAILY      = _env_num("FAIR_DEVICE_DAILY", 10)      # anonymous, per X-Device-Id
 FAIR_IP_DAILY          = _env_num("FAIR_IP_DAILY", 250)         # per IP (campuses / carriers share one)
 FAIR_USER_DAILY        = _env_num("FAIR_USER_DAILY", 40)        # signed-in, per user id
 FAIR_GLOBAL_DAILY      = _env_num("FAIR_GLOBAL_DAILY", 2000)    # everyone — the daily budget breaker
-GEN_MAX_CONCURRENT     = _env_num("GEN_MAX_CONCURRENT", 3, minimum=1)   # gunicorn has few threads: leave one free
+FAIR_ANON_SHARE_PCT    = _env_num("FAIR_ANON_SHARE_PCT", 60, minimum=1)   # % of that budget anonymous visitors may use; the rest is reserved for signed-in users
+FAIR_CHAT_DAILY        = _env_num("FAIR_CHAT_DAILY", 100)       # chat questions per signed-in user
+WEB_THREADS            = _env_num("WEB_THREADS", 4, minimum=2)  # gunicorn --threads. The LIVE service runs 4; raise it together with the two knobs below
+GEN_MAX_CONCURRENT     = _env_num("GEN_MAX_CONCURRENT", 2, minimum=1)   # generations running at once (each holds a web thread)
+GEN_MAX_WAITING        = _env_num("GEN_MAX_WAITING", 1)         # requests allowed to WAIT for a slot (each holds a web thread too)
 GEN_QUEUE_WAIT_S       = _env_num("GEN_QUEUE_WAIT_S", 45, cast=float)
 RATE_SUMMARIZE_PER_MIN = _env_num("RATE_SUMMARIZE_PER_MIN", 30, minimum=1)
+RATE_PRECHECK_PER_MIN  = _env_num("RATE_PRECHECK_PER_MIN", 5, minimum=1)   # the yt-dlp probe / URL fetch run BEFORE a slot is taken
 _FAIR_WINDOW_HOURS     = 24
+_FAIR_BUDGET_S         = 3.0    # all the counter lookups of one request share this much time, then fail open
+_CHAT_USER_PER_MIN     = 10     # chat questions per signed-in user per minute
+
+# Running + waiting generations can never reach the web-thread count, whatever the
+# knobs say: a waiting request holds a gunicorn thread exactly like a running one, and
+# at least one thread must stay free for /healthz, /api/config and the static files
+# (Render restarts a service whose health check goes unanswered, which wipes every
+# in-memory guide). Defaults on 4 threads: 2 running + 1 waiting.
+_GEN_SLOTS    = max(1, min(GEN_MAX_CONCURRENT, WEB_THREADS - 1))
+_GEN_WAIT_MAX = max(0, min(GEN_MAX_WAITING, WEB_THREADS - 1 - _GEN_SLOTS))
 
 def _fair_consume(key, limit):
     """Take one unit from a fair-use counter → True (taken), False (exhausted) or
@@ -847,11 +872,27 @@ def _fair_consume(key, limit):
             _log.error("fair-use %s counter: unexpected RPC reply %r — failing open",
                        key.split(":")[1], res.data)
             return None
-        return bool(d["ok"])
+        ok = bool(d["ok"])
+        if ok and key.startswith("fair:global"):
+            _fair_watch(key, limit, d.get("remaining"))
+        return ok
     except Exception as exc:
         _log.error("fair-use %s counter failed — failing open: %s: %s",
                    key.split(":")[1], type(exc).__name__, exc)
         return None
+
+def _fair_watch(key, limit, remaining):
+    """One log line (warning level, so it shows in Render's logs) when a daily
+    GLOBAL pool crosses 80% of its limit, and one when it is used up — the owner's
+    cue to look at the Groq bill before the breaker starts refusing everyone."""
+    if not isinstance(remaining, int) or isinstance(remaining, bool) or limit < 1:
+        return
+    used = limit - remaining
+    if used == (limit * 4 + 4) // 5:
+        _log.warning("fair-use counter %s passed 80%% of its daily limit (%d of %d used)", key, used, limit)
+    elif used == limit:
+        _log.warning("fair-use counter %s is used up (%d of %d) — new guides are refused until it resets",
+                     key, used, limit)
 
 def _fair_refund_key(key):
     """Give one unit back to a counter (anon_refund). Best-effort; → True on success."""
@@ -886,6 +927,18 @@ def _fair_device_remaining(dev):
     except Exception:
         return None
 
+def _fair_remaining_key(key, limit):
+    """Units left on a counter, read-only (anon_remaining) → int, or None when unknown."""
+    sb = _get_sb()
+    if sb is None:
+        return None
+    try:
+        res = sb.rpc("anon_remaining", {"p_key": key, "p_limit": limit,
+                                        "p_window_hours": _FAIR_WINDOW_HOURS}).execute()
+        return int(res.data) if res.data is not None else None
+    except Exception:
+        return None
+
 # fair-use refusal code → (HTTP status, English, Arabic). Never says "unlimited".
 _FAIR_REFUSALS = {
     "fair_use_device": (429,
@@ -904,15 +957,41 @@ _FAIR_REFUSALS = {
 
 def _fair_refusal(code, ar=False):
     status, en, ar_msg = _FAIR_REFUSALS[code]
+    _log.info("fair-use refusal code=%s status=%s", code, status)   # so 'many refusals' can be alerted on
     return jsonify({"error": ar_msg if ar else en, "code": code}), status
+
+def _ip_bucket(ip):
+    """The key an address is counted under: IPv4 as is; an IPv6 address by its /64
+    (one subscriber or household: rotating inside a /64 buys nothing); an
+    IPv4-mapped IPv6 address as the IPv4 one; anything that is not an address as
+    a truncated string."""
+    s = str(ip or "")[:64]
+    try:
+        addr = _ipaddress.ip_address(s.strip())
+        if addr.version == 6:
+            if addr.ipv4_mapped:
+                return str(addr.ipv4_mapped)
+            return str(_ipaddress.ip_network(f"{addr}/64", strict=False))
+        return str(addr)
+    except ValueError:
+        return s
+
+def _fair_anon_limit():
+    """The slice of the global daily budget anonymous visitors may use. The rest is
+    reserved for signed-in users, so anonymous traffic (or a script rotating
+    device ids) can never lock out the people the sign-up funnel is built for."""
+    return max(1, FAIR_GLOBAL_DAILY * min(100, FAIR_ANON_SHARE_PCT) // 100)
 
 def _fair_charge(uid, req, data=None):
     """Free-mode stand-in for the token charge → (_Charge, None) or (None, response).
     Takes one unit from EVERY applicable counter — the account (signed in) or the
-    device (anonymous), then the IP, then the global daily budget — and rolls the
-    ones already taken back when a later one is exhausted. A counter that can't be
-    read fails open (see _fair_consume)."""
+    device (anonymous), then the IP, then (anonymous only) the anonymous slice of the
+    global budget, then the global daily budget — and rolls the ones already taken
+    back when a later one is exhausted. A counter that can't be read fails open (see
+    _fair_consume), and all the lookups of one request share _FAIR_BUDGET_S: a slow
+    database costs a request a few seconds at most, never a pinned web thread."""
     ip  = (_client_ip() or "")[:64]
+    ipk = _ip_bucket(ip)
     dev = _device_id(req)
     plan = []
     if uid:
@@ -922,12 +1001,20 @@ def _fair_charge(uid, req, data=None):
     elif ip and ip != "unknown":
         # No (valid) device id: a script, not our client. Count it per IP at the
         # device allowance so skipping the header never dodges the device cap.
-        plan.append((f"fair:dev:noid-{ip}", FAIR_DEVICE_DAILY, "fair_use_device"))
+        plan.append((f"fair:dev:noid-{ipk}", FAIR_DEVICE_DAILY, "fair_use_device"))
     if ip and ip != "unknown":
-        plan.append((f"fair:ip:{ip}", FAIR_IP_DAILY, "fair_use_ip"))
+        plan.append((f"fair:ip:{ipk}", FAIR_IP_DAILY, "fair_use_ip"))
+    if not uid:
+        # Refused with the device message on purpose: "sign in free" is the true answer.
+        plan.append(("fair:global:anon", _fair_anon_limit(), "fair_use_device"))
     plan.append(("fair:global", FAIR_GLOBAL_DAILY, "busy_today"))
     taken = []
-    for key, limit, code in plan:
+    t0 = time.monotonic()
+    for i, (key, limit, code) in enumerate(plan):
+        if i and time.monotonic() - t0 > _FAIR_BUDGET_S:
+            _log.warning("fair-use counters over their %.1fs time budget — failing open for %s and the rest",
+                         _FAIR_BUDGET_S, key.split(":")[1])
+            break
         got = _fair_consume(key, limit)
         if got is False:
             _fair_refund(taken)          # an exhausted counter must not cost the others
@@ -940,6 +1027,13 @@ def _gen_rate_limit():
     """Per-IP per-minute cap on the generation endpoints: RATE_SUMMARIZE_PER_MIN in
     free mode; with ALIMNE_FREE_MODE=0 the old hard-coded 5."""
     return RATE_SUMMARIZE_PER_MIN if FREE_MODE else _RATE_MAX
+
+def _precheck_rate_limit():
+    """Per-IP per-minute cap for work that runs BEFORE a generation slot is taken
+    (the yt-dlp duration probe, a server-side URL fetch). It holds a web thread
+    outside the generation gate, so it keeps the old strict figure: never above
+    the general limit, and RATE_PRECHECK_PER_MIN (default 5) in free mode."""
+    return min(_gen_rate_limit(), RATE_PRECHECK_PER_MIN)
 
 def _refund_credit(uid, ip, dev=None):
     """Refund one credit to the store that was charged: the account (uid), the
@@ -964,6 +1058,7 @@ class _Charge:
         self.uid, self.ip, self.dev, self.tok_left = uid, ip, dev, tok_left
         self.fair_keys = fair_keys
         self.refunded = False   # True once the credit really went back
+        self.work_started = False   # paid AI work (Groq / Whisper) has begun
         self._settled = False
         self._lock = threading.Lock()
 
@@ -971,6 +1066,28 @@ class _Charge:
         """The guide was delivered — the credit stays spent."""
         with self._lock:
             self._settled = True
+
+    def begin_work(self):
+        """Paid AI work is about to start. From here on a free-mode unit is spent
+        for good: the money is gone whether or not the client stays to read it."""
+        with self._lock:
+            self.work_started = True
+
+    def abandon(self):
+        """The client went away mid-stream (GeneratorExit). Before any paid AI work
+        the unit goes back, as for any failure. After it, a free-mode unit STAYS
+        spent — otherwise a script could run unlimited full-cost generations by
+        closing the socket just before the last event, with every fair-use counter
+        (the global breaker included) still at zero. Token mode keeps its old
+        behaviour exactly. → True when a refund was made."""
+        with self._lock:
+            keep = self.fair_keys is not None and self.work_started and not self._settled
+            if keep:
+                self._settled = True
+        if keep:
+            _log.info("client left after the AI work started — the fair-use units stay spent")
+            return False
+        return self.refund()
 
     def refund(self):
         with self._lock:
@@ -1071,6 +1188,7 @@ _rate_limit_lock = threading.Lock()
 _rate_limit      = {}
 _RATE_WINDOW     = 60
 _RATE_MAX        = 5
+_RATE_TABLE_MAX  = 5000    # past this many keys, entries that expired are dropped (a spoofed-IP flood must not grow memory forever)
 
 def _check_rate_limit(ip, scope="main", limit=_RATE_MAX):
     # Exempt ONLY genuine loopback (local dev). A blanket _is_private() exemption
@@ -1078,9 +1196,12 @@ def _check_rate_limit(ip, scope="main", limit=_RATE_MAX):
     # entirely — private-but-not-loopback client IPs must still be limited.
     if ip in ("127.0.0.1", "::1"):
         return True
-    key = f"{scope}:{ip}"
+    key = f"{scope}:{_ip_bucket(ip)}"     # an IPv6 client is one bucket per /64
     now = time.time()
     with _rate_limit_lock:
+        if len(_rate_limit) > _RATE_TABLE_MAX:
+            for k in [k for k, ts in _rate_limit.items() if not ts or now - ts[-1] >= _RATE_WINDOW]:
+                del _rate_limit[k]
         times = [t for t in _rate_limit.get(key, []) if now - t < _RATE_WINDOW]
         if len(times) >= limit:
             _rate_limit[key] = times
@@ -4581,13 +4702,18 @@ def _is_partial(overview, include_quiz, include_mcq):
 
 # ── Free mode: generation slots (a small queue instead of an error) ───────────
 # Every generation holds a gunicorn thread for its whole stream, and the box is
-# small, so only GEN_MAX_CONCURRENT run at once. The rest WAIT, up to
-# GEN_QUEUE_WAIT_S, while the stream tells them their place in line ('queued'
-# events — older clients ignore unknown steps); then 'busy' (their fair-use
-# units are refunded). Process-wide, which is the whole fleet: render runs ONE
-# gunicorn worker. Off entirely with ALIMNE_FREE_MODE=0.
-_gen_sem          = threading.BoundedSemaphore(GEN_MAX_CONCURRENT)
+# small, so only _GEN_SLOTS (GEN_MAX_CONCURRENT) run at once. A request that finds
+# them all taken may WAIT, up to GEN_QUEUE_WAIT_S, while the stream tells it its
+# place in line ('queued' events — older clients ignore unknown steps); then 'busy'
+# (its fair-use units are refunded). A waiter holds a web thread too, so at most
+# _GEN_WAIT_MAX (GEN_MAX_WAITING) wait; one more is turned away AT ONCE, before
+# it is charged anything. Slots + seats stay below WEB_THREADS: the gate can never
+# take every thread, so /healthz and the static files are always answered. The line
+# is first come, first served. Process-wide, which is the whole fleet: render runs
+# ONE gunicorn worker. Off entirely with ALIMNE_FREE_MODE=0.
+_gen_sem          = threading.BoundedSemaphore(_GEN_SLOTS)
 _gen_wait_lock    = threading.Lock()
+_gen_cond         = threading.Condition(_gen_wait_lock)   # a released slot wakes the line
 _gen_waiting      = []       # one token per request waiting for a slot, in arrival order
 _GEN_QUEUE_TICK_S = 3.0      # how often a waiting stream reports its place
 _GEN_BUSY_RETRY_S = 20
@@ -4599,9 +4725,12 @@ _BUSY_AR   = "الموقع مشغول جدًا الآن. يُرجى المحاو
 
 class _GenSlot:
     """One held slot of the generation semaphore. release() is idempotent, so a
-    slot is given back exactly once however the stream ends."""
-    def __init__(self, sem):
+    slot is given back exactly once however the stream ends. `cond` (when given)
+    is notified so the head of the line takes the slot without waiting for its
+    next tick."""
+    def __init__(self, sem, cond=None):
         self._sem  = sem
+        self._cond = cond
         self._held = True
         self._lock = threading.Lock()
 
@@ -4611,43 +4740,70 @@ class _GenSlot:
                 return False
             self._held = False
         self._sem.release()
+        if self._cond is not None:
+            with self._cond:
+                self._cond.notify_all()
         return True
 
 def _busy_event(ar=False):
-    """SSE error for a request that waited out GEN_QUEUE_WAIT_S without a slot."""
+    """SSE error for a request that could not get a generation slot (no seat in line,
+    or it waited out GEN_QUEUE_WAIT_S)."""
+    _log.info("generation busy (no free slot or seat in line)")
     return {"error": _BUSY_AR if ar else _BUSY_EN, "code": "busy",
             "retry_after_s": _GEN_BUSY_RETRY_S}
 
-def _gen_slot_acquire(ar=False):
-    """Sub-generator: `slot = yield from _gen_slot_acquire(ar)` → a _GenSlot, or
-    None when GEN_QUEUE_WAIT_S ran out. While it waits it yields SSE 'queued'
-    chunks (position + message) right away and then about every 3 s. The slot is
-    only taken on the way OUT (no yield between taking it and returning it), so
-    a client disconnecting mid-wait (GeneratorExit at a yield) never leaks one."""
-    sem = _gen_sem
-    if sem.acquire(blocking=False):
-        return _GenSlot(sem)
-    if GEN_QUEUE_WAIT_S <= 0:
-        return None
-    token    = object()
-    deadline = time.monotonic() + GEN_QUEUE_WAIT_S
+def _gen_has_room():
+    """True when a new generation request would run or get a seat in line right now.
+    The routes ask this BEFORE they charge anything or do any slow pre-work, so a
+    full house costs a refused request nothing but this check."""
     with _gen_wait_lock:
+        if _gen_sem._value > len(_gen_waiting):      # a slot beyond those the line is about to take
+            return True
+        return GEN_QUEUE_WAIT_S > 0 and len(_gen_waiting) < _GEN_WAIT_MAX
+
+def _busy_response(ar=False):
+    """The refusal for a full house, as JSON (the response has not started yet)."""
+    return jsonify(_busy_event(ar)), 503
+
+def _gen_slot_acquire(ar=False):
+    """Sub-generator: `slot = yield from _gen_slot_acquire(ar)` → a _GenSlot, or None
+    when there is no seat in line or GEN_QUEUE_WAIT_S ran out. While it waits it
+    yields SSE 'queued' chunks (position + message) right away and then about every
+    3 s. Waiters are served strictly in arrival order, and a newcomer never jumps
+    a non-empty line. The slot is only taken on the way OUT (no yield between taking
+    it and returning it), so a client disconnecting mid-wait (GeneratorExit at a
+    yield) never leaks one."""
+    sem = _gen_sem
+    with _gen_wait_lock:
+        if not _gen_waiting and sem.acquire(blocking=False):
+            return _GenSlot(sem, _gen_cond)
+        if GEN_QUEUE_WAIT_S <= 0 or len(_gen_waiting) >= _GEN_WAIT_MAX:
+            return None
+        token = object()
         _gen_waiting.append(token)
+    deadline = time.monotonic() + GEN_QUEUE_WAIT_S
     try:
         while True:
             with _gen_wait_lock:
                 pos = _gen_waiting.index(token) + 1
             yield _sse({"step": "queued", "position": pos,
                         "msg": (_QUEUED_AR if ar else _QUEUED_EN).format(n=pos)})
-            left = deadline - time.monotonic()
-            if left <= 0:
+            tick_end = min(deadline, time.monotonic() + _GEN_QUEUE_TICK_S)
+            with _gen_cond:
+                while True:
+                    if _gen_waiting[0] is token and sem.acquire(blocking=False):
+                        return _GenSlot(sem, _gen_cond)
+                    left = tick_end - time.monotonic()
+                    if left <= 0:
+                        break
+                    _gen_cond.wait(left)
+            if time.monotonic() >= deadline:
                 return None
-            if sem.acquire(timeout=min(_GEN_QUEUE_TICK_S, left)):
-                return _GenSlot(sem)
     finally:
         with _gen_wait_lock:
             if token in _gen_waiting:
                 _gen_waiting.remove(token)
+                _gen_cond.notify_all()     # the next in line is now the head
 
 @app.route("/api/summarize-stream", methods=["POST"])
 def summarize_stream():
@@ -4670,6 +4826,10 @@ def summarize_stream():
     _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
     if not fname.lower().endswith(_ALLOWED_EXT):
         return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
+
+    # Free mode: no slot and no seat in line → busy NOW, before anything is charged.
+    if FREE_MODE and not _gen_has_room():
+        return _busy_response(_wants_ar(request.form))
 
     # ── Credit gate: signed-in users spend a token; anonymous users get a
     #    small free quota per device/IP so they can try without an account. ────
@@ -4723,6 +4883,7 @@ def summarize_stream():
 
             # Pass 1
             yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
+            charge.begin_work()   # the first paid AI call: from here a disconnect no longer refunds
             overview = pass1_overview(
                 [s for s in slides if s["content"].strip() or s["title"].strip()],
                 language, dcfg
@@ -4790,8 +4951,8 @@ def summarize_stream():
             if slot is not None:
                 slot.release()
             if not settled:
-                _log.info("summarize stream closed early (client gone) — refunding")
-                charge.refund()
+                _log.info("summarize stream closed early (client gone)")
+                charge.abandon()   # refunds only if no paid AI work had started
 
     return Response(
         stream_with_context(generate()),
@@ -4948,6 +5109,12 @@ def share_guide(job_id):
         job = get_job(job_id)
     if not job:
         return _job_expired_json()
+    # Sharing is idempotent per guide: a second tap (or a script) gets the SAME link
+    # back and stores nothing new, so the shared_guides table cannot be filled from here.
+    with _jobs_lock:
+        known = job.get("share_slug")
+    if known:
+        return jsonify({"ok": True, "slug": known, "url": f"{APP_URL}/s/{known}"})
     sb = _get_sb()
     if sb is None:
         return jsonify({"error": "Sharing is temporarily unavailable."}), 503
@@ -4973,6 +5140,8 @@ def share_guide(job_id):
         slug = _new_slug()
         try:
             sb.table("shared_guides").insert({**base, "slug": slug}).execute()
+            with _jobs_lock:
+                job["share_slug"] = slug
             _log.info("Guide shared: /s/%s (by=%s)", slug, uid or "anon")
             return jsonify({"ok": True, "slug": slug, "url": f"{APP_URL}/s/{slug}"})
         except Exception as exc:
@@ -5247,6 +5416,25 @@ def _chat_answer(result):
         ans = "\n".join(t for t in (_scalar_text(a) for a in ans) if t.strip())
     return _scalar_text(ans)
 
+def _chat_fair_charge(uid, data=None):
+    """Free-mode meter for ONE chat question (an LLM call over the whole guide) →
+    (key | None, refusal | None). In order: a per-user per-minute cap (no database), the
+    GLOBAL budget (read-only — chat stops when the breaker has tripped, it does not
+    spend a guide's worth), then one unit of the user's own daily chat allowance
+    (fair:chat:user:<id>, the existing anon_consume counter). Everything that can't be
+    read fails open. `key` is what to give back if the question fails."""
+    # (uid 'dev' = local development with auth switched off: exempt, like loopback in _check_rate_limit)
+    if uid != "dev" and not _check_rate_limit(f"u:{uid}", scope="chatu", limit=_CHAT_USER_PER_MIN):
+        return None, (jsonify({"error": "Too many requests. Please wait a minute.", "code": "rate_limited"}), 429)
+    left = _fair_remaining_key("fair:global", FAIR_GLOBAL_DAILY)
+    if left is not None and left <= 0:
+        return None, _fair_refusal("busy_today", _wants_ar(data))
+    key = f"fair:chat:user:{uid}"
+    got = _fair_consume(key, FAIR_CHAT_DAILY)
+    if got is False:
+        return None, _fair_refusal("fair_use_user", _wants_ar(data))
+    return (key if got else None), None
+
 @app.route("/api/chat/<job_id>", methods=["POST"])
 def chat_with_slides(job_id):
     if not _check_rate_limit(_client_ip(), scope="chat", limit=20):
@@ -5271,6 +5459,13 @@ def chat_with_slides(job_id):
         job = get_job(job_id)
     if not job:
         return _job_expired_json()
+
+    # Free mode: a chat question is an LLM call too — metered after every input check.
+    chat_key = None
+    if FREE_MODE:
+        chat_key, refusal = _chat_fair_charge(uid, data)
+        if refusal:
+            return refusal
 
     guide = job.get("guide")
     # An explicit en/ar choice wins. 'auto' (or nothing) answers in the guide's
@@ -5302,6 +5497,8 @@ Rules:
 - JSON only""", num_predict=1024)
         return jsonify({"answer": _chat_answer(result)})
     except Exception as e:
+        if chat_key:
+            _fair_refund_key(chat_key)       # the question failed: give its unit back
         return jsonify({"error": _safe_err(e)}), 500
 
 
@@ -5800,7 +5997,7 @@ def _extract_video_id(url):
     return None
 
 
-def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True, include_mcq=True, uid=None, anon_ip=None, charge=None, ar=None, hold_slot=False):
+def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_left=None, include_quiz=True, include_mcq=True, uid=None, anon_ip=None, charge=None, ar=None, hold_slot=False, on_done=None):
     """Shared SSE generator for YouTube/text endpoints. `charge` is the credit
     spent for this run (None for the free demo); it is refunded exactly once on
     any failure or early disconnect (_Charge.refund is idempotent, so the
@@ -5808,7 +6005,9 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
     Free mode: the run first takes a generation slot (queued events while it
     waits) and gives it back in the `finally`. `hold_slot=True` means the caller
     (youtube) already holds one — and releases it — so none is taken here.
-    `ar` picks the language of the queue/busy/error texts (default: the guide's)."""
+    `ar` picks the language of the queue/busy/error texts (default: the guide's).
+    `on_done(overview, pdf_bytes, md_text)`, when given, is called once the guide is
+    built and stored (the demo cache uses it); it can never break the stream."""
     _dcfg = dcfg or DETAIL["standard"]
     _ar = (language == "ar") if ar is None else ar
     if charge is None and (uid or anon_ip):
@@ -5816,6 +6015,9 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
     def _refund():
         if charge is not None:
             charge.refund()
+    def _abandon():
+        if charge is not None:
+            charge.abandon()
     def generate():
         settled = False
         slot = None
@@ -5837,6 +6039,8 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             dcfg = _dcfg
 
             yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
+            if charge is not None:
+                charge.begin_work()   # the first paid AI call: from here a disconnect no longer refunds
             overview = pass1_overview(slides, language, dcfg)
 
             raw_sections = overview.get("sections", [])
@@ -5871,6 +6075,11 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
 
             job_id = uuid.uuid4().hex
             store_job(job_id, pdf_bytes, md_text, overview, None, f"{out_name}_study_guide.pdf")
+            if on_done is not None:
+                try:
+                    on_done(overview, pdf_bytes, md_text)
+                except Exception:
+                    _log.error("on_done hook failed:\n%s", _tb.format_exc())
 
             done_data = {"step": "done", "job_id": job_id,
                          "sections":   len(sections),
@@ -5895,8 +6104,8 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             if slot is not None:
                 slot.release()
             if not settled:
-                _log.info("text stream closed early (client gone) — refunding")
-                _refund()
+                _log.info("text stream closed early (client gone)")
+                _abandon()   # refunds only if no paid AI work had started
     return generate
 
 
@@ -5940,7 +6149,7 @@ def _yt_duration(video_id):
 def youtube_transcript():
     # Rate-limit BEFORE the expensive yt-dlp scrape / Whisper path (this endpoint
     # had none, so anon callers could force unbounded yt-dlp + paid transcription).
-    if not _check_rate_limit(_client_ip(), scope="youtube", limit=_gen_rate_limit()):
+    if not _check_rate_limit(_client_ip(), scope="youtube", limit=_precheck_rate_limit()):
         return jsonify({"error": "Too many requests — please wait a moment and try again."}), 429
     uid = _auth_optional(request)
     if uid is False:
@@ -5967,6 +6176,11 @@ def youtube_transcript():
     video_id = _extract_video_id(url)
     if not video_id:
         return jsonify({"error": "Could not extract video ID from URL"}), 400
+
+    # Free mode: a full house is busy NOW — before the yt-dlp probe below (it holds a web
+    # thread outside the generation gate) and before anything is charged.
+    if FREE_MODE and not _gen_has_room():
+        return _busy_response(_wants_ar(data))
 
     # Reject videos longer than 50 minutes (checked before consuming a token)
     _dur = _yt_duration(video_id)
@@ -6013,6 +6227,7 @@ def youtube_transcript():
                     yield _sse({"error": "No captions found and GROQ_API_KEY not set."}); return
                 yield _sse({"step": "transcript", "msg": "No captions — downloading audio for Whisper transcription…"})
                 try:
+                    charge.begin_work()   # the paid Whisper call: from here a disconnect no longer refunds
                     transcript_text = _transcribe_with_whisper(video_id)
                     yield _sse({"step": "transcript", "msg": "Audio transcribed — processing…"})
                 except ValueError as we:
@@ -6037,8 +6252,8 @@ def youtube_transcript():
             if slot is not None:
                 slot.release()
             if not settled and not delegated:
-                _log.info("youtube stream closed early (client gone) — refunding")
-                charge.refund()
+                _log.info("youtube stream closed early (client gone)")
+                charge.abandon()   # refunds only if no paid AI work had started
 
     return Response(
         stream_with_context(generate()),
@@ -6185,12 +6400,67 @@ _DEMO_TEXT_AR = (
     "ثاني أكسيد الكربون ودرجة الحرارة. وهو ضروري للحياة لأنه ينتج الأكسجين ويشكّل أساس السلاسل الغذائية."
 )
 
+# ── Free mode: the sample lecture is made ONCE per language ────────────────────
+# The demo text is fixed and its answer does not depend on the visitor, so paying
+# Groq for every tap would be money for nothing (and an unmetered way to burn the
+# budget). The first run per language is a normal generation, counted against the
+# global daily budget; the finished guide is kept for _DEMO_CACHE_TTL_S and every
+# later demo is served as a fresh, independent job at ZERO AI cost. A failed or
+# partial run is never cached. In-memory like every guide, so a restart clears it.
+_DEMO_CACHE_TTL_S = 6 * 3600
+_demo_cache       = {}                 # "en" / "ar" → {"at", "guide", "pdf", "md", "filename"}
+_demo_lock        = threading.Lock()
+
+def _demo_cache_get(lang):
+    with _demo_lock:
+        entry = _demo_cache.get(lang)
+        if entry is not None and time.monotonic() - entry["at"] >= _DEMO_CACHE_TTL_S:
+            _demo_cache.pop(lang, None)
+            entry = None
+        return entry
+
+def _demo_cache_put(lang, overview, pdf_bytes, md_text):
+    if _is_partial(overview, True, True):      # a guide missing its cards or quiz must not stick
+        return
+    with _demo_lock:
+        _demo_cache[lang] = {"at": time.monotonic(), "guide": copy.deepcopy(overview),
+                             "pdf": pdf_bytes, "md": md_text,
+                             "filename": "sample_lecture_study_guide.pdf"}
+
+def _demo_replay(entry):
+    """The cached sample as an SSE generator function: the same kind of events as a real
+    run, a NEW job id each time (own 15-minute life, own delete), no AI call."""
+    def generate():
+        yield _sse({"step": "extract", "msg": "Preparing content…"})
+        yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
+        guide  = copy.deepcopy(entry["guide"])
+        job_id = uuid.uuid4().hex
+        store_job(job_id, entry["pdf"], entry["md"], guide, None, entry["filename"])
+        yield _sse({"step": "done", "job_id": job_id,
+                    "sections":   len(guide.get("sections",   [])),
+                    "keywords":   len(guide.get("keywords",   [])),
+                    "flashcards": len(guide.get("flashcards", [])),
+                    "mcqs":       len(guide.get("mcqs",       [])),
+                    "tokens_remaining": 0})
+    return generate
+
+def _demo_charge(ar=False):
+    """A real (uncached) demo run costs real AI money, so it takes one unit from the
+    GLOBAL daily budget — the breaker bounds it like any guide — and gives it back
+    if the run fails. → (_Charge, None) or (None, refusal)."""
+    got = _fair_consume("fair:global", FAIR_GLOBAL_DAILY)
+    if got is False:
+        return None, _fair_refusal("busy_today", ar)
+    return _Charge(fair_keys=("fair:global",) if got else ()), None
+
 @app.route("/api/summarize-text", methods=["POST"])
 def summarize_text():
     # Zero-friction demo: a curious visitor (esp. on mobile, with no file to hand)
-    # taps "Try a sample" → a real guide on a FIXED server-side lecture. No credit
-    # consumed; separate tighter rate limit; fixed text can't be abused as a free
-    # generator. This is the activation unlock — the point is that they SEE it work.
+    # taps "Try a sample" → a real guide on a FIXED server-side lecture. No token or
+    # visitor allowance is spent; a separate, tighter rate limit applies. In free mode
+    # the guide is made once per language and then copied (see _demo_cache) — a real
+    # run is counted against the global budget. This is the activation unlock: the
+    # point is that they SEE it work.
     # The body is read ONCE, here, before anything can be spent. silent=True: a
     # non-JSON body is {} (→ "No text or URL" below); a JSON array/string/number
     # body is a 400 (it used to 500 on .get()).
@@ -6201,15 +6471,29 @@ def summarize_text():
     if data.get("demo"):
         if not _check_rate_limit(_client_ip(), scope="demo", limit=8):
             return jsonify({"error": "Too many demo runs — please wait a moment."}), 429
+        d_lang = "ar" if data.get("language") == "ar" else "en"
+        sse_headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        cached = _demo_cache_get(d_lang) if FREE_MODE else None
+        if cached is not None:
+            _log_usage_async("demo", "demo")
+            return Response(stream_with_context(_demo_replay(cached)()), mimetype="text/event-stream",
+                            headers=sse_headers)
         if not ollama_running():
             return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
-        d_lang = "ar" if data.get("language") == "ar" else "en"
         d_text = _DEMO_TEXT_AR if d_lang == "ar" else _DEMO_TEXT_EN
+        charge, on_done = None, None
+        if FREE_MODE:
+            if not _gen_has_room():
+                return _busy_response(d_lang == "ar")
+            charge, err = _demo_charge(d_lang == "ar")
+            if err:
+                return err
+            on_done = lambda overview, pdf_bytes, md_text: _demo_cache_put(d_lang, overview, pdf_bytes, md_text)
         _log_usage_async("demo", "demo")
         gen = _stream_text_as_sse(d_text, d_lang, "sample_lecture", "text",
-                                  DETAIL["standard"], 0, True, uid=None, anon_ip=None)
-        return Response(stream_with_context(gen()), mimetype="text/event-stream",
-                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+                                  DETAIL["standard"], 0, True, uid=None, anon_ip=None,
+                                  charge=charge, on_done=on_done)
+        return Response(stream_with_context(gen()), mimetype="text/event-stream", headers=sse_headers)
 
     # Rate-limit BEFORE the server-side URL fetch + multi-pass LLM run.
     if not _check_rate_limit(_client_ip(), scope="text", limit=_gen_rate_limit()):
@@ -6239,6 +6523,15 @@ def summarize_text():
     # visitor's free preview when the durable refund is unavailable.
     if not text and not _url_precheck(url):
         return _bad_request(_BAD_URL_EN, _BAD_URL_AR, data)
+
+    # A full house is busy NOW, before the charge and before the URL fetch below (which
+    # holds a web thread outside the generation gate).
+    if FREE_MODE and not _gen_has_room():
+        return _busy_response(_wants_ar(data))
+    # The server-side URL fetch runs before any slot: its own, lower per-IP limit. (Pasted
+    # text has no such work, so it keeps the general limit.)
+    if not text and url and not _check_rate_limit(_client_ip(), scope="texturl", limit=_precheck_rate_limit()):
+        return jsonify({"error": "Too many requests — please wait a moment and try again."}), 429
 
     charge, err = _charge_credit(uid, request, data)
     if err:
@@ -6361,10 +6654,11 @@ def _legal_shell(title, body):
 
 def _legal_free_mode():
     """True when the legal pages should describe Alimne as free (the default).
-    Same switch as the credit logic: ALIMNE_FREE_MODE=0 brings the old token plans
-    back, and then these pages must say so again (read per request, so the page
-    can never contradict what the app is actually doing)."""
-    return os.environ.get("ALIMNE_FREE_MODE", "1").strip() != "0"
+    The very same value as the credit logic (the FREE_MODE constant, one parser for
+    "0", "false", "no", "off"): ALIMNE_FREE_MODE off brings the old token plans back,
+    and then these pages say so again — they can never contradict what the app is
+    actually doing."""
+    return FREE_MODE
 
 
 @app.route("/privacy")
@@ -6374,8 +6668,8 @@ def privacy_page():
                 else "track your monthly token balance")
     if free:
         counters = """<li><strong>Usage counters:</strong> to keep Alimne available to everyone and to prevent abuse, we count how many
-study guides are generated per day. Each counter is stored in our database (Supabase) against a random device
-identifier kept in your browser, your IP address, or your account ID if you are signed in, plus one overall total.
+study guides are generated (and chat questions asked) per day. Each counter is stored in our database (Supabase) against a random device
+identifier kept in your browser, your IP address, or your account ID if you are signed in, plus overall daily totals.
 A counter holds only a number and timestamps \u2014 never your files, text or study guides \u2014 and is used for
 nothing except applying usage limits.</li>"""
     else:

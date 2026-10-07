@@ -206,7 +206,9 @@ def _has_arabic(s):
 
 
 def _keys(dev=DEV, ip=IP):
-    return [f"fair:dev:{dev}", f"fair:ip:{ip}", "fair:global"]
+    """Every counter an ANONYMOUS generation takes one unit from, in charge order:
+    the device, the IP, the anonymous slice of the global budget, the global budget."""
+    return [f"fair:dev:{dev}", f"fair:ip:{ip}", "fair:global:anon", "fair:global"]
 
 
 def _post_text(client, device=DEV, headers=None, **body):
@@ -269,21 +271,24 @@ def test_file_and_text_done_events_keep_their_shape(client, auth_on, sb, llm):
         assert {"sections", "keywords", "flashcards", "mcqs"} <= set(done)
 
 
-def test_demo_is_free_and_unmetered(client, auth_on, sb, llm, no_tokens, monkeypatch):
-    # Every counter is already exhausted — the demo does not care, and takes no unit.
-    for k in _keys():
+def test_demo_is_free_for_the_visitor(client, auth_on, sb, llm, no_tokens, monkeypatch):
+    # The visitor's own counters (device, IP, anonymous slice) are all exhausted — the demo does
+    # not care and takes none of them. A real (uncached) run costs real AI money, so it takes one
+    # unit from the GLOBAL budget only (see J2: cached copies cost nothing at all).
+    for k in _keys()[:3]:
         sb.counts[k] = 10 ** 6
     before = dict(sb.counts)
     r = client.post("/api/summarize-text", json={"demo": True, "language": "en"}, headers={"X-Device-Id": DEV})
     assert r.status_code == 200
     assert _sse_events(r)[-1]["step"] == "done"
-    assert sb.counts == before and sb.calls == [] and no_tokens == []
+    assert sb.counts == {**before, "fair:global": 1} and sb.names("anon_consume") == ["fair:global"]
+    assert no_tokens == []
 
 
 def test_anonymous_without_a_device_id_is_counted_per_ip_at_the_device_allowance(client, auth_on, sb, llm):
     r = _post_text(client, device=None)
     assert _sse_events(r)[-1]["step"] == "done"
-    assert sb.counts == {f"fair:dev:noid-{IP}": 1, f"fair:ip:{IP}": 1, "fair:global": 1}
+    assert sb.counts == {f"fair:dev:noid-{IP}": 1, f"fair:ip:{IP}": 1, "fair:global:anon": 1, "fair:global": 1}
 
 
 def test_a_malformed_device_id_counts_as_none(client, auth_on, sb, llm):
@@ -296,7 +301,7 @@ def test_unknown_ip_is_not_lumped_into_one_shared_counter(monkeypatch, sb):
     monkeypatch.setattr(appmod, "_client_ip", lambda: "unknown")
     with appmod.app.test_request_context("/", headers={"X-Device-Id": DEV}):
         charge, err = appmod._charge_credit(None, appmod.request)
-    assert err is None and charge.fair_keys == (f"fair:dev:{DEV}", "fair:global")
+    assert err is None and charge.fair_keys == (f"fair:dev:{DEV}", "fair:global:anon", "fair:global")
 
 
 def test_validation_errors_spend_nothing_and_never_wait_for_a_slot(client, auth_on, sb, monkeypatch):
@@ -322,14 +327,15 @@ ANON_CASES = [
     # exhausted counter, refusal code, status, counters already taken that must be rolled back
     ("dev",    "fair_use_device", 429, []),
     ("ip",     "fair_use_ip",     429, ["dev"]),
-    ("global", "busy_today",      503, ["dev", "ip"]),
+    ("anon",   "fair_use_device", 429, ["dev", "ip"]),      # the anonymous slice of the global budget
+    ("global", "busy_today",      503, ["dev", "ip", "anon"]),
 ]
 
 
 @pytest.mark.parametrize("which,code,status,taken_before", ANON_CASES, ids=[c[0] for c in ANON_CASES])
 def test_exhausted_counter_refuses_and_rolls_back_the_ones_already_taken(
         client, auth_on, sb, llm, no_tokens, which, code, status, taken_before):
-    key = {"dev": f"fair:dev:{DEV}", "ip": f"fair:ip:{IP}", "global": "fair:global"}
+    key = {"dev": f"fair:dev:{DEV}", "ip": f"fair:ip:{IP}", "anon": "fair:global:anon", "global": "fair:global"}
     sb.counts[key[which]] = 10 ** 6                          # far past any cap
     r = _post_text(client)
     assert r.status_code == status
@@ -383,7 +389,8 @@ def test_caps_are_the_configured_knobs(client, auth_on, sb, llm, monkeypatch):
     sb.counts = {}
     monkeypatch.setattr(appmod, "FAIR_IP_DAILY", 250)
     monkeypatch.setattr(appmod, "FAIR_GLOBAL_DAILY", 1)
-    r1, r2 = _post_text(client), _post_text(client, device="device-cccc-0001")
+    r1 = _post_text(client)
+    r2 = _post_text(client, headers={"Authorization": f"Bearer {_tok('user-9')}"})   # signed in: no anonymous slice
     r1.get_data()
     assert r1.status_code == 200 and r2.status_code == 503 and r2.get_json()["code"] == "busy_today"
 
@@ -400,6 +407,7 @@ def test_counters_use_the_documented_rpc_and_window(monkeypatch, sb):
     assert err is None
     assert seen == [("anon_consume", {"p_key": f"fair:dev:{DEV}", "p_limit": 10, "p_window_hours": 24}),
                     ("anon_consume", {"p_key": f"fair:ip:{IP}", "p_limit": 250, "p_window_hours": 24}),
+                    ("anon_consume", {"p_key": "fair:global:anon", "p_limit": 1200, "p_window_hours": 24}),
                     ("anon_consume", {"p_key": "fair:global", "p_limit": 2000, "p_window_hours": 24})]
     assert charge.tok_left is None and charge.fair_keys == tuple(_keys())
 
@@ -463,10 +471,10 @@ def test_one_counter_failing_still_charges_the_others_and_refunds_only_those(sb,
     sb.consume_raises["fair:global"] = RuntimeError("timeout")
     with appmod.app.test_request_context("/", headers={"X-Device-Id": DEV}):
         charge, err = appmod._charge_credit(None, appmod.request)
-    assert err is None and charge.fair_keys == tuple(_keys()[:2])
+    assert err is None and charge.fair_keys == tuple(_keys()[:3])
     assert charge.refund() is True
-    assert sb.names("anon_refund") == _keys()[:2]             # never the unknown one
-    assert sb.counts == {k: 0 for k in _keys()[:2]}
+    assert sb.names("anon_refund") == _keys()[:3]             # never the unknown one
+    assert sb.counts == {k: 0 for k in _keys()[:3]}
 
 
 def test_a_failing_counter_does_not_hide_an_exhausted_one(sb):
@@ -526,7 +534,7 @@ def test_client_disconnect_refunds_exactly_once(sb, monkeypatch):
     gen.close()                                                # …then the client goes away
     assert sb.counts == {k: 0 for k in _keys()} and sb.names("anon_refund") == _keys()
     gen.close()
-    assert len(sb.names("anon_refund")) == 3                   # a second close refunds nothing
+    assert len(sb.names("anon_refund")) == len(_keys())        # a second close refunds nothing
 
 
 def test_disconnect_in_the_file_stream_refunds_and_releases_the_slot(client, auth_on, sb, llm):
@@ -565,6 +573,7 @@ def tiny_sem(monkeypatch):
     monkeypatch.setattr(appmod, "_gen_sem", sem)
     monkeypatch.setattr(appmod, "_GEN_QUEUE_TICK_S", 0.05)
     monkeypatch.setattr(appmod, "GEN_QUEUE_WAIT_S", 0.4)
+    monkeypatch.setattr(appmod, "_GEN_WAIT_MAX", 8)         # the seat limit has its own tests (section J)
     return sem
 
 
@@ -593,6 +602,7 @@ def test_never_more_than_the_cap_generate_at_once(monkeypatch):
     monkeypatch.setattr(appmod, "_gen_sem", threading.BoundedSemaphore(2))
     monkeypatch.setattr(appmod, "_GEN_QUEUE_TICK_S", 0.05)
     monkeypatch.setattr(appmod, "GEN_QUEUE_WAIT_S", 30.0)
+    monkeypatch.setattr(appmod, "_GEN_WAIT_MAX", 10)
     _fake_llm(monkeypatch)
     lock, live, peak = threading.Lock(), [0], [0]
     def slow_pass1(slides, language, dcfg=None):
@@ -777,9 +787,10 @@ def test_youtube_disconnect_during_captions_releases_slot_and_refunds(client, au
     assert tiny_sem._value == 1 and sb.counts == {k: 0 for k in _keys()}
 
 
-def test_the_demo_takes_a_slot_but_no_counter(client, auth_on, sb, llm, tiny_sem):
+def test_the_demo_takes_a_slot_and_only_the_global_unit(client, auth_on, sb, llm, tiny_sem):
     evs = _sse_events(client.post("/api/summarize-text", json={"demo": True, "language": "en"}))
-    assert evs[-1]["step"] == "done" and tiny_sem._value == 1 and sb.calls == []
+    assert evs[-1]["step"] == "done" and tiny_sem._value == 1
+    assert sb.calls == [("anon_consume", "fair:global")]       # no device, IP or user counter
 
 
 def test_queue_messages_are_bilingual(tiny_sem, monkeypatch):
@@ -1051,7 +1062,8 @@ sys.path.insert(0, os.environ["APP_ROOT"]); os.chdir(os.environ["APP_ROOT"])
 import app as A
 print(json.dumps({k: getattr(A, k) for k in (
     "FREE_MODE", "FAIR_DEVICE_DAILY", "FAIR_IP_DAILY", "FAIR_USER_DAILY", "FAIR_GLOBAL_DAILY",
-    "GEN_MAX_CONCURRENT", "GEN_QUEUE_WAIT_S", "RATE_SUMMARIZE_PER_MIN")}))
+    "FAIR_ANON_SHARE_PCT", "FAIR_CHAT_DAILY", "WEB_THREADS", "GEN_MAX_CONCURRENT", "GEN_MAX_WAITING",
+    "GEN_QUEUE_WAIT_S", "RATE_SUMMARIZE_PER_MIN", "RATE_PRECHECK_PER_MIN")}))
 """
 
 
@@ -1067,18 +1079,23 @@ def _knobs(**env):
 
 def test_knob_defaults_and_overrides_at_import():
     assert _knobs() == {"FREE_MODE": True, "FAIR_DEVICE_DAILY": 10, "FAIR_IP_DAILY": 250, "FAIR_USER_DAILY": 40,
-                        "FAIR_GLOBAL_DAILY": 2000, "GEN_MAX_CONCURRENT": 3, "GEN_QUEUE_WAIT_S": 45.0,
-                        "RATE_SUMMARIZE_PER_MIN": 30}
+                        "FAIR_GLOBAL_DAILY": 2000, "FAIR_ANON_SHARE_PCT": 60, "FAIR_CHAT_DAILY": 100,
+                        "WEB_THREADS": 4, "GEN_MAX_CONCURRENT": 2, "GEN_MAX_WAITING": 1, "GEN_QUEUE_WAIT_S": 45.0,
+                        "RATE_SUMMARIZE_PER_MIN": 30, "RATE_PRECHECK_PER_MIN": 5}
     k = _knobs(ALIMNE_FREE_MODE="0", FAIR_DEVICE_DAILY="7", FAIR_IP_DAILY="99", FAIR_USER_DAILY="5",
-               FAIR_GLOBAL_DAILY="123", GEN_MAX_CONCURRENT="2", GEN_QUEUE_WAIT_S="9.5", RATE_SUMMARIZE_PER_MIN="12")
+               FAIR_GLOBAL_DAILY="123", FAIR_ANON_SHARE_PCT="40", FAIR_CHAT_DAILY="9", WEB_THREADS="8",
+               GEN_MAX_CONCURRENT="5", GEN_MAX_WAITING="2", GEN_QUEUE_WAIT_S="9.5", RATE_SUMMARIZE_PER_MIN="12",
+               RATE_PRECHECK_PER_MIN="3")
     assert k == {"FREE_MODE": False, "FAIR_DEVICE_DAILY": 7, "FAIR_IP_DAILY": 99, "FAIR_USER_DAILY": 5,
-                 "FAIR_GLOBAL_DAILY": 123, "GEN_MAX_CONCURRENT": 2, "GEN_QUEUE_WAIT_S": 9.5,
-                 "RATE_SUMMARIZE_PER_MIN": 12}
-    # nonsense falls back to the defaults; a zero slot count / rate would lock everyone out
+                 "FAIR_GLOBAL_DAILY": 123, "FAIR_ANON_SHARE_PCT": 40, "FAIR_CHAT_DAILY": 9, "WEB_THREADS": 8,
+                 "GEN_MAX_CONCURRENT": 5, "GEN_MAX_WAITING": 2, "GEN_QUEUE_WAIT_S": 9.5,
+                 "RATE_SUMMARIZE_PER_MIN": 12, "RATE_PRECHECK_PER_MIN": 3}
+    # nonsense falls back to the defaults; a zero slot count / rate / thread count would lock everyone out
     k = _knobs(ALIMNE_FREE_MODE="1", FAIR_DEVICE_DAILY="lots", GEN_MAX_CONCURRENT="0", GEN_QUEUE_WAIT_S="soon",
-               RATE_SUMMARIZE_PER_MIN="0")
-    assert k["FREE_MODE"] is True and k["FAIR_DEVICE_DAILY"] == 10 and k["GEN_MAX_CONCURRENT"] == 3
+               RATE_SUMMARIZE_PER_MIN="0", WEB_THREADS="1", RATE_PRECHECK_PER_MIN="0", FAIR_ANON_SHARE_PCT="0")
+    assert k["FREE_MODE"] is True and k["FAIR_DEVICE_DAILY"] == 10 and k["GEN_MAX_CONCURRENT"] == 2
     assert k["GEN_QUEUE_WAIT_S"] == 45.0 and k["RATE_SUMMARIZE_PER_MIN"] == 30
+    assert k["WEB_THREADS"] == 4 and k["RATE_PRECHECK_PER_MIN"] == 5 and k["FAIR_ANON_SHARE_PCT"] == 60
 
 
 def test_the_free_mode_code_adds_no_import_time_threads_or_lazy_imports():
@@ -1088,3 +1105,694 @@ def test_the_free_mode_code_adds_no_import_time_threads_or_lazy_imports():
     block = src[start:src.index("def _refund_credit", start)]
     assert "Thread(" not in block and "submit(" not in block and "\nimport " not in block
     assert "threading.Thread" not in src[src.index("_gen_sem          ="):src.index("_gen_sem          =") + 400]
+
+
+# ══════════════════════════════════════════════════════════════════════════════════
+# J. Launch-review hardening. Each test below pins one thing a review of the free
+#    launch found: free generations a script could get by closing the socket, the
+#    unmetered demo and chat, the generation line that held every web thread, the
+#    shared global counter, and a few cheap-to-abuse paths.
+# ══════════════════════════════════════════════════════════════════════════════════
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+
+
+def _charged(sb_fake):
+    """A real charge for the fixed device, taken through the real counters."""
+    with appmod.app.test_request_context("/", headers={"X-Device-Id": DEV}):
+        charge, err = appmod._charge_credit(None, appmod.request)
+    assert err is None
+    return charge
+
+
+def _ev(chunk):
+    return json.loads(chunk[len("data: "):].strip())
+
+
+def _close_at(gen, step, msg_prefix=None):
+    """Read events until `step` (and, if given, a message prefix) arrives, then drop the
+    stream: the client socket is gone. Returns that event."""
+    for chunk in gen:
+        ev = _ev(chunk)
+        if ev.get("step") == step and (msg_prefix is None or str(ev.get("msg", "")).startswith(msg_prefix)):
+            gen.close()
+            return ev
+    raise AssertionError(f"step {step!r} never came")
+
+
+def _store_job(language="en"):
+    jid = uuid.uuid4().hex
+    appmod.store_job(jid, b"%PDF-1.4 t", "# T\n", {"title": "T", "language": language,
+                     "sections": [{"title": "S", "bullets": ["fact one"]}]}, None, "g_study_guide.pdf")
+    return jid
+
+
+def _read_until(resp, marker):
+    """Read a streamed response chunk by chunk until `marker` (bytes) shows up."""
+    for chunk in resp.response:
+        raw = chunk if isinstance(chunk, bytes) else chunk.encode()
+        if marker in raw:
+            return True
+    return False
+
+
+# ── J1. closing the socket after the AI work started must not refund it ──────────
+@pytest.mark.parametrize("step,msg", [("section", None), ("flashcards", None), ("mcq", "Quiz ready"), ("pdf", None)])
+def test_disconnect_after_the_ai_work_started_keeps_the_units_spent(sb, monkeypatch, step, msg):
+    _fake_llm(monkeypatch)
+    charge = _charged(sb)
+    gen = appmod._stream_text_as_sse(TEXT, "en", "x", "text", charge=charge)()
+    _close_at(gen, step, msg)                                   # the paid passes ran; now the client leaves
+    assert sb.counts == {k: 1 for k in _keys()}
+    assert sb.names("anon_refund") == []
+
+
+@pytest.mark.parametrize("step", ["extract", "overview"])
+def test_disconnect_before_any_ai_work_still_refunds(sb, monkeypatch, step):
+    _fake_llm(monkeypatch)
+    charge = _charged(sb)
+    gen = appmod._stream_text_as_sse(TEXT, "en", "x", "text", charge=charge)()
+    _close_at(gen, step)                                        # nothing has cost anything yet
+    assert sb.counts == {k: 0 for k in _keys()} and sb.names("anon_refund") == _keys()
+
+
+def test_a_script_that_closes_the_socket_after_every_paid_run_hits_the_cap(client, auth_on, sb, monkeypatch):
+    """The reviewed exploit: read until 'Quiz ready', drop the socket, repeat. The counters
+    must keep counting, so the device cap stops it exactly where it stops a normal client."""
+    _fake_llm(monkeypatch)
+    for _ in range(appmod.FAIR_DEVICE_DAILY):
+        r = _post_text(client)
+        assert _read_until(r, b"Quiz ready")
+        r.close()
+    assert sb.counts[f"fair:dev:{DEV}"] == appmod.FAIR_DEVICE_DAILY
+    assert sb.counts["fair:global"] == appmod.FAIR_DEVICE_DAILY
+    r = _post_text(client)
+    assert r.status_code == 429 and r.get_json()["code"] == "fair_use_device"
+
+
+def test_file_stream_disconnect_after_paid_work_keeps_the_units(client, auth_on, sb, llm):
+    r = _post_file(client)
+    assert _read_until(r, b'"step": "pdf"')
+    r.close()
+    assert sb.counts == {k: 1 for k in _keys()} and sb.names("anon_refund") == []
+
+
+def test_youtube_disconnect_after_the_whisper_call_keeps_the_units(client, auth_on, sb, llm, monkeypatch):
+    monkeypatch.setattr(appmod, "GROQ_API_KEY", "test-key")
+    monkeypatch.setattr(appmod, "_fetch_captions", lambda vid: (_ for _ in ()).throw(ValueError("no_captions")))
+    whisper = []
+    monkeypatch.setattr(appmod, "_transcribe_with_whisper", lambda vid: whisper.append(vid) or "lecture words " * 50)
+    r = _post_youtube(client)
+    assert _read_until(r, b"Audio transcribed")
+    r.close()
+    assert whisper == ["dQw4w9WgXcQ"]
+    assert sb.counts == {k: 1 for k in _keys()} and sb.names("anon_refund") == []
+
+
+def test_youtube_disconnect_before_the_whisper_call_refunds(client, auth_on, sb, llm, monkeypatch):
+    monkeypatch.setattr(appmod, "GROQ_API_KEY", "test-key")
+    monkeypatch.setattr(appmod, "_fetch_captions", lambda vid: (_ for _ in ()).throw(ValueError("no_captions")))
+    whisper = []
+    monkeypatch.setattr(appmod, "_transcribe_with_whisper", lambda vid: whisper.append(vid) or "x " * 50)
+    r = _post_youtube(client)
+    assert _read_until(r, b"downloading audio")
+    r.close()                                                   # the client left BEFORE the paid call
+    assert whisper == [] and sb.counts == {k: 0 for k in _keys()}
+
+
+def test_a_server_side_failure_after_paid_work_still_refunds(client, auth_on, sb, monkeypatch):
+    # the visitor did nothing wrong: an exception (or a hollow guide) gives the units back
+    _fake_llm(monkeypatch, bullets=False)
+    assert _sse_events(_post_text(client))[-1]["code"] == "no_notes"
+    assert sb.counts == {k: 0 for k in _keys()}
+
+
+def test_charge_abandon_unit_behaviour(sb, monkeypatch):
+    refunds = []
+    monkeypatch.setattr(appmod, "_refund_token", lambda uid: refunds.append(uid) or True)
+    # token mode keeps its old behaviour exactly: a disconnect always refunds
+    old = appmod._Charge(uid="u1")
+    old.begin_work()
+    assert old.abandon() is True and refunds == ["u1"]
+    # free mode: before the work -> refund; after -> kept, and a later refund() is a no-op
+    sb.counts = {"fair:global": 1}
+    early = appmod._Charge(fair_keys=("fair:global",))
+    assert early.abandon() is True and sb.counts == {"fair:global": 0}
+    sb.counts = {"fair:global": 1}
+    late = appmod._Charge(fair_keys=("fair:global",))
+    late.begin_work()
+    assert late.abandon() is False and late.refund() is False and sb.counts == {"fair:global": 1}
+
+
+# ── J2. the demo is cached, and a real run is counted against the global budget ──
+def _post_demo(client, **body):
+    return client.post("/api/summarize-text", json={"demo": True, "language": "en", **body},
+                       headers={"X-Device-Id": DEV})
+
+
+@pytest.fixture
+def ai_calls(monkeypatch):
+    calls = []
+    inner = appmod._call_ollama
+    def counting(*a, **k):
+        calls.append(1)
+        return inner(*a, **k)
+    monkeypatch.setattr(appmod, "_call_ollama", counting)
+    return calls
+
+
+def test_demo_is_made_once_then_served_from_the_cache_at_no_cost(client, auth_on, sb, llm, ai_calls):
+    first = _sse_events(_post_demo(client))
+    assert first[-1]["step"] == "done"
+    n = len(ai_calls)
+    assert n >= 4 and sb.counts == {"fair:global": 1}            # the one real run is counted
+    for _ in range(3):
+        again = _sse_events(_post_demo(client))
+        assert again[-1]["step"] == "done"
+        assert again[-1]["job_id"] != first[-1]["job_id"]        # a fresh, independent job each time
+        assert {k: again[-1][k] for k in ("sections", "keywords", "flashcards", "mcqs")} == \
+               {k: first[-1][k] for k in ("sections", "keywords", "flashcards", "mcqs")}
+    assert len(ai_calls) == n and sb.counts == {"fair:global": 1}   # zero AI calls, zero units
+    job = again[-1]["job_id"]
+    g = client.get(f"/api/guide/{job}").get_json()
+    assert g["sections"] and g["language"] == "en"
+    pdf = client.get(f"/api/download/{job}")
+    assert pdf.status_code == 200 and pdf.data[:4] == b"%PDF"
+    assert client.post(f"/api/delete/{job}").get_json()["deleted"] is True      # copies are independent jobs
+    assert client.get(f"/api/guide/{first[-1]['job_id']}").status_code == 200
+
+
+def test_each_demo_language_is_made_once(client, auth_on, sb, llm, ai_calls):
+    _sse_events(_post_demo(client))
+    _sse_events(_post_demo(client, language="ar"))
+    assert sb.counts == {"fair:global": 2}
+    n = len(ai_calls)
+    assert _sse_events(_post_demo(client, language="ar"))[-1]["step"] == "done"
+    assert _sse_events(_post_demo(client))[-1]["step"] == "done"
+    assert len(ai_calls) == n and sb.counts == {"fair:global": 2}
+
+
+def test_a_cached_demo_still_works_after_the_breaker_trips(client, auth_on, sb, llm):
+    _sse_events(_post_demo(client))
+    sb.counts["fair:global"] = 10 ** 6
+    r = _post_demo(client)
+    assert r.status_code == 200 and _sse_events(r)[-1]["step"] == "done"
+
+
+@pytest.mark.parametrize("ar", [False, True])
+def test_an_uncached_demo_is_refused_once_the_breaker_has_tripped(client, auth_on, sb, llm, monkeypatch, ar):
+    monkeypatch.setattr(appmod, "_call_ollama", lambda *a, **k: (_ for _ in ()).throw(AssertionError("paid call")))
+    sb.counts["fair:global"] = 10 ** 6
+    r = _post_demo(client, language="ar" if ar else "en")
+    assert r.status_code == 503 and r.get_json()["code"] == "busy_today"
+    assert _has_arabic(r.get_json()["error"]) is ar
+    assert sb.counts["fair:global"] == 10 ** 6
+
+
+def test_a_failed_demo_build_gives_the_unit_back_and_is_not_cached(client, auth_on, sb, monkeypatch):
+    _fake_llm(monkeypatch, pass1_raises=True)
+    evs = _sse_events(_post_demo(client))
+    assert evs[-1]["error"] and sb.counts == {"fair:global": 0}
+    assert appmod._demo_cache == {}
+
+
+def test_a_partial_demo_is_not_cached(client, auth_on, sb, monkeypatch):
+    _fake_llm(monkeypatch)
+    monkeypatch.setattr(appmod, "pass3_flashcards", lambda g, l, d=None: {"flashcards": []})
+    assert _sse_events(_post_demo(client))[-1].get("partial") is True
+    assert appmod._demo_cache == {}
+
+
+def test_the_demo_cache_expires(client, auth_on, sb, llm, monkeypatch):
+    _sse_events(_post_demo(client))
+    monkeypatch.setattr(appmod, "_DEMO_CACHE_TTL_S", 0)
+    _sse_events(_post_demo(client))
+    assert sb.counts == {"fair:global": 2}
+
+
+def test_a_cached_demo_takes_no_slot_and_never_waits(client, auth_on, sb, llm, tiny_sem):
+    _sse_events(_post_demo(client))
+    tiny_sem.acquire()
+    try:
+        evs = _sse_events(_post_demo(client))
+    finally:
+        tiny_sem.release()
+    assert evs[-1]["step"] == "done" and not any(e.get("step") == "queued" for e in evs)
+
+
+def test_an_uncached_demo_with_a_full_house_is_busy_before_anything_is_charged(client, auth_on, sb, llm, tiny_sem, monkeypatch):
+    monkeypatch.setattr(appmod, "_GEN_WAIT_MAX", 0)
+    tiny_sem.acquire()
+    try:
+        r = _post_demo(client)
+    finally:
+        tiny_sem.release()
+    assert r.status_code == 503 and r.get_json()["code"] == "busy" and sb.calls == []
+
+
+def test_the_token_mode_demo_is_unchanged(client, auth_on, sb, llm, legacy_tokens, ai_calls):
+    for _ in range(2):
+        assert _sse_events(_post_demo(client))[-1]["step"] == "done"
+    assert sb.calls == [] and appmod._demo_cache == {}          # no counters, no cache: exactly the old demo
+    assert len(ai_calls) >= 8
+
+
+# ── J3. chat is metered ──────────────────────────────────────────────────────────
+def _chat(client, jid, uid="user-7", q="why?", **body):
+    return client.post(f"/api/chat/{jid}", json={"question": q, **body},
+                       headers={"Authorization": f"Bearer {_tok(uid)}"})
+
+
+@pytest.fixture
+def chat_llm(monkeypatch):
+    calls = []
+    monkeypatch.setattr(appmod, "_call_ollama", lambda *a, **k: calls.append(1) or {"answer": "because"})
+    return calls
+
+
+def test_chat_has_a_per_user_daily_cap(client, auth_on, sb, chat_llm, monkeypatch):
+    monkeypatch.setattr(appmod, "FAIR_CHAT_DAILY", 3)
+    jid = _store_job()
+    rs = [_chat(client, jid) for _ in range(5)]
+    assert [r.status_code for r in rs] == [200, 200, 200, 429, 429] and len(chat_llm) == 3
+    assert rs[3].get_json()["code"] == "fair_use_user"
+    assert sb.counts["fair:chat:user:user-7"] == 3
+    assert _chat(client, jid, uid="user-8").status_code == 200   # another account has its own allowance
+
+
+def test_chat_default_allowance_is_a_documented_knob():
+    assert appmod.FAIR_CHAT_DAILY == 100
+
+
+def test_chat_has_a_per_user_per_minute_cap(client, auth_on, sb, chat_llm, monkeypatch):
+    monkeypatch.setattr(appmod, "_CHAT_USER_PER_MIN", 2)
+    jid = _store_job()
+    assert [_chat(client, jid).status_code for _ in range(3)] == [200, 200, 429]
+    assert _chat(client, jid, uid="user-8").status_code == 200
+    assert len(chat_llm) == 3
+
+
+def test_chat_stops_when_the_global_budget_is_used_up(client, auth_on, sb, chat_llm):
+    jid = _store_job()
+    sb.counts["fair:global"] = 10 ** 6
+    r = _chat(client, jid)
+    assert r.status_code == 503 and r.get_json()["code"] == "busy_today" and chat_llm == []
+    assert "fair:chat:user:user-7" not in sb.counts            # refused before anything was taken
+    ar = _chat(client, jid, language="ar").get_json()
+    assert ar["code"] == "busy_today" and _has_arabic(ar["error"])
+
+
+def test_chat_refusal_is_bilingual(client, auth_on, sb, chat_llm, monkeypatch):
+    monkeypatch.setattr(appmod, "FAIR_CHAT_DAILY", 1)
+    jid = _store_job()
+    assert _chat(client, jid).status_code == 200
+    en, ar = _chat(client, jid).get_json(), _chat(client, jid, language="ar").get_json()
+    assert not _has_arabic(en["error"]) and _has_arabic(ar["error"]) and en["code"] == ar["code"] == "fair_use_user"
+
+
+def test_a_failed_chat_gives_its_unit_back(client, auth_on, sb, monkeypatch):
+    monkeypatch.setattr(appmod, "_call_ollama", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("groq down")))
+    jid = _store_job()
+    assert _chat(client, jid).status_code == 500
+    assert sb.counts == {"fair:chat:user:user-7": 0}
+
+
+def test_chat_fails_open_when_the_counter_cannot_be_read(client, auth_on, sb, chat_llm):
+    sb.consume_raises["fair:chat:user:user-7"] = RuntimeError("supabase 502")
+    assert _chat(client, _store_job()).status_code == 200
+
+
+def test_chat_input_errors_cost_nothing(client, auth_on, sb, chat_llm):
+    jid = _store_job()
+    assert _chat(client, jid, q="   ").status_code == 400
+    assert _chat(client, uuid.uuid4().hex).status_code == 404
+    assert sb.calls == [] and chat_llm == []
+
+
+def test_token_mode_chat_is_untouched(client, auth_on, sb, chat_llm, legacy_tokens):
+    assert _chat(client, _store_job()).status_code == 200 and sb.calls == []
+
+
+# ── J4. a reserved pool for signed-in users ──────────────────────────────────────
+def test_anonymous_requests_are_also_charged_to_the_anonymous_pool(client, auth_on, sb, llm):
+    assert _sse_events(_post_text(client))[-1]["step"] == "done"
+    assert sb.counts == {f"fair:dev:{DEV}": 1, f"fair:ip:{IP}": 1, "fair:global:anon": 1, "fair:global": 1}
+
+
+def test_signed_in_requests_never_touch_the_anonymous_pool(client, auth_on, sb, llm):
+    r = _post_text(client, headers={"Authorization": f"Bearer {_tok('user-7')}"})
+    assert _sse_events(r)[-1]["step"] == "done" and "fair:global:anon" not in sb.counts
+
+
+def test_anonymous_traffic_cannot_use_up_the_signed_in_reserve(client, auth_on, sb, llm, monkeypatch):
+    monkeypatch.setattr(appmod, "FAIR_GLOBAL_DAILY", 5)          # the anonymous pool is 60%: 3
+    codes = [_status(_post_text(client, device=f"device-aaaa-000{i}")) for i in range(5)]
+    assert codes == [200, 200, 200, 429, 429]
+    refused = _post_text(client, device="device-aaaa-0009")
+    assert refused.get_json()["code"] == "fair_use_device" and "sign in free" in refused.get_json()["error"].lower()
+    h = {"Authorization": f"Bearer {_tok('user-7')}"}
+    assert [_status(_post_text(client, headers=h)) for _ in range(2)] == [200, 200]   # the reserve is intact
+    r = _post_text(client, headers=h)
+    assert r.status_code == 503 and r.get_json()["code"] == "busy_today"               # the whole budget is spent
+
+
+def test_anonymous_pool_share_is_a_percentage_of_the_budget(monkeypatch):
+    assert appmod._fair_anon_limit() == 1200                       # 60% of 2000
+    monkeypatch.setattr(appmod, "FAIR_GLOBAL_DAILY", 100)
+    assert appmod._fair_anon_limit() == 60
+    monkeypatch.setattr(appmod, "FAIR_ANON_SHARE_PCT", 100)
+    assert appmod._fair_anon_limit() == 100
+    monkeypatch.setattr(appmod, "FAIR_GLOBAL_DAILY", 1)
+    monkeypatch.setattr(appmod, "FAIR_ANON_SHARE_PCT", 5)
+    assert appmod._fair_anon_limit() == 1                          # never zero: anonymous visitors can always try
+
+
+def test_a_tripped_global_budget_gives_the_anonymous_pool_unit_back(client, auth_on, sb, llm):
+    sb.counts["fair:global"] = 10 ** 6
+    r = _post_text(client)
+    assert r.status_code == 503 and r.get_json()["code"] == "busy_today"
+    assert sb.counts.get("fair:global:anon", 0) == 0 and sb.counts[f"fair:dev:{DEV}"] == 0
+
+
+def test_a_global_counter_logs_when_it_passes_80_percent(sb, caplog):
+    sb.counts["fair:global"] = 6
+    with caplog.at_level("WARNING", logger="app"):
+        appmod._fair_consume("fair:global", 10)                    # 7 of 10
+    assert "80%" not in caplog.text
+    with caplog.at_level("WARNING", logger="app"):
+        appmod._fair_consume("fair:global", 10)                    # 8 of 10
+    assert "80%" in caplog.text and "fair:global" in caplog.text
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="app"):
+        sb.counts["fair:dev:abc12345"] = 7
+        appmod._fair_consume("fair:dev:abc12345", 10)              # per-device counters stay quiet
+    assert "80%" not in caplog.text
+
+
+# ── J5. admission control: the line can never hold every web thread ──────────────
+_LIMITS_PROBE = r"""
+import json, os, sys
+sys.path.insert(0, os.environ["APP_ROOT"]); os.chdir(os.environ["APP_ROOT"])
+import app as A
+print(json.dumps({"threads": A.WEB_THREADS, "slots": A._GEN_SLOTS, "wait": A._GEN_WAIT_MAX,
+                  "sem": A._gen_sem._value, "legal": A._legal_free_mode(), "free": A.FREE_MODE}))
+"""
+
+
+def _limits(**env):
+    base = {k: v for k, v in os.environ.items()
+            if k not in ("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "GROQ_API_KEY", "RENDER", "PRODUCTION",
+                         "SUPABASE_URL", "SUPABASE_JWT_SECRET", "SUPABASE_SERVICE_ROLE_KEY")}
+    base.update(APP_ROOT=ROOT, **env)
+    out = subprocess.run([sys.executable, "-c", _LIMITS_PROBE], env=base, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-2000:]
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_default_limits_fit_the_live_four_threads():
+    assert appmod.WEB_THREADS == 4
+    assert (appmod._GEN_SLOTS, appmod._GEN_WAIT_MAX) == (2, 1)
+    assert appmod._GEN_SLOTS + appmod._GEN_WAIT_MAX <= appmod.WEB_THREADS - 1
+    assert appmod.GEN_MAX_CONCURRENT == 2 and appmod.GEN_MAX_WAITING == 1
+
+
+@pytest.mark.parametrize("env", [
+    {"GEN_MAX_CONCURRENT": "9", "GEN_MAX_WAITING": "9"},
+    {"GEN_MAX_CONCURRENT": "3", "GEN_MAX_WAITING": "5"},
+    {"WEB_THREADS": "8", "GEN_MAX_CONCURRENT": "5", "GEN_MAX_WAITING": "9"},
+    {"WEB_THREADS": "2", "GEN_MAX_CONCURRENT": "4", "GEN_MAX_WAITING": "4"},
+    {"WEB_THREADS": "8"},
+], ids=["huge", "3+5", "8-threads", "2-threads", "8-threads-defaults"])
+def test_running_plus_waiting_never_reaches_the_thread_count(env):
+    k = _limits(**env)
+    assert k["slots"] >= 1 and k["slots"] + k["wait"] <= k["threads"] - 1, k
+    assert k["sem"] == k["slots"]
+
+
+def test_a_full_line_is_busy_at_once_instead_of_waiting(tiny_sem, sb, monkeypatch):
+    monkeypatch.setattr(appmod, "_GEN_WAIT_MAX", 1)
+    monkeypatch.setattr(appmod, "GEN_QUEUE_WAIT_S", 10.0)
+    _fake_llm(monkeypatch)
+    tiny_sem.acquire()                                           # the slot is taken
+    t1, e1 = _spawn(appmod._stream_text_as_sse(TEXT, "en", "a", "text")())
+    assert _wait_for(lambda: len(appmod._gen_waiting) == 1)      # the one seat is taken
+    sb.counts = {k: 1 for k in _keys()}
+    charge = appmod._Charge(fair_keys=tuple(_keys()))
+    t0 = time.monotonic()
+    evs = _events(appmod._stream_text_as_sse(TEXT, "en", "b", "text", charge=charge)())
+    assert [e.get("code") for e in evs] == ["busy"] and time.monotonic() - t0 < 1.0   # no seat: no wait, no 'queued'
+    assert sb.counts == {k: 0 for k in _keys()}                  # refunded
+    assert len(appmod._gen_waiting) == 1
+    tiny_sem.release()
+    t1.join(10)
+    assert e1[-1]["step"] == "done" and appmod._gen_waiting == []
+
+
+@pytest.mark.parametrize("name,post", ENDPOINTS, ids=[e[0] for e in ENDPOINTS])
+def test_when_every_slot_and_seat_is_taken_the_endpoint_says_busy_before_charging(
+        client, auth_on, sb, llm, tiny_sem, monkeypatch, name, post):
+    monkeypatch.setattr(appmod, "_GEN_WAIT_MAX", 0)
+    monkeypatch.setattr(appmod, "_yt_duration", lambda v: (_ for _ in ()).throw(AssertionError("probed YouTube")))
+    tiny_sem.acquire()
+    try:
+        r = post(client)
+        ar = post(client, language="ar")
+    finally:
+        tiny_sem.release()
+    d = r.get_json()
+    assert r.status_code == 503 and d["code"] == "busy" and d["retry_after_s"] > 0 and d["error"]
+    assert not _has_arabic(d["error"]) and _has_arabic(ar.get_json()["error"])
+    assert sb.calls == []                                        # nothing charged, nothing to refund
+
+
+def test_a_bad_request_is_still_a_400_when_the_house_is_full(client, auth_on, sb, tiny_sem, monkeypatch):
+    monkeypatch.setattr(appmod, "_GEN_WAIT_MAX", 0)
+    tiny_sem.acquire()
+    try:
+        r = client.post("/api/summarize-stream", data={"file": (io.BytesIO(b"x"), "evil.exe")},
+                        content_type="multipart/form-data", headers={"X-Device-Id": DEV})
+    finally:
+        tiny_sem.release()
+    assert r.status_code == 400
+
+
+def test_the_line_serves_waiters_in_the_order_they_arrived(monkeypatch):
+    """A waiter is told 'number 1' and must BE served first: later arrivals may not pass it."""
+    sem = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(appmod, "_gen_sem", sem)
+    monkeypatch.setattr(appmod, "_GEN_QUEUE_TICK_S", 0.3)
+    monkeypatch.setattr(appmod, "GEN_QUEUE_WAIT_S", 10.0)
+    monkeypatch.setattr(appmod, "_GEN_WAIT_MAX", 8)
+    holder = appmod._gen_slot_acquire()
+    with pytest.raises(StopIteration) as stop:
+        next(holder)
+    held = stop.value.value
+    order, lock = [], threading.Lock()
+
+    def waiter(name):
+        gen = appmod._gen_slot_acquire()
+        try:
+            while True:
+                next(gen)
+        except StopIteration as done:
+            slot = done.value
+        with lock:
+            order.append(name)
+        slot.release()
+
+    threads = []
+    for i, name in enumerate(("w1", "w2", "w3")):
+        t = threading.Thread(target=waiter, args=(name,), daemon=True)
+        t.start()
+        threads.append(t)
+        assert _wait_for(lambda n=i + 1: len(appmod._gen_waiting) == n)
+        time.sleep(0.1)
+    time.sleep(0.15)                                             # t = 0.35 s: w1's first tick (0.3 s) is behind it
+    held.release()
+    for t in threads:
+        t.join(10)
+    assert order == ["w1", "w2", "w3"]
+    assert sem._value == 1 and appmod._gen_waiting == []
+
+
+def test_a_new_arrival_cannot_jump_a_waiting_line(monkeypatch):
+    sem = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(appmod, "_gen_sem", sem)
+    monkeypatch.setattr(appmod, "_GEN_QUEUE_TICK_S", 5.0)
+    monkeypatch.setattr(appmod, "GEN_QUEUE_WAIT_S", 10.0)
+    monkeypatch.setattr(appmod, "_GEN_WAIT_MAX", 8)
+    sem.acquire()
+    waiting = appmod._gen_slot_acquire()
+    assert _ev(next(waiting))["position"] == 1
+    sem.release()                                                # a slot frees up while somebody waits...
+    late = appmod._gen_slot_acquire()
+    assert _ev(next(late))["position"] == 2                      # ...the newcomer queues behind them
+    late.close()
+    waiting.close()
+    assert appmod._gen_waiting == []
+
+
+def test_a_full_house_of_generations_leaves_healthz_answerable(auth_on, sb, monkeypatch):
+    """The live service is ONE pool of 4 web threads. Two generations run, one waits, a fourth is
+    turned away at once: the thread that is left must still answer /healthz (Render restarts a
+    service whose health check goes unanswered, and a restart wipes every in-memory guide)."""
+    gate = threading.Event()
+    _fake_llm(monkeypatch, gate=gate)
+    monkeypatch.setattr(appmod, "GEN_QUEUE_WAIT_S", 20.0)
+
+    def generation(i):
+        c = appmod.app.test_client()
+        r = c.post("/api/summarize-text", json={"text": TEXT, "language": "en"},
+                   headers={"X-Device-Id": f"device-aaaa-00{i:02d}"})
+        if r.mimetype == "application/json":
+            return r.get_json().get("code")
+        evs = _sse_events(r)
+        return evs[-1].get("code") or evs[-1].get("step")
+
+    def health():
+        return appmod.app.test_client().get("/healthz").status_code
+
+    with ThreadPoolExecutor(max_workers=appmod.WEB_THREADS) as pool:
+        gens = [pool.submit(generation, i) for i in range(4)]
+        assert _wait_for(lambda: appmod._gen_sem._value == 0 and len(appmod._gen_waiting) == 1)
+        assert _wait_for(lambda: sum(f.done() for f in gens) == 1)          # the 4th was refused straight away
+        t0 = time.monotonic()
+        assert pool.submit(health).result(timeout=3) == 200
+        assert time.monotonic() - t0 < 1.5
+        gate.set()
+        results = sorted(f.result(timeout=30) for f in gens)
+    assert results == ["busy", "done", "done", "done"]
+
+
+# ── J6. the pre-slot work gets its own, lower per-IP limit ───────────────────────
+def test_youtube_probe_rate_limit_is_its_own_lower_knob(client, monkeypatch):
+    assert appmod.RATE_PRECHECK_PER_MIN == 5
+    codes = [client.post("/api/youtube", json={}).status_code for _ in range(7)]
+    assert codes == [400] * 5 + [429] * 2                       # the yt-dlp probe runs before any slot: it stays at 5/min
+
+
+def test_url_fetch_has_the_lower_limit_but_pasted_text_keeps_the_class_limit(client, auth_on, sb, monkeypatch):
+    monkeypatch.setattr(appmod, "ollama_running", lambda: True)
+    fetched = []
+    monkeypatch.setattr(appmod, "_fetch_url_text", lambda u: fetched.append(u) or (_ for _ in ()).throw(ValueError("nope")))
+    codes = [client.post("/api/summarize-text", json={"url": "https://example.com/x"},
+                         headers={"X-Device-Id": DEV}).status_code for _ in range(7)]
+    assert codes == [400] * 5 + [429] * 2 and len(fetched) == 5
+    # a paste has no pre-slot network work: the whole class behind one IP can still use it
+    monkeypatch.setattr(appmod, "_rate_limit", {})
+    assert [client.post("/api/summarize-text", json={}).status_code for _ in range(8)] == [400] * 8
+
+
+def test_the_lower_limit_never_exceeds_the_general_knob(client, monkeypatch):
+    monkeypatch.setattr(appmod, "RATE_SUMMARIZE_PER_MIN", 2)
+    assert appmod._precheck_rate_limit() == 2 and appmod.RATE_PRECHECK_PER_MIN == 5
+
+
+# ── J7. the counters share one time budget ───────────────────────────────────────
+def test_the_counters_share_one_time_budget_then_fail_open(sb, monkeypatch, caplog):
+    monkeypatch.setattr(appmod, "_FAIR_BUDGET_S", 0.25)
+    real = appmod._fair_consume
+    def slow(key, limit):
+        time.sleep(0.2)
+        return real(key, limit)
+    monkeypatch.setattr(appmod, "_fair_consume", slow)
+    t0 = time.monotonic()
+    with caplog.at_level("WARNING", logger="app"):
+        charge = _charged(sb)
+    assert time.monotonic() - t0 < 0.7                           # four 0.2 s lookups would take 0.8 s
+    assert charge.fair_keys == tuple(_keys()[:2]) and "time budget" in caplog.text
+
+
+# ── J8. refusals leave a trace the operator can alert on ─────────────────────────
+def test_every_fair_use_refusal_is_logged(client, auth_on, sb, llm, caplog):
+    sb.counts[f"fair:dev:{DEV}"] = 10 ** 6
+    with caplog.at_level("INFO", logger="app"):
+        assert _post_text(client).status_code == 429
+    assert "fair-use refusal" in caplog.text and "fair_use_device" in caplog.text
+    caplog.clear()
+    sb.counts = {"fair:global": 10 ** 6}
+    with caplog.at_level("INFO", logger="app"):
+        assert _post_text(client).status_code == 503
+    assert "fair-use refusal" in caplog.text and "busy_today" in caplog.text
+
+
+def test_busy_is_logged(tiny_sem, monkeypatch, caplog):
+    _fake_llm(monkeypatch)
+    tiny_sem.acquire()
+    try:
+        with caplog.at_level("INFO", logger="app"):
+            _events(appmod._stream_text_as_sse(TEXT, "en", "x", "text")())
+    finally:
+        tiny_sem.release()
+    assert "generation busy" in caplog.text
+
+
+# ── J9. one parser for the free-mode switch ──────────────────────────────────────
+@pytest.mark.parametrize("raw,expected", [
+    (None, True), ("", True), ("  ", True), ("1", True), ("true", True), ("yes", True), ("on", True), ("whatever", True),
+    ("0", False), (" 0 ", False), ("false", False), ("FALSE", False), ("False", False),
+    ("no", False), ("No", False), ("off", False), ("OFF", False),
+])
+def test_env_switch_parsing(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("_T_SWITCH", raising=False)
+    else:
+        monkeypatch.setenv("_T_SWITCH", raw)
+    assert appmod._env_switch("_T_SWITCH") is expected
+
+
+def test_the_legal_pages_use_the_same_switch_as_the_credit_logic(monkeypatch):
+    monkeypatch.setattr(appmod, "FREE_MODE", False)
+    assert appmod._legal_free_mode() is False
+    monkeypatch.setattr(appmod, "FREE_MODE", True)
+    assert appmod._legal_free_mode() is True
+
+
+def test_a_natural_off_value_turns_the_credit_logic_and_the_legal_pages_off_together():
+    k = _limits(ALIMNE_FREE_MODE="off")
+    assert k["free"] is False and k["legal"] is False
+
+
+# ── J10. IPv6 clients are counted per /64, and the limiter table cannot grow forever ──
+def test_ipv6_addresses_are_bucketed_per_64():
+    f = appmod._ip_bucket
+    assert f("203.0.113.5") == "203.0.113.5"
+    assert f("2001:db8:1:2::1") == f("2001:db8:1:2:ffff:ffff:ffff:ffff") == "2001:db8:1:2::/64"
+    assert f("2001:db8:1:3::1") != f("2001:db8:1:2::1")
+    assert f("::ffff:203.0.113.5") == "203.0.113.5"
+    assert f("not-an-ip") == "not-an-ip" and f("unknown") == "unknown"
+    assert len(f("x" * 500)) <= 64
+
+
+def test_rate_limit_buckets_an_ipv6_range_together():
+    assert appmod._check_rate_limit("2001:db8:5::1", "t6", 2) is True
+    assert appmod._check_rate_limit("2001:db8:5::2", "t6", 2) is True
+    assert appmod._check_rate_limit("2001:db8:5:0:aaaa::ffff", "t6", 2) is False     # same /64, third request
+    assert appmod._check_rate_limit("2001:db8:6::1", "t6", 2) is True               # another /64
+    assert appmod._check_rate_limit("::1", "t6", 1) is True and appmod._check_rate_limit("::1", "t6", 1) is True
+
+
+def test_the_fair_ip_counter_uses_the_64(client, auth_on, sb, llm, monkeypatch):
+    monkeypatch.setattr(appmod, "_client_ip", lambda: "2001:db8:1:2::abcd")
+    assert _sse_events(_post_text(client))[-1]["step"] == "done"
+    assert "fair:ip:2001:db8:1:2::/64" in sb.counts
+
+
+def test_the_rate_limit_table_drops_stale_entries(monkeypatch):
+    monkeypatch.setattr(appmod, "_RATE_TABLE_MAX", 10)
+    old = time.time() - 3600
+    table = {f"t:198.51.100.{i}": [old] for i in range(50)}
+    monkeypatch.setattr(appmod, "_rate_limit", table)
+    assert appmod._check_rate_limit("203.0.113.77", "t", 5) is True
+    assert len(table) == 1 and "t:203.0.113.77" in table
+
+
+# ── J11. sharing is idempotent per guide ─────────────────────────────────────────
+def test_sharing_a_guide_twice_returns_the_same_link_and_stores_one_row(client, monkeypatch):
+    sbm = MagicMock()
+    monkeypatch.setattr(appmod, "_get_sb", lambda: sbm)
+    jid = _store_job()
+    r1, r2 = client.post(f"/api/share/{jid}"), client.post(f"/api/share/{jid}")
+    assert r1.status_code == r2.status_code == 200 and r1.get_json() == r2.get_json()
+    assert sbm.table.return_value.insert.call_count == 1
+    assert client.post(f"/api/share/{_store_job()}").get_json()["slug"] != r1.get_json()["slug"]

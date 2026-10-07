@@ -175,6 +175,12 @@ def test_english_and_arabic_have_the_same_keys(pack):
     assert len(en) == len(set(en)), f"{pack}.en has a duplicated key"
 
 
+# The same rule in Arabic: no token / credit / plan / price / preview / "unlimited" claim in the
+# free-mode pack. (It keeps "اشتراكك" = "your subscription": people who already pay can still cancel.)
+BANNED_AR = re.compile(r"رمز|رموز|رصيد|اشترك(?!ا)|الخطة الاحترافية|2[.,]99|30 دليل|معاينة|معاينات|"
+                       r"غير محدود|بلا حدود|بدون حدود|ترقية")
+
+
 def test_free_mode_pack_has_no_paywall_copy():
     src = _src()
     banned = re.compile(r"Free trial used|previews? left|\bSubscribe\b|10 (free )?tokens?|\btokens?\b|\bcredits?\b|"
@@ -183,6 +189,33 @@ def test_free_mode_pack_has_no_paywall_copy():
         for ln, line in enumerate(_pack(src, "T", lang).splitlines(), 1):
             m = banned.search(line)
             assert not m, f"T.{lang} line +{ln}: {m.group(0)!r}: {line.strip()[:100]}"
+    # Arabic is scanned here too: the node check below is skipped on a machine without node_modules.
+    for ln, line in enumerate(_pack(src, "T", "ar").splitlines(), 1):
+        m = BANNED_AR.search(line)
+        assert not m, f"T.ar line +{ln}: {m.group(0)!r}: {line.strip()[:100]}"
+
+
+def test_arabic_paywall_patterns_catch_each_old_claim():
+    for phrase in ["اشترك بـ 2.99$ لـ 30 دليلاً", "لديك 3 رموز", "رصيدك", "غير محدود", "بلا حدود", "بدون حدود",
+                   "معاينة مجانية", "الخطة الاحترافية", "ترقية"]:
+        assert BANNED_AR.search(f"xx {phrase} xx"), phrase
+    for fine in ["ألغِ اشتراكك من صفحة الفوترة", "إدارة / إلغاء الاشتراك", "مجاني وبدون بطاقة"]:
+        assert not BANNED_AR.search(fine), fine
+
+
+def test_the_in_app_terms_say_the_same_things_in_both_languages():
+    """The Arabic Terms used to lack the opt-in sharing disclosure and the usage-counter disclosure
+    that the English ones (and the /privacy page) have, and misspelled Whisper."""
+    src = _src()
+    en = _block(src, r"^const TERMS_EN_TAIL = `", r"`")
+    ar = _block(src, r"^const TERMS_AR_TAIL = `", r"`")
+    assert "Optional sharing" in en and "المشاركة الاختيارية" in ar
+    assert "Only guides you explicitly share are stored" in en and "لا يُخزَّن إلا الأدلة التي تشاركها صراحةً" in ar
+    assert "Usage counters" in en and "عدّادات الاستخدام" in ar
+    for text in (en, ar):
+        assert "Supabase" in text and "IP" in text
+    assert "authentication and usage counters" in en and "للمصادقة وعدّادات الاستخدام" in ar
+    assert "Whisker" not in ar and "Whisper" in ar
 
 
 def test_legacy_pack_keeps_the_old_copy_for_the_kill_switch():
