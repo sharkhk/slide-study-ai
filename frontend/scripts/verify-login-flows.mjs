@@ -22,6 +22,18 @@
 // answered here from dist/ or with a canned reply, anything else is refused, and the browser is started with
 // name resolution switched off. The browser is a local Chrome / Edge / Chromium (CHROME_PATH to name one).
 // Exit code: 0 = everything passed, 1 = a check failed, 77 = skipped (no such browser, or no built dist/).
+//
+// A BUSY MACHINE MUST NOT CHANGE A RESULT. The page keeps its own time (the dialog slides in for 0.25 s, a view
+// just shown takes no click for 0.4 s, the way by hand shows 1.8 s after a tap) and this script talks to it one
+// message at a time, each of which can be late. So nothing here is judged by this script's own clock:
+//   * a click waits until its control has stopped moving and nothing is over it, and the page says whether the
+//     click reached the control (page.click);
+//   * "a second tap 150 ms later" is 150 ms by the page's clock, which is held still and put forward by hand
+//     (page.inARow);
+//   * "how long after the tap" is measured in the page (__t.stopwatch), and a wait for one of the page's timers
+//     is a timer of the page (page.wait).
+// ALIMNE_FLOWS_LAG=150 holds every message to the page back by that many ms, as a busy machine does: the run
+// takes longer and must end the same.
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -100,12 +112,18 @@ ws.addEventListener('message', ev => {
     if (w) m.error ? w.reject(new Error(`${w.method}: ${m.error.message}`)) : w.resolve(m.result)
   } else listeners.get(m.sessionId || '')?.(m.method, m.params)
 })
-const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
-  const id = ++msgId
-  waiting.set(id, { resolve, reject, method })
-  ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
-})
 const sleep = ms => new Promise(r => setTimeout(r, ms))
+const LAG = Math.max(0, Number(process.env.ALIMNE_FLOWS_LAG) || 0)   // ms each message to a page is held back (a busy machine)
+const send = async (method, params = {}, sessionId) => {
+  if (LAG && sessionId) await sleep(LAG)
+  return new Promise((resolve, reject) => {
+    const id = ++msgId
+    waiting.set(id, { resolve, reject, method })
+    ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
+  })
+}
+// true as soon as `cond` holds (looked at every 20 ms), false when it still does not after `ms`
+const soon = async (cond, ms = 5000) => { for (const end = Date.now() + ms; ; await sleep(20)) { if (cond()) return true; if (Date.now() > end) return false } }
 
 // ── what the page is given ────────────────────────────────────────────────────────────
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
@@ -141,18 +159,64 @@ function reply(req) {
   return null   // fonts, anything else: refused
 }
 
-// In the page: how the checks look at the dialog
-const HELPERS = `window.__t = {
-  dialog: () => document.querySelector('[role="dialog"][aria-modal="true"]'),
-  text: () => (__t.dialog() ? __t.dialog().innerText : ''),
-  btn: (label) => [...(__t.dialog() ? __t.dialog().querySelectorAll('button') : [])].find(b => b.textContent.trim() === label) || null,
-  pageBtn: (label) => [...document.querySelectorAll('button')].find(b => !b.closest('[role="dialog"]') && (b.textContent.trim() === label || b.getAttribute('aria-label') === label)) || null,
-  mid: (el) => { el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 } },
-  active: () => { const a = document.activeElement; return !a || a === document.body ? 'BODY'
-    : a.tagName + (a.getAttribute('type') ? '[' + a.getAttribute('type') + ']' : '') + ':' + (a.textContent || a.getAttribute('aria-label') || '').trim().slice(0, 60) },
-  inDialog: () => !!(__t.dialog() && __t.dialog().contains(document.activeElement)),
-  at: () => location.pathname + location.search + location.hash,
-}`
+// In the page: how the checks look at the dialog, and what keeps a check from depending on how busy the machine
+// is (see the top of this file):
+//   point()      where a tap on a control lands once it stands still: no animation that ends (the dialog sliding
+//                in) still running on it or around it, the same box two frames in a row, nothing over its middle;
+//   watch()      tells this script when the browser sends the next click to a control, whatever the page does with it;
+//   clock        the page's Date.now(), held still and put forward by hand; it never goes back;
+//   stopwatch()  how long after a click on a control something showed, by the page's own clock.
+const HELPERS = `(() => {
+  const real = Date.now.bind(Date)
+  let held = null, ahead = 0
+  Date.now = () => (held === null ? real() + ahead : held)
+  const frame = () => new Promise(done => { const late = setTimeout(done, 100); requestAnimationFrame(() => { clearTimeout(late); done() }) })
+  const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height].join(' ') }
+  const arriving = (el) => document.getAnimations().some(a => a.playState === 'running' && a.effect && a.effect.target &&
+    a.effect.target.contains(el) && Number.isFinite(a.effect.getComputedTiming().endTime))
+  const t = window.__t = {
+    dialog: () => document.querySelector('[role="dialog"][aria-modal="true"]'),
+    text: () => (t.dialog() ? t.dialog().innerText : ''),
+    btn: (label) => [...(t.dialog() ? t.dialog().querySelectorAll('button') : [])].find(b => b.textContent.trim() === label) || null,
+    pageBtn: (label) => [...document.querySelectorAll('button')].find(b => !b.closest('[role="dialog"]') && (b.textContent.trim() === label || b.getAttribute('aria-label') === label)) || null,
+    active: () => { const a = document.activeElement; return !a || a === document.body ? 'BODY'
+      : a.tagName + (a.getAttribute('type') ? '[' + a.getAttribute('type') + ']' : '') + ':' + (a.textContent || a.getAttribute('aria-label') || '').trim().slice(0, 60) },
+    inDialog: () => !!(t.dialog() && t.dialog().contains(document.activeElement)),
+    at: () => location.pathname + location.search + location.hash,
+    point: async (find, ms) => {
+      const end = performance.now() + ms
+      for (let why = 'it is not on the page'; ; ) {
+        let el = null
+        try { el = find() } catch { /* what it is looked for in is not there yet */ }
+        if (el) {
+          el.scrollIntoView({ block: 'center' })
+          const moving = arriving(el), was = box(el)
+          await frame(); await frame()
+          const r = el.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2
+          const still = el.isConnected && r.width > 0 && r.height > 0 && !moving && !arriving(el) && box(el) === was
+          const top = still ? document.elementFromPoint(x, y) : null
+          if (top && el.contains(top)) return { x, y }
+          why = !el.isConnected ? 'it left the page' : !still ? 'it does not stand still' : 'something else is over it'
+        } else await frame()
+        if (performance.now() > end) return { why }
+      }
+    },
+    watch: (el) => window.addEventListener('click', (e) => { if (el && el.contains(e.target)) window.__reached('') }, { capture: true, once: true }),
+    clock: {
+      hold: () => { held = Date.now() },
+      pass: (ms) => { if (held !== null) held += ms },
+      free: () => { if (held !== null) { ahead = held - real(); held = null } },
+    },
+    took: null,
+    stopwatch: (el, shown) => {
+      let from = null
+      t.took = null
+      el.addEventListener('click', () => { from = performance.now() }, { once: true })
+      new MutationObserver(() => { if (t.took === null && from !== null && shown()) t.took = performance.now() - from })
+        .observe(document.documentElement, { subtree: true, childList: true, characterData: true })
+    },
+  }
+})()`
 
 const UA = {
   desktop: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -173,7 +237,7 @@ async function openPage(where, { ua = UA.desktop, screen = DESK } = {}) {
   const { targetId } = await send('Target.createTarget', { url: 'about:blank', browserContextId })
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true })
   const cdp = (method, params) => send(method, params, sessionId)
-  const page = { requests: [], asked: [], errors: [], refused: [] }
+  const page = { requests: [], asked: [], errors: [], refused: [], reached: 0 }
   listeners.set(sessionId, (method, p) => {
     if (method === 'Fetch.requestPaused') {
       const r = reply(p.request)
@@ -184,8 +248,10 @@ async function openPage(where, { ua = UA.desktop, screen = DESK } = {}) {
     else if (method === 'Page.frameRequestedNavigation') page.asked.push(p.url)
     else if (method === 'Runtime.exceptionThrown') page.errors.push(p.exceptionDetails?.exception?.description || p.exceptionDetails?.text || 'exception')
     else if (method === 'Page.javascriptDialogOpening') cdp('Page.handleJavaScriptDialog', { accept: true }).catch(() => {})
+    else if (method === 'Runtime.bindingCalled' && p.name === '__reached') page.reached++
   })
   await cdp('Page.enable'); await cdp('Runtime.enable')
+  await cdp('Runtime.addBinding', { name: '__reached' })   // the page's word that a click reached its control (__t.watch)
   await cdp('Fetch.enable', { patterns: [{ urlPattern: '*' }] })
   await cdp('Emulation.setUserAgentOverride', { userAgent: ua, acceptLanguage: 'en-US' })
   await cdp('Emulation.setDeviceMetricsOverride', screen)
@@ -205,13 +271,59 @@ async function openPage(where, { ua = UA.desktop, screen = DESK } = {}) {
       await sleep(50)
     }
   }
-  page.click = async (finder) => {
-    const at = await page.ev(`(() => { const el = ${finder}; return el ? __t.mid(el) : null })()`)
-    if (!at) throw new Error(`nothing to click: ${finder}`)
-    for (const type of ['mousePressed', 'mouseReleased']) await cdp('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 })
+  // Where a tap on the control lands, once it stands still with nothing over it
+  page.point = async (finder, ms = 8000) => {
+    const at = await page.ev(`__t.point(() => (${finder}), ${ms})`)
+    if (at.why) throw new Error(`nothing to tap: ${finder} (${at.why})`)
     return at
   }
   page.tapAt = async ({ x, y }) => { for (const type of ['mousePressed', 'mouseReleased']) await cdp('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 }) }
+  // Did the browser send a click to the control since `before`? Whatever the page had to say about the last tap
+  // is here once it has answered one more message.
+  const reachedSince = async (before) => {
+    await cdp('Runtime.evaluate', { expression: '0' }).catch(() => {})
+    return page.reached > before || soon(() => page.reached > before, 300)
+  }
+  // A click as a visitor makes it: on a control that stands still, with nothing over it. The press and the release
+  // are two messages, so the page is asked whether the click reached the control; when the control moved away
+  // between the two, it is found again and clicked again (and the run says so).
+  page.click = async (finder) => {
+    for (let tries = 1; ; tries++) {
+      const at = await page.point(finder), before = page.reached
+      await page.ev(`__t.watch(${finder})`)
+      await page.tapAt(at)
+      if (await reachedSince(before)) return at
+      if (tries === 3) throw new Error(`three clicks on ${finder} never reached it`)
+      console.log(`  note a click did not reach ${finder}: it is found again and clicked again`)
+    }
+  }
+  // One press after another with exact gaps by the PAGE's clock, which stands still meanwhile: a second tap or a
+  // key pressed again comes "150 ms later" for the page on a busy machine as on an idle one.
+  page.inARow = async (...steps) => {
+    await page.ev('__t.clock.hold()')
+    try { for (const step of steps) typeof step === 'number' ? await page.ev(`__t.clock.pass(${step})`) : await step() }
+    finally { await page.ev('__t.clock.free()').catch(() => {}) }
+  }
+  // Two taps, the second `gap` ms after the first by the page's clock. The first is for the control. The second
+  // lands on the same spot, on whatever has taken the control's place by then, or, with `then`, on that control of
+  // the view that came up (where it is does not depend on how the two views happen to be laid out). The browser
+  // must have sent each tap where it was meant to go, or nothing was learned.
+  page.doubleTap = async (finder, { then = null, gap = 150 } = {}) => {
+    const at = await page.point(finder), before = page.reached
+    await page.ev(`__t.watch(${finder})`)
+    await page.inARow(async () => {
+      await page.tapAt(at)
+      if (!await reachedSince(before)) throw new Error(`the first tap of a double tap on ${finder} never reached it`)
+    }, gap, async () => {
+      if (!then) return page.tapAt(at)
+      const to = await page.point(then), sofar = page.reached
+      await page.ev(`__t.watch(${then})`)
+      await page.tapAt(to)
+      if (!await reachedSince(sofar)) throw new Error(`the second tap, meant for ${then}, never reached it`)
+    })
+  }
+  // A wait by the page's own timers: a timer the page set before this one has run by the time it ends
+  page.wait = (ms) => page.ev(`new Promise(done => setTimeout(done, ${ms}))`)
   const KEYS = { Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' }, Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
     Escape: { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 } }
   page.press = async (name, { shift = false } = {}) => {
@@ -271,7 +383,7 @@ try {
     check('it is a dialog named by its title', await page.ev(`(() => { const d = __t.dialog(), id = d.getAttribute('aria-labelledby'); const el = id && document.getElementById(id)
       return d.getAttribute('role') === 'dialog' && d.getAttribute('aria-modal') === 'true' && !!el && el.textContent.trim() === ${JSON.stringify(TITLE.signup)} })()`))
     check('the dialog has the focus when it opens (not the page behind it): on its title, not on a button',
-      await page.ev(`__t.inDialog() && document.activeElement.id === 'login-title'`), await page.ev('__t.active()'))
+      await page.until(`__t.inDialog() && document.activeElement.id === 'login-title'`, 2000), await page.ev('__t.active()'))
     await page.press('Enter'); await sleep(300)
     check('...so an Enter right after it opens starts no sign-in', authorize(page).length === 0 && await page.ev(titleIs(TITLE.signup)))
     check('...and the dialog keeps its rounded corners while it has the focus', await page.ev(`parseFloat(getComputedStyle(__t.dialog()).borderTopLeftRadius) >= 12`),
@@ -311,7 +423,7 @@ try {
     // back, with a second Enter right behind the first
     await page.ev(`(() => { window.__back = __t.btn(${JSON.stringify(BACK)}) })()`)
     await page.focus(`__t.btn(${JSON.stringify(BACK)})`)
-    await page.press('Enter'); await sleep(60); await page.press('Enter'); await sleep(150); await page.press('Enter')
+    await page.inARow(() => page.press('Enter'), 60, () => page.press('Enter'), 150, () => page.press('Enter'))
     await sleep(700)
     check('Enter on "Back to Google sign-in" returns to the Google view', await page.ev(titleIs(TITLE.signup)), await page.ev('__t.text()'))
     check('...the focus is on the quiet link, not on the Google button', await page.ev(`document.activeElement === __t.btn(${JSON.stringify(QUIET)})`), await page.ev('__t.active()'))
@@ -323,13 +435,19 @@ try {
 
   await run('1b. a normal browser on a phone: a double tap, and the Google button', '/?join=1', { ua: UA.iosSafari, screen: PHONE }, async (page) => {
     check('the sign-up dialog opens', await page.until(titleIs(TITLE.signup)))
-    const at = await page.ev(`__t.mid(__t.btn(${JSON.stringify(QUIET)}))`)
-    await page.tapAt(at); await sleep(150); await page.tapAt(at)
+    await page.doubleTap(`__t.btn(${JSON.stringify(QUIET)})`)
     await sleep(700)
     check('a double tap on the quiet link opens the email view and leaves it open', await page.ev(titleIs(TITLE.email)), await page.ev('__t.text()'))
     check('...with no error the visitor did not cause', await page.ev(`!__t.dialog().querySelector('[role="alert"]')`), await page.ev('__t.text()'))
-    const back = await page.ev(`__t.mid(__t.btn(${JSON.stringify(BACK)}))`)
-    await page.tapAt(back); await sleep(150); await page.tapAt(back)
+    // the second tap aimed at the control a stray tap must never work: the Google button, then "Back"
+    await page.doubleTap(`__t.btn(${JSON.stringify(BACK)})`, { then: `__t.btn(${JSON.stringify(GOOGLE)})` })
+    await sleep(700)
+    check('"Back to Google sign-in" and a second tap that lands on the Google button: the Google view, and no sign-in started',
+      await page.ev(titleIs(TITLE.signup)) && authorize(page).length === 0, authorize(page).map(r => r.url).join(' | ') || await page.ev('__t.text()'))
+    await page.doubleTap(`__t.btn(${JSON.stringify(QUIET)})`, { then: `__t.btn(${JSON.stringify(BACK)})` })
+    await sleep(700)
+    check('the quiet link and a second tap that lands on "Back to Google sign-in": the email view stays open', await page.ev(titleIs(TITLE.email)), await page.ev('__t.text()'))
+    await page.doubleTap(`__t.btn(${JSON.stringify(BACK)})`)
     await sleep(700)
     check('a double tap on "Back to Google sign-in" ends on the Google view, and starts no sign-in', await page.ev(titleIs(TITLE.signup)) && authorize(page).length === 0, await page.ev('__t.text()'))
     check('no sign-up was ever asked of Supabase', page.to(SUPABASE + '/auth/v1/signup').length === 0)
@@ -382,6 +500,12 @@ try {
   // ── 4. another app's browser ───────────────────────────────────────────────────────
   const inAppView = `__t.text().includes(${JSON.stringify(NOTICE)}) && !!__t.btn(${JSON.stringify(OPEN)}) && !!__t.btn('Copy link') && !__t.btn(${JSON.stringify(GOOGLE)}) && !!__t.dialog().querySelector('form input[type="email"]')`
   const manual = `[...__t.dialog().querySelectorAll('[role="status"]')].some(el => el.textContent.includes(${JSON.stringify(MANUAL)}))`
+  // starts the page's stopwatch: from the tap on "Open in browser" to the way by hand (read as __t.took, in ms)
+  const timed = `__t.stopwatch(__t.btn(${JSON.stringify(OPEN)}), () => ${manual})`
+  // a time the stopwatch really took (null: it never ran, and null would pass for "less than")
+  const tookFrom = (took, from, to) => typeof took === 'number' && took >= from && took <= to
+  // the page asked for an address (it does so in the tap itself), and for no second one in the moment after
+  const askedOnce = async (page) => await soon(() => page.asked.length > 0) && (await sleep(300), page.asked.length === 1)
 
   await run('4. Instagram on Android: the in-app view, email sign-up, the way out', '/?utm_source=ig&ref=ab12cd34', { ua: UA.igAndroid, screen: PHONE }, async (page) => {
     await page.click(`__t.pageBtn('Sign in')`)
@@ -411,32 +535,36 @@ try {
     await page.until(inAppView)
     // the visitor looked at another app and came back before tapping: only what happens after the tap counts
     await page.ev(`(() => { for (const state of ['hidden', 'visible']) { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state }); document.dispatchEvent(new Event('visibilitychange')) } })()`)
+    await page.ev(timed)
     await page.click(`__t.btn(${JSON.stringify(OPEN)})`)
-    await sleep(600)
-    check('the tap asks for an intent:// address with scheme=https (the default browser), once', page.asked.length === 1 &&
+    check('the tap asks for an intent:// address with scheme=https (the default browser), once', await askedOnce(page) &&
       page.asked[0] === 'intent://alimne.app/?join=1#Intent;scheme=https;end', page.asked)
-    check('...and shows nothing more yet', !await page.ev(manual))
-    check('about 2 s later, still in front: the way by hand shows, "Copy link" stays', await page.until(manual, 2500) && await page.ev(`!!__t.btn('Copy link') && !!__t.btn(${JSON.stringify(OPEN)})`))
+    const shown = await page.until(manual, 8000), took = await page.ev('__t.took')
+    check('...and shows nothing more at first: the way by hand is not there before 1.5 s', shown && tookFrom(took, 1500, Infinity), took)
+    check('about 2 s after the tap, still in front: the way by hand shows, "Copy link" stays', shown && tookFrom(took, 0, 3000) &&
+      await page.ev(`!!__t.btn('Copy link') && !!__t.btn(${JSON.stringify(OPEN)})`), took)
     check('the page is still Alimne (no blank page, no other address)', await page.ev('location.href') === ORIGIN + '/' && await page.ev(inAppView))
-    check('nothing navigates by itself afterwards', (await sleep(2200), page.asked.length === 1), page.asked)
+    check('nothing navigates by itself afterwards', (await page.wait(2200), page.asked.length === 1), page.asked)
   })
 
   await run('4c. Instagram on Android: "Open in browser" when the phone does follow', '/', { ua: UA.igAndroid, screen: PHONE }, async (page) => {
     await page.click(`__t.pageBtn('Sign in')`)
     await page.until(inAppView)
+    // the app goes to the background right after the tap: that is all the page can see of a hand-off that worked
+    await page.ev(`__t.btn(${JSON.stringify(OPEN)}).addEventListener('click', () => setTimeout(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); document.dispatchEvent(new Event('visibilitychange')) }, 50), { once: true })`)
     await page.click(`__t.btn(${JSON.stringify(OPEN)})`)
-    // the app went to the background: that is all the page can see of a hand-off that worked
-    await page.ev(`(() => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); document.dispatchEvent(new Event('visibilitychange')) })()`)
-    await sleep(2500)
+    await page.wait(2500)
     check('the page went to the background: no "Nothing opened?" when the visitor comes back', !await page.ev(manual) && page.asked.length === 1, page.asked)
   })
 
   await run('4d. an Android web view of an unknown app: no address is tried, the way by hand shows at once', '/', { ua: UA.plainWebView, screen: PHONE }, async (page) => {
     await page.click(`__t.pageBtn('Sign in')`)
     check('it gets the in-app view', await page.until(inAppView), await page.ev('__t.text()'))
+    await page.ev(timed)
     await page.click(`__t.btn(${JSON.stringify(OPEN)})`)
-    check('the way by hand shows at once', await page.until(manual, 700))
-    await sleep(2200)
+    check('the way by hand shows at once', await page.until(manual, 8000) && tookFrom(await page.ev('__t.took'), 0, 500), await page.ev('__t.took'))
+    await page.wait(2200)
     check('...and the page asked for no address it could be shown an error page for', page.asked.length === 0 && await page.ev('location.href') === ORIGIN + '/', page.asked)
   })
 
@@ -444,18 +572,18 @@ try {
     await page.click(`__t.pageBtn('3 free guides left')`)
     check('the gate\'s way in (sign-up) shows the notice, "Open in browser", email sign-up, and no Google button', await page.until(inAppView) &&
       await page.ev(`${titleIs(TITLE.signup)} && !!__t.btn('Create free account') && __t.text().includes('or sign up with email here')`), await page.ev('__t.text()'))
+    await page.ev(timed)
     await page.click(`__t.btn(${JSON.stringify(OPEN)})`)
-    await sleep(600)
-    check('"Open in browser" asks for x-safari-https://', page.asked.length === 1 && page.asked[0] === 'x-safari-https://alimne.app/?join=1', page.asked)
-    check('...and the way by hand follows when the page is still in front', await page.until(manual, 2500))
+    check('"Open in browser" asks for x-safari-https://', await askedOnce(page) && page.asked[0] === 'x-safari-https://alimne.app/?join=1', page.asked)
+    const shown = await page.until(manual, 8000), took = await page.ev('__t.took')
+    check('...and the way by hand follows when the page is still in front, about 2 s after the tap', shown && tookFrom(took, 1500, 3000), took)
   })
 
   await run('4f. Instagram on an iPhone', '/', { ua: UA.igIphone, screen: PHONE }, async (page) => {
     await page.click(`__t.pageBtn('Sign in')`)
     await page.until(inAppView)
     await page.click(`__t.btn(${JSON.stringify(OPEN)})`)
-    await sleep(600)
-    check('"Open in browser" asks for x-safari-https://', page.asked.length === 1 && page.asked[0] === 'x-safari-https://alimne.app/?join=1', page.asked)
+    check('"Open in browser" asks for x-safari-https://', await askedOnce(page) && page.asked[0] === 'x-safari-https://alimne.app/?join=1', page.asked)
   })
 
   await run('4g. ?join=1 opened inside an app again (the hand-off came back into it)', '/?join=1', { ua: UA.igAndroid, screen: PHONE }, async (page) => {

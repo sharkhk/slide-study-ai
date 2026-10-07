@@ -587,14 +587,67 @@ def test_the_manual_does_not_overstate_what_the_client_side_rule_holds():
 _HAVE_NODE = shutil.which("node")
 
 
+def test_the_browser_script_is_not_judged_by_its_own_clock():
+    """Second review: under load the script clicked while the dialog was still sliding in (0.25 s): the press hit the
+    button, the release a moment later hit what was under the pointer by then, no click was delivered, and pytest
+    failed with "the toggle turns the form into a sign-up" on a product that was fine. The double tap and the
+    repeated Enter raced the dialog's 0.4 s hold the same way (40 ms of lag per message was enough to fail them).
+    Now a click waits for its control to stand still and the page says whether it arrived; every "so many ms
+    later" is by the page's clock; and what the page does on a timer is timed in the page."""
+    script = _read(FLOWS)
+    # a click: where the control stands still with nothing over it, and the page's word that the click reached it
+    click = _block(script, r"^  page\.click = async \(finder\) => \{\n", r"^  \}\n")
+    steps = ("await page.point(finder)", "__t.watch(", "await page.tapAt(at)", "await reachedSince(before)")
+    assert all(step in click for step in steps), "page.click: find the still point, watch, tap, ask the page"
+    assert [click.index(step) for step in steps] == sorted(click.index(step) for step in steps), "...in that order"
+    point = _block(script, r"^    point: async \(find, ms\) => \{\n", r"^    \},\n")
+    for must in ("arriving(el)", "await frame(); await frame()", "box(el) === was", "document.elementFromPoint(x, y)", "el.contains(top)"):
+        assert must in point, f"__t.point no longer checks: {must}"
+    assert "document.getAnimations().some(a => a.playState === 'running'" in script
+    assert "await cdp('Runtime.addBinding', { name: '__reached' })" in script and "window.__reached('')" in script
+    # no control is tapped at coordinates taken while it may still move: every tap is at a point page.point() gave
+    # (or on the dark area beside the dialog, which does not move)
+    assert "__t.mid" not in script and set(re.findall(r"page\.tapAt\((\w+)\)", script)) <= {"at", "to", "beside"}
+    assert script.count("const at = await page.point(finder), before = page.reached") == 2, "in click and in doubleTap"
+    assert script.count("const to = await page.point(then), sofar = page.reached") == 1, "the second tap of a double tap"
+    # a second tap or key press comes "later" by the page's clock, never after a sleep of the script
+    assert "Date.now = () => (held === null ? real() + ahead : held)" in script
+    assert "await page.inARow(() => page.press('Enter'), 60, () => page.press('Enter'), 150, () => page.press('Enter'))" in script
+    tap2 = _block(script, r"^  page\.doubleTap = async \(finder, \{ then = null, gap = 150 \} = \{\}\) => \{\n", r"^  \}\n")
+    assert "await page.inARow(async () => {" in tap2 and "}, gap, async () => {" in tap2 and "sleep(" not in tap2
+    # ...and the second tap is also aimed at the two controls a stray tap must never work (wherever the views put them)
+    for aimed in ("await page.doubleTap(`__t.btn(${JSON.stringify(BACK)})`, { then: `__t.btn(${JSON.stringify(GOOGLE)})` })",
+                  "await page.doubleTap(`__t.btn(${JSON.stringify(QUIET)})`, { then: `__t.btn(${JSON.stringify(BACK)})` })",
+                  "await page.doubleTap(`__t.btn(${JSON.stringify(QUIET)})`)\n", "await page.doubleTap(`__t.btn(${JSON.stringify(BACK)})`)\n"):
+        assert script.count(aimed) == 1, f"verify-login-flows.mjs lost its double tap: {aimed}"
+    assert not re.search(r"sleep\(\d+\);? *await page\.(press|tapAt|click)\(", script), "a gap between two presses is a sleep of the script again"
+    # the dialog's hold that those gaps are measured against is still the one in the source
+    assert "if (Date.now() - switchedAt.current < 400)" in _modal(_src())
+    # what the page does on a timer (the way by hand, 1.8 s after the tap) is timed in the page
+    assert "later(() => { if (!wentAway.current) setStayed(true) }, 1800)" in _modal(_src())
+    assert script.count("await page.ev(timed)") == 3
+    for timing in ("shown && tookFrom(took, 1500, Infinity)", "shown && tookFrom(took, 0, 3000)", "shown && tookFrom(took, 1500, 3000)",
+                   "tookFrom(await page.ev('__t.took'), 0, 500)"):
+        assert script.count(timing) == 1, f"verify-login-flows.mjs lost its timing: {timing}"
+    # a stopwatch that never ran reads null, which JavaScript would take for "less than 500"
+    assert "const tookFrom = (took, from, to) => typeof took === 'number' && took >= from && took <= to" in script
+    for gone in ("await sleep(600)", "await sleep(2200)", "await sleep(2500)", "page.until(manual, 2500)", "page.until(manual, 700)"):
+        assert gone not in script, f"verify-login-flows.mjs judges the page by the script's clock again: {gone}"
+    # the knob that plays a busy machine
+    assert "const LAG = Math.max(0, Number(process.env.ALIMNE_FLOWS_LAG) || 0)" in script and "if (LAG && sessionId) await sleep(LAG)" in script
+    assert "`ALIMNE_FLOWS_LAG=150`" in _read(MANUAL), "the manual names the knob"
+
+
 @pytest.mark.skipif(not _HAVE_NODE, reason="node not available")
 def test_the_login_flows_in_a_real_browser():
     """Drives the bundle in dist/ in a local headless Chrome / Edge, offline (the script answers every request
     itself): ?join=1 on arrival, a failed Google return, the keyboard focus, a double tap, which Supabase call a
-    normal browser and an in-app one can make, and "Open in browser". Skipped where no such browser is installed."""
+    normal browser and an in-app one can make, and "Open in browser". Skipped where no such browser is installed.
+    Nothing in it is judged by the script's own clock (see the top of the script), so a busy machine does not
+    change the result."""
     r = subprocess.run(["node", FLOWS], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=420)
     if r.returncode == 77:
         pytest.skip((r.stdout.strip().splitlines() or ["no browser"])[-1])
     assert r.returncode == 0, "verify-login-flows.mjs failed:\n" + "\n".join(
-        [l for l in r.stdout.splitlines() if "FAIL" in l or "passed" in l][-40:]) + "\n" + r.stderr[-2000:]
+        [l for l in r.stdout.splitlines() if "FAIL" in l or "passed" in l or l.startswith("  note ")][-40:]) + "\n" + r.stderr[-2000:]
     assert re.search(r"^\d+ passed, 0 failed$", r.stdout.strip().splitlines()[-1])
