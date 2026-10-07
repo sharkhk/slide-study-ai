@@ -246,6 +246,12 @@ def _page(client):
     return r.get_data(as_text=True)
 
 
+def _page_of(client, monkeypatch, sb):
+    """The page rendered from the database `sb`."""
+    _use(monkeypatch, sb)
+    return _page(client)
+
+
 def _num(html, key):
     """Text of the element carrying data-num="<key>"."""
     m = re.search(r'data-num="%s"[^>]*>([^<]*)<' % re.escape(key), html)
@@ -508,6 +514,30 @@ def test_user_activity_from_the_per_user_fair_use_counters():
     assert set(a) == {_uid(1), _uid(2)}
     assert a[_uid(1)]["recent"] == 3 and a[_uid(1)]["last_at"] == NOW - timedelta(hours=2)
     assert a[_uid(2)]["recent"] == 0                    # its 24 h window is over, the date of last use stays
+
+
+def test_user_activity_needs_a_counted_guide_not_just_a_counter_row():
+    """anon_consume creates the row before it knows whether the guide is allowed,
+    and anon_refund only takes the unit back: an account whose one attempt was
+    refused or failed keeps a 'fair:user:<uid>' row with count 0. That is not a guide."""
+    t = NOW - timedelta(hours=1)
+    rows = [_counter(f"fair:user:{_uid(1)}", 0, t),                                    # charged, then refunded
+            {"key": f"fair:user:{_uid(2)}", "count": None, "window_start": _iso(t), "last_at": _iso(t)},
+            {"key": f"fair:user:{_uid(3)}", "count": "0", "window_start": _iso(t), "last_at": _iso(t)},
+            {"key": f"fair:user:{_uid(4)}", "count": -1, "window_start": _iso(t), "last_at": _iso(t)},
+            {"key": f"fair:user:{_uid(5)}", "count": "<b>", "window_start": _iso(t), "last_at": _iso(t)},
+            {"key": f"fair:user:{_uid(6)}", "window_start": _iso(t), "last_at": _iso(t)},
+            _counter(f"fair:user:{_uid(7)}", 1, t),                                    # one real guide
+            {"key": f"fair:user:{_uid(8)}", "count": "2", "window_start": _iso(t), "last_at": _iso(t)}]
+    a = appmod._admin_user_activity(rows, NOW)
+    assert set(a) == {_uid(7), _uid(8)}
+    assert (a[_uid(7)]["recent"], a[_uid(8)]["recent"]) == (1, 2)
+    assert appmod._admin_made_guide(_user(1, NOW), a) is False
+    assert appmod._admin_made_guide(_user(7, NOW), a) is True
+    assert appmod._admin_made_guide(_user(1, NOW, generations_count=4), a) is True     # the token-era counter still counts
+    # ... and so the funnel's last step does not count the refused account either
+    users = [_user(1, NOW - timedelta(hours=2)), _user(7, NOW - timedelta(hours=2))]
+    assert appmod._admin_funnel([], [], users, NOW, 3, activity=a)["steps"][-1]["value"] == 1
 
 
 # ═════════════════════════ 2. the page ═══════════════════════════════════════════
@@ -859,6 +889,35 @@ def test_free_mode_users_table(client, monkeypatch):
     assert rows["user1@example.com"]["data-used"] == "4"
     assert rows["user35@example.com"]["data-used"] == "2" and rows["user35@example.com"]["data-lastused"] == "2026-10-06"
     assert rows["user40@example.com"]["data-used"] == "0" and rows["user40@example.com"]["data-lastused"] == ""
+
+
+def test_an_account_whose_only_attempt_was_refused_has_not_made_a_guide(client, monkeypatch):
+    sb = sample_db()
+    base = _page_of(client, monkeypatch, sb)
+    refused = _user(41, NOW - timedelta(minutes=20), email="refused@example.com")     # signed up today, one refused try
+    sb.tables["users"].append(refused)
+    sb.tables["anon_usage"].append(_counter(f"fair:user:{refused['id']}", 0, NOW - timedelta(minutes=10)))
+    html = _page_of(client, monkeypatch, sb)
+    assert (_num(base, "funnel-accounts"), _num(html, "funnel-accounts")) == ("27", "28")
+    assert _num(html, "funnel-activated") == _num(base, "funnel-activated") == "10"
+    assert _num(html, "accounts-active") == _num(base, "accounts-active") == "16"
+    row = {r["data-email"]: r for r in _doc(html).rows}["refused@example.com"]
+    assert (row["data-used"], row["data-recent"], row["data-lastused"]) == ("0", "0", "")
+    cell = re.search(r'data-email="refused@example\.com".*?</tr>', html, re.S).group(0)
+    assert ">0</b>" in cell and "0+" not in cell                  # no "made guides since free mode" mark
+
+
+def test_refused_attempts_cannot_crowd_real_activity_out_of_the_capped_read(client, monkeypatch):
+    """The per-account counters are read newest first with a row cap: rows of
+    refused attempts (count 0) must not take the places of real activity."""
+    sb = sample_db()
+    for i in range(50, 60):                                       # ten newer rows that are not guides
+        sb.tables["anon_usage"].append(_counter(f"fair:user:{_uid(i)}", 0, NOW - timedelta(minutes=1)))
+    monkeypatch.setattr(appmod, "_ADMIN_ACTIVITY_MAX", 10)       # room for exactly the ten real ones
+    html = _page_of(client, monkeypatch, sb)
+    assert _num(html, "funnel-activated") == "10" and _num(html, "accounts-active") == "16"
+    reads = [q for q in sb.queries if q.table == "anon_usage" and ("like", "key", "fair:user:%") in q.filters]
+    assert len(reads) == 1 and ("gte", "count", 1) in reads[0].filters
 
 
 def test_free_mode_sort_filter_and_csv_cover_the_new_columns(client, monkeypatch):

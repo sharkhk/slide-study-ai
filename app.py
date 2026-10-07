@@ -1954,21 +1954,24 @@ def _admin_user_activity(rows, now, window_hours=24):
     {uid: {"last_at": datetime or None, "recent": guides in the running 24 h window}}.
     In free mode nothing increments users.generations_count (only the old
     consume_token RPC did), so these counters are the one sign that an account
-    has made a guide since Alimne went free."""
+    has made a guide since Alimne went free.
+    Only a row with count >= 1 is that sign. anon_consume creates the row before it
+    knows whether the guide is allowed and anon_refund only takes the unit back, so
+    an account whose one attempt was refused or failed keeps a row with count 0."""
     now, out = _admin_utc(now), {}
     for r in rows or ():
         if not isinstance(r, dict):
             continue
         key = str(r.get("key") or "")
         uid = key[len("fair:user:"):] if key.startswith("fair:user:") else ""
-        if uid:
+        if uid and _admin_int(r.get("count")) >= 1:
             out[uid] = {"last_at": _admin_ts(r.get("last_at")),
                         "recent": _admin_counter_now(r, now, window_hours)[0]}
     return out
 
 def _admin_made_guide(user, activity):
     """True when this account has made at least one guide: the lifetime counter
-    (token era) or a fair-use counter of its own (free mode)."""
+    (token era) or a counted guide on its own fair-use counter (free mode)."""
     return (_admin_int(user.get("generations_count")) > 0
             or str(user.get("id") or "") in (activity or {}))
 
@@ -2093,8 +2096,11 @@ def _admin_load(sb, now, gate_limit):
     if res is not None:
         out["users"], out["users_total"] = _admin_rows(res), _admin_exact(res)
 
+    # count >= 1: a row left at 0 by a refused or refunded attempt is not a guide,
+    # and must not take a place under the row cap either.
     res = read("activity", lambda: sb.table("anon_usage").select("key,count,window_start,last_at")
-               .like("key", "fair:user:%").order("last_at", desc=True).limit(_ADMIN_ACTIVITY_MAX).execute())
+               .like("key", "fair:user:%").gte("count", 1)
+               .order("last_at", desc=True).limit(_ADMIN_ACTIVITY_MAX).execute())
     if res is not None:
         out["activity_rows"] = _admin_rows(res)
 
