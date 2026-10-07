@@ -23,7 +23,8 @@
 //   * checks ANON_FREE_USES=0 (an account from the first guide): the client never falls back to 3;
 //   * drives the SIGN-IN STASH (what was waiting is kept in this browser's IndexedDB for the Google
 //     round trip) against an in-memory IndexedDB: caps, restore once, tab binding, 30-minute limit,
-//     sign-out, and every way IndexedDB can be missing or broken.
+//     sign-out, every way IndexedDB can be missing or broken, and the Safari / iOS rule that a File read
+//     back from IndexedDB stops being readable once its record is deleted.
 // Exit code 0 = everything passed. No network, no DOM, no secrets.
 import { build } from 'esbuild'
 import fs from 'node:fs'
@@ -44,7 +45,7 @@ const EXPOSE = ['T', 'LEGACY', 'tFor', 'friendlyErr', 'streamSSE', 'perksOf', 'p
   'FREE_USES_DEFAULT', 'GATE_CODES', 'countInt', 'gateFromConfig', 'gateAfterDone', 'anonGated', 'termsText', 'AnonCounter',
   // why the server asked for a sign-in, and the copy kept in this browser for the sign-in round trip
   'signinText', 'holdsDeviceCount', 'AR_THE_COUNT', 'stashPlan', 'stashItems', 'signinStash',
-  'STASH_MAX_BYTES', 'STASH_MAX_FILES', 'STASH_MAX_AGE_MS', 'STASH_TAB_KEY', 'TERMS_STASH']
+  'STASH_MAX_BYTES', 'STASH_MAX_FILES', 'STASH_MAX_AGE_MS', 'STASH_TAB_KEY', 'TERMS_STASH', 'stashToast']
 
 await build({
   entryPoints: [appPath], bundle: true, format: 'esm', platform: 'node', outfile: outFile,
@@ -155,7 +156,7 @@ const NEW_KEYS = ['heroFree', 'dropFree', 'footerFree', 'joinTitle', 'joinBody',
   // the sign-in gate
   'anonLeft', 'anonNone', 'signinRequired', 'signInToContinue', 'gateCleared', 'generateNow', 'dropFreeUser',
   // the reasons, and the toast after the sign-in round trip
-  'signinNetwork', 'signinPool', 'stashReady']
+  'signinNetwork', 'signinPool', 'stashReady', 'stashMissing']
 for (const k of NEW_KEYS) check(`new key '${k}' exists in EN and AR`, k in T.en && k in T.ar)
 // values that are meant to be Latin: URLs / e-mail placeholders, product names, cell-cycle phase names (G1, S, G2)
 const ASCII_OK = new Set(['ytPlaceholder', 'urlPlaceholder', 'emailPh', 'emailPlaceholder', 'pdf', 'anki', 'planPro', 'sampleQuizOpts'])
@@ -539,6 +540,16 @@ for (const lang of ['en', 'ar']) {
   const m0 = renderToStaticMarkup(h(M.LoginModal, { onClose: noopFn, lang, sbClient: null, initialMode: 'signup', initialEmail: '', notice: null, freeMode: true, fair, gate: { reason: 'device', uses: 0 } }))
   check(`${lang}: the gate modal at 0 says an account is needed, not "you've used your 3 free guides"`, m0.includes(esc(t.signinRequired(0))) && !m0.includes(esc(t.signinRequired(3))))
   check(`${lang}: friendlyErr honours free_uses 0`, fe(t, 'x', 401, { code: 'signin_required', free_uses: 0, reason: 'device' }) === t.signinRequired(0))
+  // No guide is free at all: that is the whole truth, whatever the cause. The server answers the zero text before it
+  // looks at the reason, and so does the client: "used up on your network" would promise guides that do not exist.
+  check(`${lang}: at 0 the zero text wins over every reason (network, pool, one this client does not know)`,
+    ['device', 'network', 'pool', 'campus', undefined, null].every(reason => st(t, reason, 0, 'Server sentence.') === t.signinRequired(0)), st(t, 'network', 0))
+  check(`${lang}: friendlyErr at 0 says an account is needed for a network / pool refusal too`,
+    ['network', 'pool'].every(reason => fe(t, 'x', 401, { code: 'signin_required', free_uses: 0, reason }) === t.signinRequired(0)))
+  const m0net = renderToStaticMarkup(h(M.LoginModal, { onClose: noopFn, lang, sbClient: null, initialMode: 'signup', initialEmail: '', notice: null, freeMode: true, fair, gate: { reason: 'network', uses: 0 } }))
+  check(`${lang}: the gate modal at 0 for a browser with no device id (its reason is the network's) says an account is needed, not "used up on your network"`,
+    m0net.includes(esc(t.signinRequired(0))) && !m0net.includes(esc(t.signinNetwork)))
+  check(`${lang}: with an allowance the reasons still read as before`, st(t, 'network', 3) === t.signinNetwork && st(t, 'pool', 1) === t.signinPool && st(t, 'network', undefined) === t.signinNetwork)
   const terms0 = M.termsText(lang, true, 0)
   check(`${lang}: the Terms at 0 say a free account is required, with no "first N guides" and no placeholder`,
     (lang === 'en' ? /A free account is required to make study guides; creating one costs nothing\./.test(terms0) && !/your first|Without an account you can/.test(terms0)
@@ -575,10 +586,17 @@ check('finished guides, expired guides and the sample are never kept (they are n
   check('nothing but the source is kept: no job id, no status, no error, no guide', plan.items.every(i => !('jobId' in i) && !('status' in i) && !('error' in i) && !('guide' in i) && !('id' in i)))
 }
 check('at most 3 files', sp([1, 2, 3, 4, 5].map(n => qi({ id: n, file: fakeFile(`f${n}.pdf`, MB), name: `f${n}.pdf`, source: { type: 'file' } })), {}).items.length === 3)
+check('...and the files left out are counted, so the visitor can be told', sp([1, 2, 3, 4, 5].map(n => qi({ id: n, file: fakeFile(`f${n}.pdf`, MB), name: `f${n}.pdf`, source: { type: 'file' } })), {}).skipped === 2)
 {
   const plan = sp([qi({ file: fakeFile('a.pdf', 40 * MB), name: 'a.pdf', source: { type: 'file' } }), qi({ file: fakeFile('b.pdf', 30 * MB), name: 'b.pdf', source: { type: 'file' } }),
     qi({ file: fakeFile('c.pdf', 15 * MB), name: 'c.pdf', source: { type: 'file' } })], {})
   check('about 60 MB in all: a file that would pass the cap is left out, a smaller later one still fits', plan.items.map(i => i.name).join() === 'a.pdf,c.pdf')
+  check('the file left out for the size cap is counted (the queue takes 3 files of 50 MB, the copy about 60 MB)', plan.skipped === 1)
+  const three = sp([1, 2, 3].map(n => qi({ id: n, file: fakeFile(`deck-${n}.txt`, 25 * MB), name: `deck-${n}.txt`, source: { type: 'file' } })), {})
+  check('three 25 MB files: two are kept, one is counted as left out', three.items.map(i => i.name).join() === 'deck-1.txt,deck-2.txt' && three.skipped === 1)
+  check('nothing left out -> 0; a file item whose File is already gone is not "left out" (there was nothing to keep)',
+    sp([qi({ file: fakeFile('a.pdf', MB), name: 'a.pdf', source: { type: 'file' } }), qi({ file: null, name: 'x.pdf', source: { type: 'file' } })], {}).skipped === 0 &&
+    sp([], { text: 'typed', url: '', yt: '', tab: 'text' }).skipped === 0)
 }
 check('a file item whose File is gone, an odd link and an empty text are skipped', sp([qi({ file: null, name: 'x.pdf', source: { type: 'file' } }),
   qi({ file: null, source: { type: 'youtube', url: 'x'.repeat(2001) } }), qi({ file: null, source: { type: 'text', text: '', url: '' } })], {}) === null)
@@ -598,18 +616,42 @@ const si = M.stashItems
     si({ items: [{ kind: 'file', name: 'a.pdf', file: realFile('a.pdf') }, { kind: 'file', name: 'b.pdf', file: realFile('b.pdf') }], box: {} }).kind === 'files' &&
     si({ items: [], box: { text: 'notes' } }).kind === 'text' && si({ items: [{ kind: 'youtube', url: 'https://youtu.be/abc' }], box: {} }).kind === 'link' &&
     si({ items: [{ kind: 'text', text: 'notes', url: '', name: 'Pasted text' }], box: {} }).kind === 'text' && si({ items: [], box: { yt: 'https://youtu.be/abc' } }).kind === 'link')
+  check('what could not be kept (left out for a cap when the copy was made, or unreadable on return) is reported as `missing`',
+    back.missing === 0 && si({ items: [{ kind: 'file', name: 'a.pdf', file: realFile('a.pdf') }], box: {}, skipped: 1 }).missing === 1 &&
+    si({ items: [{ kind: 'file', name: 'a.pdf', file: realFile('a.pdf') }], box: {}, skipped: 1, lost: 1 }).missing === 2 &&
+    si({ items: [], box: {}, lost: 1 }).missing === 1 && si({ items: [], box: {}, lost: 1 }).kind === null &&
+    si(null).missing === 0 && si({ items: [], box: {}, skipped: 'x', lost: -4 }).missing === 0 && si({ items: [], box: {}, skipped: 1e9 }).missing <= 99)
   check('junk in the copy is dropped, never rendered: wrong type, oversize, not a file, odd shapes', si(null).items.length === 0 && si(null).kind === null && si({}).kind === null &&
     si({ items: 'x', box: 7 }).items.length === 0 &&
     si({ items: [{ kind: 'file', name: 'evil.exe', file: realFile('evil.exe') }, { kind: 'file', name: 'a.pdf', file: 'not a file' }, { kind: 'file', name: 'big.pdf', file: fakeFile('big.pdf', 51 * MB) },
       { kind: 'youtube', url: 42 }, { kind: 'text', text: {}, url: null }, { kind: 'nope' }, null, 5], box: { text: 9, url: {}, yt: [], tab: 'elsewhere' } }).kind === null)
 }
 
-// an in-memory IndexedDB, just enough for the helper: open / upgrade, one store, put / delete / clear / cursor
-function fakeIndexedDB({ openFails = false, putThrows = false, hangs = false } = {}) {
+// What Safari and every iOS browser hand back for a File stored in IndexedDB: not the bytes, a pointer to the blob
+// file kept with the record. Deleting the record deletes that file when the transaction commits, and every later read
+// of the File fails ("WebKitBlobResource error 1"): the upload then dies with a network error, again on every Retry.
+class IdbBackedFile extends File {
+  #alive
+  constructor(src, alive) { super([src], src.name, { type: src.type, lastModified: src.lastModified }); this.#alive = alive }
+  #gone() { return Promise.reject(new Error('WebKitBlobResource error 1')) }
+  arrayBuffer() { return this.#alive() ? super.arrayBuffer() : this.#gone() }
+  text() { return this.#alive() ? super.text() : this.#gone() }
+  bytes() { return this.#alive() ? super.bytes() : this.#gone() }
+}
+// an in-memory IndexedDB, just enough for the helper: open / upgrade, one store, put / delete / clear / cursor.
+// webkit: Files read back are IdbBackedFile (readable only while their record exists; `unreadable` names never are).
+function fakeIndexedDB({ openFails = false, putThrows = false, hangs = false, webkit = false, unreadable = [], deleteFails = false } = {}) {
   const dbs = new Map()
   const soon = (fn) => setTimeout(fn, 0)
+  const log = []                                   // every store call, in order: 'cursor' | 'put' | 'delete' | 'clear'
+  const readBack = (data, k) => {
+    const v = data.get(k)
+    if (!webkit || !v || !Array.isArray(v.items)) return v
+    return { ...v, items: v.items.map(s => (s && s.kind === 'file' && s.file instanceof File)
+      ? { ...s, file: new IdbBackedFile(s.file, () => data.get(k) === v && !unreadable.includes(s.file.name)) } : s) }
+  }
   return {
-    dbs,
+    dbs, log,
     rows: () => [...(dbs.get('alimne_signin_stash')?.get('pending') || new Map()).entries()],
     open(name) {
       const req = {}
@@ -629,15 +671,16 @@ function fakeIndexedDB({ openFails = false, putThrows = false, hangs = false } =
             const settle = () => soon(() => { if (!pending && !over) { over = true; tx.oncomplete?.() } })
             const run = (fn) => { const r = {}; pending++; soon(() => { try { r.result = fn(); r.onsuccess?.() } finally { pending--; settle() } }); return r }
             tx.objectStore = () => ({
-              put: (v, k) => { if (putThrows) throw new Error('DataCloneError'); return run(() => { data.set(k, v); return k }) },
-              delete: (k) => run(() => { data.delete(k) }),
-              clear: () => run(() => { data.clear() }),
+              put: (v, k) => { if (putThrows) throw new Error('DataCloneError'); log.push('put'); return run(() => { data.set(k, v); return k }) },
+              delete: (k) => { if (deleteFails) throw new Error('UnknownError'); log.push('delete'); return run(() => { data.delete(k) }) },
+              clear: () => { log.push('clear'); return run(() => { data.clear() }) },
               openCursor: () => {
                 const r = {}, keys = [...data.keys()]
                 let i = 0
+                log.push('cursor')
                 const step = () => { pending++; soon(() => { try {
                   const k = keys[i]
-                  r.result = i < keys.length ? { key: k, value: data.get(k), delete: () => { data.delete(k) }, continue: () => { i++; step() } } : null
+                  r.result = i < keys.length ? { key: k, value: readBack(data, k), delete: () => { data.delete(k) }, continue: () => { i++; step() } } : null
                   r.onsuccess?.()
                 } finally { pending--; settle() } }) }
                 step()
@@ -661,6 +704,9 @@ const firstLoad = stash.page
 const newPageLoad = (n) => { stash.page = `page-load-${n}` }      // what a reload (the return from Google) changes
 const planOf = (file) => sp([qi({ file, name: file.name, source: { type: 'file' } })], { text: 'typed notes', url: '', yt: '', tab: 'upload' })
 const realNow = Date.now
+const hex = async (f) => Buffer.from(await f.arrayBuffer()).toString('hex')
+// the same file, bytes included (a file that cannot be read is not the same file)
+const sameFile = async (a, b) => { try { return a instanceof File && a.name === b.name && a.type === b.type && a.size === b.size && (await hex(a)) === (await hex(b)) } catch { return false } }
 {
   session.clear()
   let idb = fakeIndexedDB(); useIdb(idb)
@@ -673,7 +719,7 @@ const realNow = Date.now
 
   await stash.save(planOf(f)); newPageLoad(1)
   const back = await stash.take()
-  check('after the round trip (a new page load in the same tab) the copy comes back, with the File', !!back && back.items[0].file === f && back.box.text === 'typed notes')
+  check('after the round trip (a new page load in the same tab) the copy comes back, with the File', !!back && (await sameFile(back.items[0].file, f)) && back.box.text === 'typed notes')
   check('...and it is deleted at once: nothing is left behind, and a second read finds nothing', idb.rows().length === 0 && session.getItem(M.STASH_TAB_KEY) === null && (await stash.take()) === null)
 
   await stash.save(planOf(f)); newPageLoad(2)
@@ -694,6 +740,52 @@ const realNow = Date.now
   await stash.clear()
   check('sign-out deletes every copy and the claim', idb.rows().length === 0 && session.getItem(M.STASH_TAB_KEY) === null)
   void token
+
+  // ── Safari and every iOS browser: a File read back from IndexedDB dies with its record ──
+  idb = fakeIndexedDB({ webkit: true }); useIdb(idb)
+  const deck = new File(['slide '.repeat(4000)], 'deck.pdf', { type: 'application/pdf', lastModified: 1760000000000 })
+  await stash.save(planOf(deck)); newPageLoad(4)
+  idb.log.length = 0
+  const wk = await stash.take()
+  const wkFile = wk && wk.items[0] && wk.items[0].file
+  check('WebKit: the file that comes back can still be READ after its record is deleted (it was copied into memory first)',
+    !!wkFile && (await sameFile(wkFile, deck)) && idb.rows().length === 0, wkFile ? 'unreadable: the upload would fail on every Retry' : 'no file came back')
+  check('WebKit: what comes back is a plain in-memory File with its name, type and date, not the pointer into IndexedDB',
+    !!wkFile && !(wkFile instanceof IdbBackedFile) && wkFile.name === 'deck.pdf' && wkFile.type === 'application/pdf' && wkFile.lastModified === 1760000000000)
+  check('the record is read first and deleted in a SECOND transaction, after the bytes are in memory', idb.log.join() === 'cursor,delete', idb.log.join())
+  check('...and nothing is left behind: no row, no claim, and a second read finds nothing', idb.rows().length === 0 && session.getItem(M.STASH_TAB_KEY) === null && (await stash.take()) === null)
+  check('the restored file goes into the queue as a readable upload', !!wk && (await sameFile(si(wk).items[0]?.file, deck)))
+
+  idb = fakeIndexedDB({ webkit: true, unreadable: ['broken.pdf'] }); useIdb(idb)
+  const good = realFile('good.pdf', 'good bytes'), broken = realFile('broken.pdf', 'never readable')
+  await stash.save(sp([qi({ id: 1, file: broken, name: 'broken.pdf', source: { type: 'file' } }), qi({ id: 2, file: good, name: 'good.pdf', source: { type: 'file' } })], {}))
+  newPageLoad(5)
+  const part = await stash.take()
+  check('a file whose bytes cannot be read is left out, and counted: the others still come back', !!part && part.items.length === 1 && part.items[0].name === 'good.pdf' &&
+    (await sameFile(part.items[0].file, good)) && part.lost === 1 && idb.rows().length === 0)
+  check('...so the toast never calls a file "ready" that cannot be uploaded, and says one must be chosen again', si(part).kind === 'file' && si(part).missing === 1 &&
+    typeof M.stashToast === 'function' && M.stashToast(T.en, si(part)) === "You're signed in. Your file is ready — tap Generate. One file could not be kept — please choose it again.")
+  await stash.save(planOf(broken)); newPageLoad(6)
+  const none = await stash.take()
+  check('when the only file cannot be read, nothing calls it ready: the typed text still returns, the file is reported missing',
+    !!none && none.items.length === 0 && none.lost === 1 && si(none).missing === 1 && si(none).kind === 'text' && idb.rows().length === 0)
+
+  idb = fakeIndexedDB({ webkit: true }); useIdb(idb)
+  await stash.save(planOf(deck)); newPageLoad(7)
+  const [first, second] = await Promise.all([stash.take(), stash.take()])
+  check('two reads at once (the page load and a pageshow) never restore the copy twice', [first, second].filter(Boolean).length === 1 && idb.rows().length === 0 &&
+    session.getItem(M.STASH_TAB_KEY) === null)
+  await stash.save(planOf(deck))
+  idb.log.length = 0
+  check('the SAME page still only deletes its copy (WebKit too): nothing to read, one transaction', (await stash.take()) === null && idb.rows().length === 0 && idb.log.join() === 'cursor', idb.log.join())
+
+  idb = fakeIndexedDB({ webkit: true, deleteFails: true }); useIdb(idb)
+  local.removeItem('alimne_stash_made')
+  await stash.save(planOf(deck)); newPageLoad(8)
+  const kept = await stash.take()
+  check('if the delete after the read fails, the file still comes back, once: the claim goes, and the flag stays so a later page load sweeps the row',
+    !!kept && (await sameFile(kept.items[0]?.file, deck)) && session.getItem(M.STASH_TAB_KEY) === null && local.getItem('alimne_stash_made') === '1' && (await stash.take()) === null)
+  local.removeItem('alimne_stash_made')
 
   // every way IndexedDB can be missing or broken: nothing is thrown, nothing is kept, sign-in goes on
   useIdb(undefined)
@@ -722,6 +814,18 @@ for (const lang of ['en', 'ar']) {
   check(`${lang}: the toast after the round trip says signed in, what is ready, and to tap Generate`, new Set(kinds).size === 5 &&
     kinds.every(x => (lang === 'en' ? /^You're signed in\. Your .+ ready — tap Generate\.$/.test(x) : /^تم تسجيل الدخول\. .+ — اضغط «توليد»\.$/.test(x))), kinds.join(' | '))
   check(`${lang}: the toast names the Generate button as the UI names it`, kinds[0].includes(lang === 'en' ? 'Generate' : t.generateNow))
+  const miss = [1, 2, 3].map(n => (typeof t.stashMissing === 'function' ? t.stashMissing(n) : ''))
+  check(`${lang}: a file that could not be kept is named, with what to do (one, two, three)`, new Set(miss).size === 3 &&
+    miss.every(x => (lang === 'en' ? /could not be kept — please choose (it|them) again\.$/.test(x) : /^تعذّر الاحتفاظ ب.+ — يُرجى (اختياره|اختيارهما|اختيارها) مرة أخرى\.$/.test(x)) &&
+      scan(x, lang).length === 0 && unqualified(x, lang).length === 0), miss.join(' | '))
+  check(`${lang}: one, two and three read naturally`, lang === 'en'
+    ? miss[0] === 'One file could not be kept — please choose it again.' && miss[1] === '2 files could not be kept — please choose them again.' && miss[2] === '3 files could not be kept — please choose them again.'
+    : miss[0] === 'تعذّر الاحتفاظ بملف واحد — يُرجى اختياره مرة أخرى.' && miss[1] === 'تعذّر الاحتفاظ بملفين — يُرجى اختيارهما مرة أخرى.' && miss[2] === 'تعذّر الاحتفاظ بـ3 ملفات — يُرجى اختيارها مرة أخرى.', miss.join(' | '))
+  const toastOf = typeof M.stashToast === 'function' ? M.stashToast : () => ''
+  check(`${lang}: everything back -> the plain "ready" toast; one file left out -> the same toast plus the missing line`,
+    toastOf(t, { kind: 'files', missing: 0 }) === t.stashReady('files') && toastOf(t, { kind: 'files', missing: 1 }) === t.stashReady('files') + ' ' + miss[0])
+  check(`${lang}: nothing back but a file missing -> signed in, and the file must be chosen again (never "your file is ready")`,
+    toastOf(t, { kind: null, missing: 1 }) === t.gateCleared + ' ' + miss[0] && !toastOf(t, { kind: null, missing: 1 }).includes(lang === 'en' ? 'is ready' : 'جاهز'))
   check(`${lang}: the short privacy line says the server only uses memory, and the browser keeps what waits during Google sign-in (never uploaded early)`,
     lang === 'en' ? /server memory only/.test(t.privacy) && /sign in with Google/.test(t.privacy) && /your own browser only/.test(t.privacy) && /never uploaded early/.test(t.privacy)
       : /ذاكرة الخادم فقط/.test(t.privacy) && /Google/.test(t.privacy) && /متصفحك فقط/.test(t.privacy) && /دون رفعه مسبقاً/.test(t.privacy), t.privacy)

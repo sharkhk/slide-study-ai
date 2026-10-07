@@ -114,6 +114,7 @@ const T = {
     gateCleared: "You're signed in — you can keep making guides now.",
     // Back from Google sign-in with what was waiting (k = 'file' | 'files' | 'text' | 'link', else several kinds)
     stashReady: (k) => "You're signed in. " + ({ file: 'Your file is ready', files: 'Your files are ready', text: 'Your text is ready', link: 'Your link is ready' }[k] || 'Your items are ready') + ' — tap Generate.',
+    stashMissing: (n) => n === 1 ? 'One file could not be kept — please choose it again.' : `${n} files could not be kept — please choose them again.`,
     generateNow: 'Generate',
     // Why sign in (shown in the sign-in modal and in the card after a visitor's first guide).
     // Only real features: more guides (the account's daily fair-use allowance), Chat (needs an account), the invite link.
@@ -349,6 +350,7 @@ const T = {
     signInToContinue: 'سجّل الدخول للمتابعة (مجاناً)',
     gateCleared: 'تم تسجيل الدخول — يمكنك الآن متابعة إنشاء الأدلة.',
     stashReady: (k) => 'تم تسجيل الدخول. ' + ({ file: 'ملفك جاهز', files: 'ملفاتك جاهزة', text: 'نصّك جاهز', link: 'رابطك جاهز' }[k] || 'عناصرك جاهزة') + ' — اضغط «توليد».',
+    stashMissing: (n) => n === 1 ? 'تعذّر الاحتفاظ بملف واحد — يُرجى اختياره مرة أخرى.' : n === 2 ? 'تعذّر الاحتفاظ بملفين — يُرجى اختيارهما مرة أخرى.' : `تعذّر الاحتفاظ بـ${n} ${n >= 3 && n <= 10 ? 'ملفات' : 'ملفاً'} — يُرجى اختيارها مرة أخرى.`,
     generateNow: 'توليد',
     perks: (f) => `المزيد من الأدلة${f ? ` (حتى ${f.user_daily} ${f.user_daily <= 10 ? 'أدلة' : 'دليلاً'} في اليوم ضمن الاستخدام العادل)` : ''}، والدردشة مع دليلك، ورابط لدعوة أصدقائك`,
     perksNote: (c) => `بحساب مجاني تحصل على ${c}.`,
@@ -616,11 +618,16 @@ const holdsDeviceCount = (data) => signinReason(data) === 'device'   // includes
 
 // The text for a sign-in refusal. Only 'device' may say "you've used your N free guides" (n = the server's number,
 // 0 included). A reason this client does not know shows the server's own sentence instead of a guess.
+// When NO guide is free without an account (n = 0) that is the whole answer, whatever the reason: the server
+// decides it before it looks at the reason, and so does this. A browser that keeps no device id asks with the
+// reason 'network', and "used up on your network" would promise guides that do not exist.
 const signinText = (t, reason, n, serverText) => {
+  const uses = countInt(n) ?? FREE_USES_DEFAULT
+  if (uses === 0) return t.signinRequired(0)
   if (reason === 'network') return t.signinNetwork
   if (reason === 'pool') return t.signinPool
   if (reason && reason !== 'device' && typeof serverText === 'string' && serverText.trim()) return serverText
-  return t.signinRequired(countInt(n) ?? FREE_USES_DEFAULT)
+  return t.signinRequired(uses)
 }
 // Server refusals that make the rest of a batch pointless: stop it, leave the other files queued
 const STOP_CODES = new Set(['signin_required', 'fair_use_device', 'fair_use_ip', 'fair_use_user', 'busy_today', 'busy'])
@@ -815,12 +822,14 @@ const csvCell = v => {
 // So just before the page leaves, the items that were not generated yet are put in IndexedDB (it can hold a
 // File), in this browser only. Nothing is sent anywhere: an item is uploaded when the visitor taps Generate,
 // exactly as before. The copy
-//   * is capped (STASH_MAX_FILES files, about STASH_MAX_BYTES in all);
+//   * is capped (STASH_MAX_FILES files, about STASH_MAX_BYTES in all; a file left out is counted, and the
+//     visitor is told to choose it again);
 //   * belongs to the tab that made it (a random claim in sessionStorage, which survives the round trip in the
 //     same tab and nothing else): no other tab can take it, including one opened later by someone else at the
 //     same computer;
-//   * is deleted in the very transaction that reads it back, deleted on sign-out, and never used once it is
-//     older than STASH_MAX_AGE_MS (any later page load in this browser sweeps it).
+//   * is deleted as soon as it is read back (its files are first copied into the page's memory, see
+//     signinStash.take), deleted on sign-out, dropped when the page never left and the visitor went on there,
+//     and never used once it is older than STASH_MAX_AGE_MS (any later page load in this browser sweeps it).
 // Every touch of IndexedDB and of the browser's storage is wrapped and time-limited: where they are missing,
 // blocked or broken (some private modes) nothing is kept and the page behaves as it always did. A browser that
 // never made a copy never even opens IndexedDB (STASH_FLAG).
@@ -829,23 +838,27 @@ const STASH_STORE = 'pending'
 const STASH_TAB_KEY = 'alimne_stash_tab'
 const STASH_FLAG = 'alimne_stash_made'
 const STASH_MAX_AGE_MS = 30 * 60 * 1000
+const STASH_LEAVING_MS = 20 * 1000   // after "Continue with Google": how long the page may still be on its way out
 const STASH_MAX_BYTES = 60 * 1024 * 1024
 const STASH_MAX_FILES = 3
 const STASH_TABS = ['upload', 'youtube', 'text']
 const randomId = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
 
 // What to keep: the queue items that were not generated yet (their File, link or pasted text) and what is typed
-// in the boxes. Only the source: no job, no status, no guide. → { items, box }, or null when nothing is waiting.
+// in the boxes. Only the source: no job, no status, no guide. → { items, box, skipped }, or null when nothing is
+// waiting. `skipped` = the files left out for a cap (the queue takes 3 files of up to 50 MB each, the copy about
+// STASH_MAX_BYTES in all): they are counted so the visitor is told to choose them again.
 function stashPlan(queue, boxes) {
   const items = []
-  let files = 0, bytes = 0
+  let files = 0, bytes = 0, skipped = 0
   for (const it of Array.isArray(queue) ? queue : []) {
     if (!it || it.demo || !['queued', 'error', 'processing'].includes(it.status)) continue
     const src = it.source || (it.file ? { type: 'file' } : null)
     if (!src) continue
     if (src.type === 'file') {
       const size = it.file ? Number(it.file.size) : NaN
-      if (!(size >= 0) || files >= STASH_MAX_FILES || bytes + size > STASH_MAX_BYTES) continue
+      if (!(size >= 0)) continue                     // its File is gone already: there is nothing to keep
+      if (files >= STASH_MAX_FILES || bytes + size > STASH_MAX_BYTES) { skipped++; continue }
       files++; bytes += size
       items.push({ kind: 'file', name: String(it.name || it.file.name || ''), file: it.file })
     } else if (src.type === 'youtube') {
@@ -860,12 +873,13 @@ function stashPlan(queue, boxes) {
   }
   const typed = (typeof boxes?.text === 'string' && boxes.text.trim() && bytes + boxes.text.length * 2 <= STASH_MAX_BYTES) ? boxes.text : ''
   const box = { text: typed, url: keptLink(boxes?.url), yt: keptLink(boxes?.yt), tab: STASH_TABS.includes(boxes?.tab) ? boxes.tab : 'upload' }
-  return (items.length || box.text || box.url || box.yt) ? { items, box } : null
+  return (items.length || box.text || box.url || box.yt) ? { items, box, skipped } : null
 }
 
 // The kept copy → queue items READY to generate (nothing was sent anywhere, so nothing is 'done' and nothing is
-// held), the boxes' text, and what came back in one word for the toast ('file' | 'files' | 'text' | 'link' |
-// 'items', or null for nothing). Whatever is not exactly what stashPlan writes is dropped: it is never rendered.
+// held), the boxes' text, what came back in one word for the toast ('file' | 'files' | 'text' | 'link' |
+// 'items', or null for nothing), and `missing`: how many files could NOT be kept (left out of the copy for a
+// cap, or unreadable on return). Whatever is not exactly what stashPlan writes is dropped: it is never rendered.
 function stashItems(rec) {
   const items = []
   let files = 0, texts = 0, links = 0
@@ -903,7 +917,28 @@ function stashItems(rec) {
     : (files && !texts && !links) ? (files === 1 ? 'file' : 'files')
     : (!files && texts === 1 && !links) ? 'text'
     : (!files && !texts && links === 1) ? 'link' : 'items'
-  return { items, box, kind }
+  const missing = Math.min((countInt(rec?.skipped) ?? 0) + (countInt(rec?.lost) ?? 0), 99)
+  return { items, box, kind, missing }
+}
+
+// The toast after a sign-in that brought something back: what is ready, and, when a file could not be kept, that
+// it has to be chosen again. With nothing back it only says "signed in": it never calls a missing file ready.
+const stashToast = (t, back) => [back?.kind ? t.stashReady(back.kind) : t.gateCleared, back?.missing > 0 ? t.stashMissing(back.missing) : '']
+  .filter(Boolean).join(' ')
+
+// A File as IndexedDB hands it back → the same file held in THIS page's memory, or null when its bytes cannot be
+// read (in time, or all of them). Needed before the record is deleted, see signinStash.take.
+async function stashFileCopy(f, name, ms = 20000) {
+  let timer = null
+  try {
+    if (typeof Blob === 'undefined' || typeof File === 'undefined' || !(f instanceof Blob) || f.size > MAX_UPLOAD) return null
+    const buf = await Promise.race([f.arrayBuffer(), new Promise((_, no) => { timer = setTimeout(() => no(new Error('timeout')), ms) })])
+    if (!buf || buf.byteLength !== f.size) return null
+    const opts = { type: f.type || '' }
+    if (typeof f.lastModified === 'number') opts.lastModified = f.lastModified
+    return new File([buf], String(f.name || name || ''), opts)
+  } catch { return null }
+  finally { clearTimeout(timer) }
 }
 
 // One IndexedDB transaction on the stash store. → what `work` reported through its second argument once the
@@ -938,6 +973,7 @@ function stashDb(mode, work, ms = 4000) {
 const signinStash = {
   // This page load. A copy made by this very load is still in memory here, so reading it back only deletes it.
   page: randomId(),
+  busy: false,                                       // a take() is running in this page (never two at once)
   // Does this tab hold a claim on a copy? (synchronous and cheap: no IndexedDB)
   claimed: () => { try { return !!sessionStorage.getItem(STASH_TAB_KEY) } catch { return false } },
   // True when there is nothing to look for: this tab holds no claim and no copy was ever made in this browser.
@@ -959,37 +995,59 @@ const signinStash = {
     try { localStorage.setItem(STASH_FLAG, '1') } catch { /* then every page load looks, see idle() */ }
     const ok = await stashDb('readwrite', (store, out) => {
       if (old) store.delete(old)                    // this tab's earlier copy, if any: never two for one tab
-      store.put({ v: 1, at: Date.now(), page: signinStash.page, items: plan.items, box: plan.box }, token)
+      store.put({ v: 1, at: Date.now(), page: signinStash.page, items: plan.items, box: plan.box, skipped: plan.skipped || 0 }, token)
       out(true)
     }, ms)
     if (!ok) { try { sessionStorage.removeItem(STASH_TAB_KEY) } catch { /* ignore */ } }
     return !!ok
   },
-  // Back on the page. → the copy THIS tab made on an earlier page load, or null. It is deleted in the same
-  // transaction that reads it: nothing is ever read and kept. A copy older than STASH_MAX_AGE_MS is deleted
-  // whoever made it, and never returned.
+  // Back on the page. → the copy THIS tab made on an earlier page load, or null. Nothing is ever read and kept:
+  // the copy is read, its files are copied into this page's memory, and the record is deleted straight after,
+  // in a SECOND transaction. It cannot be the one that reads it: in Safari and in every iOS browser a File read
+  // back from IndexedDB is only a pointer to the bytes stored with its record, and it stops being readable the
+  // moment that record is deleted (the file would show as queued, and its upload would fail on every try).
+  // A file whose bytes cannot be read is left out and counted in `lost`, so the visitor is told to choose it
+  // again. A copy older than STASH_MAX_AGE_MS is deleted whoever made it, and never returned.
   take: async (ms = 8000) => {
-    let token = null
-    try { token = sessionStorage.getItem(STASH_TAB_KEY) } catch { /* no claim */ }
-    const now = Date.now()
-    let rec = null, left = 0
-    const ran = await stashDb('readwrite', (store, out) => {
-      const cur = store.openCursor()
-      cur.onsuccess = () => {
-        const c = cur.result
-        if (!c) { out(true); return }
-        const r = c.value
-        const mine = !!token && c.key === token
-        const fresh = !!r && typeof r.at === 'number' && now >= r.at && now - r.at <= STASH_MAX_AGE_MS
-        if (mine || !fresh) c.delete()
-        else left++                                  // another tab's, still in its round trip: not ours to touch
-        if (mine && fresh && r.page !== signinStash.page) rec = r
-        c.continue()
+    if (signinStash.busy) return null                // a read is under way in this page already: it finishes the job
+    signinStash.busy = true
+    try {
+      let token = null
+      try { token = sessionStorage.getItem(STASH_TAB_KEY) } catch { /* no claim */ }
+      const now = Date.now()
+      let rec = null, left = 0
+      const ran = await stashDb('readwrite', (store, out) => {
+        const cur = store.openCursor()
+        cur.onsuccess = () => {
+          const c = cur.result
+          if (!c) { out(true); return }
+          const r = c.value
+          const mine = !!token && c.key === token
+          const fresh = !!r && typeof r.at === 'number' && now >= r.at && now - r.at <= STASH_MAX_AGE_MS
+          const back = mine && fresh && r.page !== signinStash.page   // this tab's, from an earlier page load: it comes back
+          if (back) rec = r                          // ...so it stays until its files are in this page's memory
+          else if (mine || !fresh) c.delete()
+          else left++                                // another tab's, still in its round trip: not ours to touch
+          c.continue()
+        }
+      }, ms)
+      let gone = true
+      if (ran && rec) {
+        const items = []
+        let lost = 0
+        for (const s of Array.isArray(rec.items) ? rec.items : []) {
+          if (!s || s.kind !== 'file') { items.push(s); continue }
+          const file = await stashFileCopy(s.file, s.name)
+          if (file) items.push({ ...s, file }); else lost++
+        }
+        rec = { ...rec, items, lost }
+        gone = !!(await stashDb('readwrite', (store, out) => { store.delete(token); out(true) }, ms))
       }
-    }, ms)
-    if (token) { try { sessionStorage.removeItem(STASH_TAB_KEY) } catch { /* ignore */ } }
-    if (ran && !left) { try { localStorage.removeItem(STASH_FLAG) } catch { /* ignore */ } }
-    return ran ? rec : null
+      if (token) { try { sessionStorage.removeItem(STASH_TAB_KEY) } catch { /* ignore */ } }
+      // the flag stays while a row may be left (another tab's, or one that could not be deleted): a later load sweeps it
+      if (ran && !left && gone) { try { localStorage.removeItem(STASH_FLAG) } catch { /* ignore */ } }
+      return ran ? rec : null
+    } finally { signinStash.busy = false }
   },
   // Sign-out: no copy of anyone's stays in this browser.
   clear: async () => {
@@ -2751,6 +2809,7 @@ export default function App() {
   // What is typed in the boxes right now (for the copy kept across the Google sign-in, see stashForSignIn)
   const boxesRef    = useRef(null);     boxesRef.current = { text: pasteText, url: pasteUrl, yt: ytUrl, tab: inputTab }
   const stashRestore = useRef(null)      // promise of what this page load brought back from a sign-in round trip (read once)
+  const stashedAt    = useRef(0)         // when THIS page kept a copy for a sign-in it was about to leave for (0 = never)
   const loadDone     = useRef(false)     // the session restore of this page load has answered
   const atLoadSignIn = useRef(false)     // the current sign-in is the one the page loaded with (the return from Google)
 
@@ -2901,31 +2960,46 @@ export default function App() {
 
   // ── The sign-in round trip: what was waiting when this tab left for Google comes back ──────────
   // Back on the page (signed in, or not: a visitor who cancels at Google gets the file back too): the copy this
-  // tab kept is read and deleted in one step (signinStash.take), its items go back in the queue READY to
-  // generate, and typed text goes back in its box. → what came back in one word (for the toast), or null.
+  // tab kept is read, held in memory and deleted (signinStash.take), its items go back in the queue READY to
+  // generate, and typed text goes back in its box. → { kind, missing } for the toast (what came back in one
+  // word, and how many files could not be kept and must be chosen again), or null when there is nothing to say.
   // A browser with no copy to look for never opens IndexedDB (signinStash.idle).
   const restoreStash = async () => {
     if (signinStash.idle()) return null
     if (!signinStash.claimed()) { signinStash.take(); return null }   // nothing of this tab's: only sweep old copies, in the background
     const back = stashItems(await signinStash.take())
-    if (!back.kind) return null
+    if (!back.kind && !back.missing) return null
     if (back.items.length) setQueue(prev => [...prev, ...back.items])
     if (back.box.text) setPasteText(v => v || back.box.text)
     if (back.box.url) setPasteUrl(v => v || back.box.url)
     if (back.box.yt) setYtUrl(v => v || back.box.yt)
-    // show where it is: the queue (with its Generate button), else the box the text or link was typed in
-    if (back.items.length) setInputTab('upload')
+    // show where it is: the queue (with its Generate button, and where a missing file is chosen again), else
+    // the box the text or link was typed in
+    if (back.items.length || !back.kind) setInputTab('upload')
     else setInputTab((back.box.tab === 'youtube' && back.box.yt) ? 'youtube' : (back.box.text || back.box.url) ? 'text' : 'youtube')
-    return back.kind
+    return { kind: back.kind, missing: back.missing }
   }
   // Just before the page leaves for a full-page sign-in (Google): keep what was waiting, in this browser only.
   // Best effort and time-limited: it can never stop the sign-in. Token mode keeps its old behaviour (no copy).
   const stashForSignIn = async () => {
     if (!freeRef.current) return false
-    try { return await signinStash.save(stashPlan(queueRef.current, boxesRef.current)) } catch { return false }
+    try {
+      const kept = await signinStash.save(stashPlan(queueRef.current, boxesRef.current))
+      if (kept) stashedAt.current = Date.now()
+      return kept
+    } catch { return false }
   }
   // The page did not leave after all (the sign-in could not start): everything is still in memory, so the copy goes
   const dropStash = () => { if (!signinStash.idle()) signinStash.take() }
+  // The same, when the page was meant to leave and the visitor went on in it instead (Stop or Esc while Google was
+  // loading, then a guide made or an item removed): the copy no longer matches the list, and a reload within its
+  // 30 minutes must not bring back a file that is already done or gone. Only a tab that holds a claim has a copy.
+  // `auto` = not the visitor's own tap (a guide that finishes, the next file of a running batch): in the first
+  // seconds after the copy was made the browser may simply still be on its way to Google, and those prove nothing.
+  const dropOwnStash = (auto = false) => {
+    if (auto && Date.now() - stashedAt.current < STASH_LEAVING_MS) return
+    if (signinStash.claimed()) signinStash.take()
+  }
   useEffect(() => {
     if (!stashRestore.current) stashRestore.current = restoreStash()
     // Back from the browser's back/forward cache: the very same page, its memory intact. take() then only deletes.
@@ -3076,7 +3150,8 @@ export default function App() {
     }
     gateAsked.current = false
     setShowLogin(false); setLoginNotice(null); setLoginGate(null)
-    if (back) toast(tRef.current.stashReady(back), 'success', 9000)   // "You're signed in. Your file is ready — tap Generate."
+    // "You're signed in. Your file is ready — tap Generate." (+ "One file could not be kept — please choose it again.")
+    if (back) toast(stashToast(tRef.current, back), back.missing ? 'info' : 'success', back.missing ? 12000 : 9000)
     else toast(tRef.current.gateCleared, 'success')
   }
 
@@ -3234,8 +3309,8 @@ export default function App() {
   const onDragOver = e => { e.preventDefault(); setDrag(true) }
   const onDragLeave = () => setDrag(false)
 
-  const removeItem = id => setQueue(prev => prev.filter(i => i.id !== id))
-  const clearAll   = () => setQueue([])
+  const removeItem = id => { dropOwnStash(); setQueue(prev => prev.filter(i => i.id !== id)) }
+  const clearAll   = () => { dropOwnStash(); setQueue([]) }
 
   // ── Guide cache + recovery ─────────────────────────────────────────────────
   const applyGuideResp = (id, jobId, d) => {
@@ -3358,6 +3433,7 @@ export default function App() {
       // Sign-in gate: an anonymous guide used one of the free ones (the sample never does). The server's
       // count when the event carries it (anon_remaining), else one less.
       if (!demo && freeRef.current && !hadBearer) setGate(g => gateAfterDone(g, ev))
+      if (!demo) dropOwnStash(true)   // made here: a copy kept for a sign-in this page never left for is stale now
       if (ev.job_id) cacheGuide(id, ev.job_id)
     } else if (ev.step === 'queued') {
       // Waiting for a free generation slot: not an error. The line shows the position, localized.
@@ -3371,7 +3447,9 @@ export default function App() {
   // One generation for item `id`: fresh auth per attempt, one silent refresh + retry
   // on an auth failure. → 'done' | 'error' | 'auth' | 'stop' ('auth' / 'stop' = stop the batch:
   // sign-in is needed, or the server refused for fair use / is busy, so the rest would be refused too)
-  const runGeneration = async (id, url, makeOpts, demo = false) => {
+  // `auto`: not started by the visitor's own tap (the next file of a running batch), see dropOwnStash.
+  const runGeneration = async (id, url, makeOpts, demo = false, auto = false) => {
+    if (!demo) dropOwnStash(auto)   // this page is making a guide: a copy kept for a sign-in it never left for is stale now
     for (let attempt = 0; attempt < 2; attempt++) {
       const headers = demo ? {} : await authHeaders()
       const hadBearer = !!headers.Authorization
@@ -3399,7 +3477,7 @@ export default function App() {
 
   const genOpts = () => ({ language: lang, detail, mode: summaryOnly ? 'summary' : 'full', quiz: includeQuiz })
 
-  const runFile = (id, file) => {
+  const runFile = (id, file, auto = false) => {
     const o = genOpts()
     updateItem(id, { status: 'processing', error: null, errCode: null, step: 'extract', msg: t.starting })
     return runGeneration(id, '/api/summarize-stream', headers => {
@@ -3410,7 +3488,7 @@ export default function App() {
       fd.append('mode', o.mode)
       fd.append('quiz', o.quiz ? 'true' : 'false')
       return { method: 'POST', body: fd, headers }
-    })
+    }, false, auto)
   }
 
   // ── File processing with SSE ───────────────────────────────────────────────
@@ -3423,7 +3501,7 @@ export default function App() {
     try {
       for (const [n, item] of pending.entries()) {
         if (n > 0 && gateBlocks()) break   // the file before this one used the last free guide: stop here, send nothing
-        const res = await runFile(item.id, item.file)
+        const res = await runFile(item.id, item.file, n > 0)   // only the first file is the visitor's own tap
         if (res === 'auth' || res === 'stop') break   // sign-in needed / fair-use or busy refusal: leave the rest queued
       }
     } finally {

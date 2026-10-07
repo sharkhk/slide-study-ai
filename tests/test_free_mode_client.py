@@ -50,6 +50,23 @@ After the review of the gate (2026-10-07) the client must also:
     restore, on sign-out and once older than 30 minutes). The OAuth call itself is
     unchanged, and the privacy wording says what really happens.
 
+After the second review (2026-10-07) the client must also:
+
+  * hand back a file that can still be READ. In Safari and every iOS browser a File
+    read from IndexedDB is a pointer to bytes kept with its record, and dies when the
+    record is deleted. So the copy is read, its files are copied into the page's
+    memory, and only then is the record deleted (a second transaction). A file whose
+    bytes cannot be read is left out, and the toast says it must be chosen again;
+  * say so when a file was left out of the copy (the queue takes 3 files of 50 MB,
+    the copy about 60 MB), instead of "your files are ready";
+  * drop the copy when the page never left (the visitor pressed Stop) and then made
+    or removed something there: a later reload must not bring back what is done.
+    The visitor's own tap always drops it; a guide that finishes or the next file of
+    a running batch only once the page has clearly stayed (20 seconds), because in
+    the first seconds the browser may simply still be on its way to Google;
+  * at ANON_FREE_USES=0 say "a free account is needed" whatever the reason: a browser
+    with no device id must not be told its network's guides are "used up".
+
 There is no JS test runner. These are static checks of the source and of the
 bundle in dist/, plus (when node and frontend/node_modules exist) the behavioural
 checks of frontend/scripts/verify-free-mode.mjs, which bundles App_dev.jsx and
@@ -270,7 +287,9 @@ def test_served_bundle_is_the_free_client():
                    "المتاحة على شبكتك دون حساب", "A free account is needed to make guides", "يلزم حساب مجاني لإنشاء الأدلة",
                    # the sign-in round trip: what was waiting is kept in this browser only
                    "alimne_signin_stash", "alimne_stash_tab", "indexedDB", "Your file is ready", "ملفك جاهز",
-                   "your own browser only", "متصفحك فقط"):
+                   "your own browser only", "متصفحك فقط",
+                   # a restored file is copied into memory before its record goes; one left out is named
+                   ".arrayBuffer()", "could not be kept", "تعذّر الاحتفاظ"):
         assert marker in js, f"{name} is missing {marker!r} - rebuild: cd frontend && npm run build"
     for stale in ("No sign-up needed", "no sign-up needed", "Try free, no sign-up", "no account needed ·",
                   "لا حاجة إلى حساب", "مجاني · بدون تسجيل", "come back tomorrow"):
@@ -287,7 +306,7 @@ def test_served_bundle_is_the_free_client():
 
 # ── 6. the sign-in gate: N guides without an account, then a free account ─────
 GATE_KEYS = ["anonLeft", "anonNone", "signinRequired", "signInToContinue", "gateCleared", "generateNow", "dropFreeUser",
-             "signinNetwork", "signinPool", "stashReady"]
+             "signinNetwork", "signinPool", "stashReady", "stashMissing"]
 
 
 @pytest.mark.parametrize("key", GATE_KEYS)
@@ -548,6 +567,11 @@ def test_zero_free_uses_is_never_replaced_by_the_default():
     terms = _block(src, r"^const termsText = ", r"^\}\n")
     assert "countInt(n) ?? FREE_USES_DEFAULT" in terms and "posInt(n)" not in terms
     assert "countInt(n) ?? FREE_USES_DEFAULT" in _block(src, r"^const signinText = ", r"^\}\n")
+    # ...and at 0 the zero text is decided BEFORE the reason is looked at, as the server does (`if n <= 0` first):
+    # a browser with no device id asks with reason 'network', and "used up on your network" would be false
+    text = _block(src, r"^const signinText = ", r"^\}\n")
+    assert "t.signinRequired(0)" in text, "signinText has no branch for an allowance of 0"
+    assert text.index("t.signinRequired(0)") < text.index("t.signinNetwork") < text.index("t.signinPool")
     en, ar = _pack(src, "T", "en"), _pack(src, "T", "ar")
     for must in ("n === 0 ? 'Free. No card. A free account is needed to make guides.'", "n === 0 ? 'Free · a free account is needed to make guides'",
                  "n === 0 ? \"Create a free account to make study guides — it's free.\""):
@@ -628,8 +652,11 @@ def test_the_stash_is_restored_once_and_never_left_behind():
     assert "if (signinStash.idle()) return null" in restore, "a browser with no copy to look for never opens IndexedDB"
     assert "signinStash.save" not in restore
     after = _block(src, r"const afterSignIn = ", r"\n  \}\n")
-    assert "stashRestore.current" in after and "tRef.current.stashReady(" in after, \
+    assert "stashRestore.current" in after and "stashToast(tRef.current, back)" in after, \
         "a sign-in that brought something back says so: signed in, your file is ready, tap Generate"
+    toast = _block(src, r"^const stashToast = ", r"\n\n")
+    assert "t.stashReady(" in toast and "t.stashMissing(" in toast and "t.gateCleared" in toast, \
+        "the toast names what is ready and, when a file could not be kept, that it must be chosen again"
     # on every page load (signed in or not), and when the page comes back from the browser's back cache
     assert re.search(r"stashRestore\.current = restoreStash\(\)", src)
     assert "'pageshow'" in src and "e.persisted" in src
@@ -642,11 +669,71 @@ def test_the_stash_is_restored_once_and_never_left_behind():
     assert "sessionStorage.removeItem(STASH_TAB_KEY)" in take
 
 
+def test_a_restored_file_is_copied_into_memory_before_its_record_is_deleted():
+    # Safari and every iOS browser: a File read back from IndexedDB is only a pointer to the bytes stored with its
+    # record. Deleting the record in the transaction that reads it leaves a "Queued" file that can never be
+    # uploaded. So: read (the record stays), copy the bytes into this page, THEN delete in a second transaction.
+    helper = _stash_helper(_src())
+    copy = _block(helper, r"^async function stashFileCopy\(", r"^\}\n")
+    assert ".arrayBuffer()" in copy and "new File([" in copy and "lastModified" in copy
+    assert "try {" in copy and "catch" in copy and "setTimeout(" in copy, "an unreadable or stuck file must never throw or hang the restore"
+    assert "return null" in copy, "a file whose bytes cannot be read is reported as such (null), never handed back"
+    take = _block(helper, r"  take: async ", r"\n  \},\n")
+    assert take.count("stashDb('readwrite'") == 2, "take() = one transaction to read (and sweep), a second one to delete what was read"
+    read, rest = take.split("stashFileCopy(", 1)
+    assert "store.delete(token)" not in read and "store.delete(token)" in rest, \
+        "the record must still exist while its files are copied into memory"
+    # in the reading transaction this tab's fresh copy from an earlier page load is kept, everything else as before
+    assert re.search(r"if \(back\) rec = r\b", read) and re.search(r"else if \(mine \|\| !fresh\) c\.delete\(\)", read)
+    # a file that cannot be read is dropped and counted, for the toast
+    assert "lost" in rest
+    # never two reads at once in one page (page load + pageshow): the copy cannot come back twice
+    assert "signinStash.busy" in take
+    items = _block(helper, r"^function stashItems\(", r"^\}\n")
+    assert "missing" in items and "rec?.skipped" in items and "rec?.lost" in items
+    plan = _block(helper, r"^function stashPlan\(", r"^\}\n")
+    assert "skipped" in plan, "the plan counts the files it had to leave out (3 x 50 MB fit the queue, about 60 MB the copy)"
+
+
+def test_the_copy_is_dropped_when_the_page_stayed_and_the_visitor_went_on():
+    # "Continue with Google" was tapped, the copy was made, and the page never left (Stop / Esc while it loads).
+    # If the visitor then makes or removes something in that same page, the copy is stale: a reload in the next 30
+    # minutes must not bring a finished or removed file back as "Queued" (Generate All would spend another guide).
+    src = _src()
+    drop = _block(src, r"const dropOwnStash = \(auto = false\) => \{", r"\n  \}\n")
+    assert "if (signinStash.claimed()) signinStash.take()" in drop, \
+        "only a tab that holds a claim has a copy to drop (no IndexedDB for anyone else)"
+    # the visitor's own tap: at once. What happens by itself (a guide finishing, the next file of a batch) proves
+    # nothing in the first seconds, while the browser may still be on its way to Google: the copy must survive that
+    assert "if (auto && Date.now() - stashedAt.current < STASH_LEAVING_MS) return" in drop
+    assert drop.index("STASH_LEAVING_MS") < drop.index("signinStash.take()")
+    assert re.search(r"^const STASH_LEAVING_MS = 20 \* 1000\b", src, re.M)
+    assert "if (kept) stashedAt.current = Date.now()" in _block(src, r"const stashForSignIn = ", r"\n  \}\n")
+    # a generation that starts
+    run = _block(src, r"const runGeneration = async ", r"\n  \}\n")
+    assert "if (!demo) dropOwnStash(auto)" in run and run.index("dropOwnStash(auto)") < run.index("streamP("), \
+        "a generation the visitor starts in this page proves the page stayed: the copy goes before anything is sent"
+    assert "runFile(item.id, item.file, n > 0)" in _block(src, r"const processAll = async ", r"\n  \}\n"), \
+        "only the first file of a batch is the visitor's own tap"
+    assert "}, false, auto)" in _block(src, r"const runFile = ", r"\n  \}\n")
+    # a guide that finishes here
+    done = _block(src, r"const onGenEvent = ", r"\n  \}\n")
+    assert "if (!demo) dropOwnStash(true)" in done and done.index("ev.step === 'done'") < done.index("dropOwnStash(true)") < done.index("ev.step === 'queued'")
+    # an item taken off the list
+    assert re.search(r"const removeItem = id => \{ dropOwnStash\(\); ", src), "removing an item drops the copy"
+    assert re.search(r"const clearAll\s+= \(\) => \{ dropOwnStash\(\); ", src), "clearing the list drops the copy"
+    # the sample lecture is no part of any copy: it never touches it
+    assert "dropOwnStash" not in _block(src, r"const runSample = async ", r"\n  \}\n")
+    assert src.count("dropOwnStash(") == 4, "four call sites: start, done, remove, clear"
+
+
 def test_stash_strings_and_privacy_wording_in_both_languages():
     src = _src()
     en, ar = _pack(src, "T", "en"), _pack(src, "T", "ar")
     assert "You're signed in. " in en and "Your file is ready" in en and "' — tap Generate.'" in en
     assert "'تم تسجيل الدخول. '" in ar and "ملفك جاهز" in ar and "' — اضغط «توليد».'" in ar
+    # a file that could not be kept (left out of the copy, or unreadable on return) is named, with what to do
+    assert "could not be kept — please choose" in en and "تعذّر الاحتفاظ ب" in ar and "مرة أخرى" in ar
     en_priv = next(l for l in en.splitlines() if l.startswith("    privacy:"))
     ar_priv = next(l for l in ar.splitlines() if l.startswith("    privacy:"))
     for must in ("server memory only", "sign in with Google", "your own browser only", "never uploaded early", "within 15 minutes"):
