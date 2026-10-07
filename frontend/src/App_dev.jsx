@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { createClient } from '@supabase/supabase-js'
 import {
   Sun, Moon, Upload, FileText, Download,
@@ -24,9 +24,12 @@ const T = {
     badge: 'AI-Powered · Smart Study',
     h1a: 'Turn any lecture into',
     h1b: 'Study Guides',
-    sub: 'Drop a PowerPoint, PDF, or YouTube lecture — get an exam-ready guide with notes, flashcards, and a practice quiz in seconds. Free to start, no card needed.',
+    sub: 'Drop a PowerPoint, PDF, or YouTube lecture — get an exam-ready guide with notes, flashcards, and a practice quiz in seconds.',
+    heroFree: 'Free. No card. No sign-up needed.',
     dropTitle: 'Drop your PowerPoint or PDF files here',
     dropSub: 'or click to browse — .pptx / .ppt / .pdf / .docx / .doc / .txt, multiple files supported',
+    dropFree: 'Free to use · no account needed · fair-use daily limits apply',
+    footerFree: 'Free to use · Files deleted automatically',
     langAuto: 'Auto-detect language',
     langEn: 'English output',
     langAr: 'Arabic output (عربي)',
@@ -62,11 +65,6 @@ const T = {
     authWeak: 'Enter a valid email and a password of at least 6 characters.',
     authCheckEmail: 'Account created \u2014 check your email to confirm, then sign in.',
     authError: 'Sign-in failed \u2014 please try again.',
-    upgradeTitle: "You're out of free guides",
-    upgradeSub: "You've used your free guides for now. Go Pro for 30 a month plus priority processing.",
-    upgradeFeatures: ['30 guides per month', 'Priority processing', 'All features included'],
-    upgradeBtn: 'Go Pro — $2.99 / month',
-    upgradeFree: 'Free: 3 study guides a month',
     signIn: 'Sign in',
     signOut: 'Sign out',
     accountTitle: 'Your account',
@@ -78,34 +76,35 @@ const T = {
     statusCanceled: 'Canceled',
     statusPastDue: 'Payment issue',
     renewsOn: 'Renews on',
-    guidesLeft: 'Guides left this month',
+    accountAllowance: 'Daily allowance',
+    accountPerDay: (n) => `Up to ${n} guides a day (fair use)`,
+    accountFreeNote: 'Alimne is free for everyone now, so you no longer need a paid plan. You can cancel your subscription below at any time.',
     manageNote: "Update your card, see invoices, or cancel your subscription on Stripe's secure billing page.",
     subSuccess: 'Payment received — activating Alimne Pro…',
-    tokensLeft: 'tokens',
     manageBtn: 'Manage / cancel subscription',
+    freeNow: 'Alimne is free now — no subscription needed.',
     loginTitleSignup: 'Create your account',
-    loginSubSignup: 'Create a free account — 3 more study guides on us',
+    loginSubSignup: 'Free, no card needed — create your account in a minute.',
     emailBtnSignup: 'Create free account',
     noAccount: 'New here? Create a free account',
     haveAccount: 'Already have an account? Sign in',
     wrongPassword: 'Incorrect email or password. Signed up with Google? Use Continue with Google.',
     accountExists: 'An account already exists for this email. Sign in instead.',
-    freeLeft: (n) => `${n} free ${n === 1 ? 'preview' : 'previews'} left`,
     freeTry: 'Try free, no sign-up',
-    signInForMore: 'Loved it? Sign up free — 3 more guides on us.',
-    // Email capture (before signup invite)
-    emailCaptureTitle: 'Get 3 free study guides',
-    emailCaptureSub: "Drop your email and we'll set you up with 3 free study guides a month. No spam.",
-    emailPlaceholder: 'you@email.com',
-    emailCaptureBtn: 'Continue',
-    emailSkip: 'Skip for now',
+    signInFreeCta: 'Sign in free',
     emailInvalid: 'Please enter a valid email address.',
-    // Referral
-    referTitle: 'Refer & Earn',
-    referSub: 'Share your link. Each person who subscribes earns you 10 free tokens — no limit.',
+    // Why sign in (shown in the sign-in modal and in the card after a visitor's first guide).
+    // Only real features: a higher daily allowance than anonymous visitors, Chat (needs an account), the invite link.
+    perks: (f) => `a higher daily allowance${f ? ` (up to ${f.user_daily} guides a day instead of ${f.device_daily})` : ''}, chat with your guide, and a link to invite friends`,
+    perksNote: (c) => `With a free account you get ${c}.`,
+    joinTitle: 'Create a free account',
+    joinBody: (c) => `Get ${c}.`,
+    // Invite a friend (plain share link — no rewards)
+    referTitle: 'Invite a friend',
+    referSub: "Know someone who could use Alimne? Share your link — it's free for them too.",
     referCopy: 'Copy link',
     referCopied: 'Copied!',
-    referStats: (paid) => paid > 0 ? `${paid} subscriber${paid > 1 ? 's' : ''} · ${paid * 10} tokens earned` : 'No referrals yet',
+    referJoined: (n) => n > 0 ? `${n} friend${n > 1 ? 's' : ''} joined` : 'No friends joined yet',
     // Share
     share: 'Share',
     shareCopy: 'Copy',
@@ -144,14 +143,15 @@ const T = {
     sampleQuizQ: 'What is the correct order of interphase?',
     sampleQuizOpts: ['G1 → S → G2', 'S → G1 → G2', 'G2 → S → G1'],
     sampleQuizAnswer: 0,
-    trust: ['No sign-up to try', 'Files wiped in 15 min', 'English & العربية'],
+    trust: ['Free · no sign-up needed', 'Files wiped in 15 min', 'English & العربية'],
     // Status / recovery
     expired: 'Expired',
     expiredNote: 'Expired on the server — guides are kept for 15 minutes.',
     restore: 'Restore (free)',
     regenerate: 'Regenerate',
     retry: 'Retry',
-    usesCredit: 'This uses 1 guide credit. Continue?',
+    queuePos: (n) => `You are in line — position ${n}`,
+    queueWait: 'You are in line — starting soon',
     reselectFile: 'Re-select your file to generate it again.',
     repasteText: 'Paste your text again to regenerate it.',
     partialNote: "Some flashcards or quiz questions couldn't be generated.",
@@ -182,8 +182,6 @@ const T = {
     deleteFailed: 'Could not delete — it is auto-wiped within 15 minutes.',
     paymentError: 'Payment error — please try again.',
     billingError: 'Billing error — please try again.',
-    proUsedUp: "You've used this month's guides — they renew at the start of next month.",
-    freeUsedUp: 'Free guides used — subscribe to continue.',
     // Errors
     errNetwork: 'Connection lost — check your internet and tap Retry.',
     streamLost: 'Connection lost before your guide finished — tap Retry.',
@@ -193,7 +191,12 @@ const T = {
     errRetry: 'Temporary problem — please try again in a moment.',
     errGeneric: 'Something went wrong — please try again.',
     errNoNotes: "The AI couldn't build notes right now — please try again.",
-    errNoNotesRefunded: "The AI couldn't build notes for this file right now — your credit was returned, please try again.",
+    // Fair use / capacity (free mode)
+    errFairDevice: "You've used today's free guides on this device. Sign in free for a higher daily allowance — or come back tomorrow.",
+    errFairIp: "Lots of students are using Alimne from your network today, so it's paused here for now — please try again later.",
+    errFairUser: "You've reached today's fair-use limit. It refills within 24 hours — please try again later.",
+    errBusyToday: 'Alimne is very popular today — please try again later.',
+    errBusy: 'Many students are generating right now — tap Retry in a minute.',
     errYtBlocked: 'YouTube blocked this video — try one with captions, or paste the transcript in the "Paste Text / URL" tab.',
     fileTooBig: (n) => `${n} is over 50 MB — compress or split it.`,
     maxFiles: 'You can process up to 3 files at a time.',
@@ -242,9 +245,12 @@ const T = {
     badge: 'ذكاء اصطناعي · دراسة ذكية',
     h1a: 'حوّل أي محاضرة إلى',
     h1b: 'أدلة دراسة',
-    sub: 'ارفع عرضاً تقديمياً أو PDF أو رابط محاضرة من YouTube — واحصل على دليل جاهز للامتحان مع ملخص وبطاقات وأسئلة مراجعة خلال ثوانٍ. ابدأ مجاناً، بدون بطاقة.',
+    sub: 'ارفع عرضاً تقديمياً أو PDF أو رابط محاضرة من YouTube — واحصل على دليل جاهز للامتحان مع ملخص وبطاقات وأسئلة مراجعة خلال ثوانٍ.',
+    heroFree: 'مجاني. بدون بطاقة. لا حاجة إلى حساب.',
     dropTitle: 'أسقط ملفات PowerPoint أو PDF هنا',
     dropSub: 'أو انقر للتصفح — .pptx / .ppt / .pdf / .docx / .doc / .txt، يدعم ملفات متعددة',
+    dropFree: 'مجاني للاستخدام · بدون حساب · تُطبَّق حدود يومية للاستخدام العادل',
+    footerFree: 'مجاني للاستخدام · تُحذف الملفات تلقائياً',
     langAuto: 'اكتشاف اللغة تلقائياً',
     langEn: 'الإخراج بالإنجليزية',
     langAr: 'الإخراج بالعربية',
@@ -280,11 +286,6 @@ const T = {
     authWeak: 'أدخل بريداً صحيحاً وكلمة مرور من 6 أحرف على الأقل.',
     authCheckEmail: 'تم إنشاء الحساب — تحقق من بريدك للتأكيد ثم سجّل الدخول.',
     authError: 'فشل تسجيل الدخول — حاول مجدداً.',
-    upgradeTitle: 'انتهت أدلتك المجانية',
-    upgradeSub: 'استخدمت أدلتك المجانية الآن. اشترك للحصول على 30 دليلاً شهرياً ومعالجة ذات أولوية.',
-    upgradeFeatures: ['30 دليلاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
-    upgradeBtn: 'اشترك — 2.99$ / شهر',
-    upgradeFree: 'مجاناً: 3 أدلة دراسة شهرياً',
     signIn: 'تسجيل الدخول',
     signOut: 'تسجيل الخروج',
     accountTitle: 'حسابك',
@@ -296,33 +297,34 @@ const T = {
     statusCanceled: 'ملغى',
     statusPastDue: 'مشكلة في الدفع',
     renewsOn: 'يتجدد في',
-    guidesLeft: 'الأدلة المتبقية هذا الشهر',
+    accountAllowance: 'الحدّ اليومي',
+    accountPerDay: (n) => n === 1 ? 'حتى دليل واحد في اليوم (استخدام عادل)' : n === 2 ? 'حتى دليلين في اليوم (استخدام عادل)'
+      : `حتى ${n} ${n <= 10 ? 'أدلة' : 'دليلاً'} في اليوم (استخدام عادل)`,
+    accountFreeNote: 'أصبح علّمني مجانياً للجميع، فلم تعد بحاجة إلى خطة مدفوعة. يمكنك إلغاء اشتراكك أدناه في أي وقت.',
     manageNote: 'حدّث بطاقتك، أو اطّلع على الفواتير، أو ألغِ اشتراكك من صفحة الفوترة الآمنة في Stripe.',
     subSuccess: 'تم استلام الدفع — جارٍ تفعيل Alimne Pro…',
-    tokensLeft: 'رموز متبقية',
     manageBtn: 'إدارة / إلغاء الاشتراك',
+    freeNow: 'علّمني مجاني الآن — لا حاجة إلى اشتراك.',
     loginTitleSignup: 'أنشئ حسابك',
-    loginSubSignup: 'أنشئ حساباً مجانياً — 3 أدلة دراسة إضافية هدية منّا',
+    loginSubSignup: 'مجاني وبدون بطاقة — أنشئ حسابك خلال دقيقة.',
     emailBtnSignup: 'إنشاء حساب مجاني',
     noAccount: 'جديد هنا؟ أنشئ حساباً مجانياً',
     haveAccount: 'لديك حساب بالفعل؟ سجّل الدخول',
     wrongPassword: 'البريد أو كلمة المرور غير صحيحة. سجّلت عبر Google؟ استخدم «المتابعة عبر Google».',
     accountExists: 'يوجد حساب بهذا البريد بالفعل. سجّل الدخول بدلاً من ذلك.',
-    freeLeft: (n) => `${n} ${n === 1 ? 'معاينة' : 'معاينات'} مجانية متبقية`,
     freeTry: 'جرّب مجاناً، بدون تسجيل',
-    signInForMore: 'أعجبك؟ سجّل مجاناً — 3 أدلة إضافية هدية لك.',
-    emailCaptureTitle: 'احصل على 3 أدلة دراسة مجانية',
-    emailCaptureSub: 'أدخل بريدك ونجهّز لك 3 أدلة دراسة مجانية شهرياً. بدون إزعاج.',
-    emailPlaceholder: 'you@email.com',
-    emailCaptureBtn: 'متابعة',
-    emailSkip: 'تخطٍّ الآن',
+    signInFreeCta: 'سجّل الدخول مجاناً',
     emailInvalid: 'يرجى إدخال بريد إلكتروني صحيح.',
-    // Referral
-    referTitle: 'أحِل واكسب',
-    referSub: 'شارك رابطك. كل شخص يشترك عبر رابطك يمنحك 10 رموز مجانية — بلا حدود.',
+    perks: (f) => `حدّ يومي أعلى${f ? ` (حتى ${f.user_daily} ${f.user_daily <= 10 ? 'أدلة' : 'دليلاً'} في اليوم بدل ${f.device_daily})` : ''}، والدردشة مع دليلك، ورابط لدعوة أصدقائك`,
+    perksNote: (c) => `بحساب مجاني تحصل على ${c}.`,
+    joinTitle: 'أنشئ حساباً مجانياً',
+    joinBody: (c) => `احصل على ${c}.`,
+    // ادعُ صديقاً (رابط مشاركة فقط — بلا مكافآت)
+    referTitle: 'ادعُ صديقاً',
+    referSub: 'تعرف من قد يحتاج علّمني؟ شارك رابطك — فهو مجاني لهم أيضاً.',
     referCopy: 'نسخ الرابط',
     referCopied: 'تم النسخ!',
-    referStats: (paid) => paid > 0 ? `${paid} مشترك · ${paid * 10} رمز مكتسب` : 'لا إحالات بعد',
+    referJoined: (n) => n === 0 ? 'لم ينضم أحد بعد' : n === 1 ? 'انضم صديق واحد' : n === 2 ? 'انضم صديقان' : n <= 10 ? `انضم ${n} أصدقاء` : `انضم ${n} صديقاً`,
     // Share
     share: 'مشاركة',
     shareCopy: 'نسخ',
@@ -361,14 +363,15 @@ const T = {
     sampleQuizQ: 'ما الترتيب الصحيح للطور البيني؟',
     sampleQuizOpts: ['G1 ← S ← G2', 'S ← G1 ← G2', 'G2 ← S ← G1'],
     sampleQuizAnswer: 0,
-    trust: ['بدون تسجيل للتجربة', 'تُمسح الملفات خلال 15 دقيقة', 'الإنجليزية والعربية'],
+    trust: ['مجاني · بدون تسجيل', 'تُمسح الملفات خلال 15 دقيقة', 'الإنجليزية والعربية'],
     // الحالة / الاستعادة
     expired: 'منتهي الصلاحية',
     expiredNote: 'انتهت صلاحيته على الخادم — تُحفظ الأدلة 15 دقيقة.',
     restore: 'استعادة (مجاناً)',
     regenerate: 'إعادة الإنشاء',
     retry: 'إعادة المحاولة',
-    usesCredit: 'سيستهلك هذا رصيد دليل واحد. هل تريد المتابعة؟',
+    queuePos: (n) => `أنت في الطابور — الترتيب ${n}`,
+    queueWait: 'أنت في الطابور — سنبدأ قريباً',
     reselectFile: 'اختر ملفك مجدداً لإعادة إنشائه.',
     repasteText: 'الصق النص مجدداً لإعادة إنشائه.',
     partialNote: 'تعذّر إنشاء بعض البطاقات أو أسئلة الاختبار.',
@@ -399,8 +402,6 @@ const T = {
     deleteFailed: 'تعذّر الحذف — سيُمسح تلقائياً خلال 15 دقيقة.',
     paymentError: 'خطأ في الدفع — حاول مجدداً.',
     billingError: 'خطأ في الفوترة — حاول مجدداً.',
-    proUsedUp: 'استخدمت أدلة هذا الشهر — تتجدد في بداية الشهر القادم.',
-    freeUsedUp: 'استُخدمت الأدلة المجانية — اشترك للمتابعة.',
     // الأخطاء
     errNetwork: 'انقطع الاتصال — تحقّق من الإنترنت واضغط «إعادة المحاولة».',
     streamLost: 'انقطع الاتصال قبل اكتمال دليلك — اضغط «إعادة المحاولة».',
@@ -410,7 +411,12 @@ const T = {
     errRetry: 'مشكلة مؤقتة — حاول مجدداً بعد لحظات.',
     errGeneric: 'حدث خطأ ما — حاول مجدداً.',
     errNoNotes: 'تعذّر على الذكاء الاصطناعي إعداد الملاحظات الآن — حاول مجدداً.',
-    errNoNotesRefunded: 'تعذّر على الذكاء الاصطناعي إعداد ملاحظات لهذا الملف الآن — أُعيد إليك رصيدك، حاول مجدداً.',
+    // الاستخدام العادل / الازدحام (الوضع المجاني)
+    errFairDevice: 'استخدمت أدلتك المجانية لهذا اليوم على هذا الجهاز. سجّل الدخول مجاناً للحصول على حدّ يومي أعلى — أو عُد غداً.',
+    errFairIp: 'يستخدم الكثير من الطلاب علّمني من شبكتك اليوم، لذلك توقّف مؤقتاً هنا — حاول مجدداً لاحقاً.',
+    errFairUser: 'وصلت إلى حدّ الاستخدام العادل لهذا اليوم. يتجدّد خلال 24 ساعة — حاول مجدداً لاحقاً.',
+    errBusyToday: 'علّمني مزدحم جداً اليوم — يرجى المحاولة لاحقاً.',
+    errBusy: 'كثير من الطلاب يُنشئون أدلتهم الآن — اضغط «إعادة المحاولة» بعد دقيقة.',
     errYtBlocked: 'حظر YouTube هذا الفيديو — جرّب فيديو فيه ترجمة نصية، أو الصق النص في تبويب «لصق نص / رابط».',
     fileTooBig: (n) => `حجم ${n} أكبر من 50 ميغابايت — اضغطه أو قسّمه.`,
     maxFiles: 'يمكنك معالجة 3 ملفات كحد أقصى في كل مرة.',
@@ -455,6 +461,97 @@ const T = {
     chatNoAnswer: 'لا توجد إجابة — حاول مجدداً.',
   }
 }
+
+// ── Token-mode copy (ALIMNE_FREE_MODE=0 only) ─────────────────────────────────
+// Alimne is free by default. If the owner ever switches the server back to tokens, the
+// client follows /api/config (free_mode:false) or the first 402 and merges this pack over T.
+// In free mode (the default) none of it is reachable: tFor(lang, true) is T itself.
+const LEGACY = {
+  en: {
+    sub: 'Drop a PowerPoint, PDF, or YouTube lecture — get an exam-ready guide with notes, flashcards, and a practice quiz in seconds. Free to start, no card needed.',
+    heroFree: '',
+    dropFree: '',
+    footerFree: 'Free to try · Files deleted automatically',
+    trust: ['No sign-up to try', 'Files wiped in 15 min', 'English & العربية'],
+    upgradeTitle: "You're out of free guides",
+    upgradeSub: "You've used your free guides for now. Go Pro for 30 a month plus priority processing.",
+    upgradeFeatures: ['30 guides per month', 'Priority processing', 'All features included'],
+    upgradeBtn: 'Go Pro — $2.99 / month',
+    upgradeFree: 'Free: 3 study guides a month',
+    guidesLeft: 'Guides left this month',
+    tokensLeft: 'tokens',
+    loginSubSignup: 'Create a free account — 3 more study guides on us',
+    freeLeft: (n) => `${n} free ${n === 1 ? 'preview' : 'previews'} left`,
+    signInForMore: 'Loved it? Sign up free — 3 more guides on us.',
+    emailCaptureTitle: 'Get 3 free study guides',
+    emailCaptureSub: "Drop your email and we'll set you up with 3 free study guides a month. No spam.",
+    emailPlaceholder: 'you@email.com',
+    emailCaptureBtn: 'Continue',
+    emailSkip: 'Skip for now',
+    referTitle: 'Refer & Earn',
+    referSub: 'Share your link. Each person who subscribes earns you 10 free tokens — no limit.',
+    referStats: (paid) => paid > 0 ? `${paid} subscriber${paid > 1 ? 's' : ''} · ${paid * 10} tokens earned` : 'No referrals yet',
+    usesCredit: 'This uses 1 guide credit. Continue?',
+    proUsedUp: "You've used this month's guides — they renew at the start of next month.",
+    freeUsedUp: 'Free guides used — subscribe to continue.',
+    errNoNotesRefunded: "The AI couldn't build notes for this file right now — your credit was returned, please try again.",
+  },
+  ar: {
+    sub: 'ارفع عرضاً تقديمياً أو PDF أو رابط محاضرة من YouTube — واحصل على دليل جاهز للامتحان مع ملخص وبطاقات وأسئلة مراجعة خلال ثوانٍ. ابدأ مجاناً، بدون بطاقة.',
+    heroFree: '',
+    dropFree: '',
+    footerFree: 'جرّب مجاناً · تُحذف الملفات تلقائياً',
+    trust: ['بدون تسجيل للتجربة', 'تُمسح الملفات خلال 15 دقيقة', 'الإنجليزية والعربية'],
+    upgradeTitle: 'انتهت أدلتك المجانية',
+    upgradeSub: 'استخدمت أدلتك المجانية الآن. اشترك للحصول على 30 دليلاً شهرياً ومعالجة ذات أولوية.',
+    upgradeFeatures: ['30 دليلاً شهرياً', 'معالجة ذات أولوية', 'جميع الميزات متاحة'],
+    upgradeBtn: 'اشترك — 2.99$ / شهر',
+    upgradeFree: 'مجاناً: 3 أدلة دراسة شهرياً',
+    guidesLeft: 'الأدلة المتبقية هذا الشهر',
+    tokensLeft: 'رموز متبقية',
+    loginSubSignup: 'أنشئ حساباً مجانياً — 3 أدلة دراسة إضافية هدية منّا',
+    freeLeft: (n) => `${n} ${n === 1 ? 'معاينة' : 'معاينات'} مجانية متبقية`,
+    signInForMore: 'أعجبك؟ سجّل مجاناً — 3 أدلة إضافية هدية لك.',
+    emailCaptureTitle: 'احصل على 3 أدلة دراسة مجانية',
+    emailCaptureSub: 'أدخل بريدك ونجهّز لك 3 أدلة دراسة مجانية شهرياً. بدون إزعاج.',
+    emailPlaceholder: 'you@email.com',
+    emailCaptureBtn: 'متابعة',
+    emailSkip: 'تخطٍّ الآن',
+    referTitle: 'أحِل واكسب',
+    referSub: 'شارك رابطك. كل شخص يشترك عبر رابطك يمنحك 10 رموز مجانية — بلا حدود.',
+    referStats: (paid) => paid > 0 ? `${paid} مشترك · ${paid * 10} رمز مكتسب` : 'لا إحالات بعد',
+    usesCredit: 'سيستهلك هذا رصيد دليل واحد. هل تريد المتابعة؟',
+    proUsedUp: 'استخدمت أدلة هذا الشهر — تتجدد في بداية الشهر القادم.',
+    freeUsedUp: 'استُخدمت الأدلة المجانية — اشترك للمتابعة.',
+    errNoNotesRefunded: 'تعذّر على الذكاء الاصطناعي إعداد ملاحظات لهذا الملف الآن — أُعيد إليك رصيدك، حاول مجدداً.',
+  },
+}
+
+// The language pack for the current mode: free mode is T itself, token mode overlays LEGACY.
+const tFor = (lang, freeMode = true) => {
+  const base = T[lang] || T.en
+  return freeMode ? base : { ...base, ...(LEGACY[lang] || LEGACY.en) }
+}
+
+// A whole number >= 1 from /api/config, else null (never trust a missing / odd field)
+const posInt = v => (typeof v === 'number' && Number.isFinite(v) && v >= 1) ? Math.floor(v) : null
+// "Why sign in" clause. The numbers are only quoted when /api/config says a signed-in user really gets more.
+const perksOf = (t, fair) =>
+  t.perks(fair && fair.user_daily && fair.device_daily && fair.user_daily > fair.device_daily ? fair : null)
+// Server refusals that make the rest of a batch pointless: stop it, leave the other files queued
+const STOP_CODES = new Set(['fair_use_device', 'fair_use_ip', 'fair_use_user', 'busy_today', 'busy'])
+// The one refusal where signing in helps: an anonymous device over its (lower) daily cap
+const offersSignIn = (item, session) => !!item && item.errCode === 'fair_use_device' && !session
+// Line under a processing item: the queue position (localized, not the server's English) or the stream message
+const procLine = (t, item) => item.step === 'queued'
+  ? (item.queuePos > 0 ? t.queuePos(item.queuePos) : t.queueWait)
+  : (item.msg || t.processing)
+const badgeKey = item => (item.status === 'processing' && item.step === 'queued') ? 'queued' : item.status
+// Card inviting an anonymous visitor to create a free account — only after their first real guide
+// (the sample demo is not theirs), never in token mode, never once signed in or dismissed.
+const showJoinCard = ({ freeMode, authEnabled, authLoading, session, dismissed, queue }) =>
+  !!(freeMode && authEnabled && !authLoading && !session && !dismissed &&
+    queue.some(i => i.status === 'done' && !i.demo && i.source?.type !== 'sample'))
 
 const STATUS_COLOR = {
   queued:     { bg: 'rgba(79,142,247,0.12)', color: '#4f8ef7',  border: 'rgba(79,142,247,0.3)' },
@@ -531,8 +628,16 @@ function saveBlob(blob, name) {
 // One mapper for request / stream failures → plain-language, localized text
 function friendlyErr(t, msg, status, data) {
   const code = data?.code
-  if (code === 'no_notes') return data?.refunded ? t.errNoNotesRefunded : t.errNoNotes
+  // 'your credit was returned' only exists in token mode (LEGACY); free mode never mentions credits
+  if (code === 'no_notes') return data?.refunded && t.errNoNotesRefunded ? t.errNoNotesRefunded : t.errNoNotes
   if (code === 'yt_blocked') return t.errYtBlocked
+  // Free-mode fair-use / capacity refusals (HTTP 429 / 503, or an SSE error event with status 200):
+  // our own words, ahead of the generic 429 / 503 text below
+  if (code === 'fair_use_device') return t.errFairDevice
+  if (code === 'fair_use_ip') return t.errFairIp
+  if (code === 'fair_use_user') return t.errFairUser
+  if (code === 'busy_today') return t.errBusyToday
+  if (code === 'busy') return t.errBusy
   if (status === 0) return msg || t.errNetwork
   if (status === 413 || code === 'too_large') return t.errTooBig
   if (status === 429 || code === 'rate_limited') return t.errRateLimit
@@ -1470,21 +1575,7 @@ function SSEProgressCard({ item, lang }) {
 }
 
 // ── Terms & Conditions Modal ───────────────────────────────────────────────────
-const TERMS_EN = `TERMS AND CONDITIONS
-Alimne (علّمني) — a souc.ai product
-Effective: May 2026
-
-1. ABOUT THIS SERVICE
-Alimne is an AI-powered study tool registered under the souc.ai platform. It converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided for educational and personal use on a freemium subscription model.
-
-2. SUBSCRIPTION & BILLING
-• Free: 2 anonymous previews (no account needed), then 3 free guides on sign-up and 3 free guides every month.
-• Pro plan: $2.99/month (billed via Stripe). Includes 30 guides per month plus priority processing.
-• Free and Pro monthly allowances reset at the start of each calendar month.
-• Subscriptions can be cancelled anytime via the billing portal. No refunds for partial months.
-• Payments are processed by Stripe, Inc. and are subject to Stripe's Terms of Service.
-
-3. YOUR FILES AND PRIVACY
+const TERMS_EN_TAIL = `3. YOUR FILES AND PRIVACY
 • Files you upload are processed entirely in server memory and never written to permanent storage.
 • No copy of your document is retained after processing is complete.
 • Generated study guides are held in temporary server memory for up to 15 minutes so you can download them, then deleted automatically.
@@ -1527,21 +1618,40 @@ These terms may be updated at any time without prior notice. Continued use of th
 10. CONTACT
 Questions or concerns: hello@souc.ai`
 
-const TERMS_AR = `الشروط والأحكام
-Alimne (علّمني) — منتج souc.ai
-ساري المفعول: مايو 2026
+const TERMS_EN = `TERMS AND CONDITIONS
+Alimne (علّمني) — a souc.ai product
+Effective: May 2026 · Updated: October 2026
 
-١. عن هذه الخدمة
-Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصطناعي مسجّلة تحت منصة souc.ai. تحوّل ملفات PowerPoint وPDF ومقاطع YouTube والنصوص إلى أدلة دراسة منظمة للاختبارات. تُقدَّم الخدمة للاستخدام التعليمي والشخصي وفق نموذج اشتراك مجاني مدفوع.
+1. ABOUT THIS SERVICE
+Alimne is an AI-powered study tool registered under the souc.ai platform. It converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided free of charge for educational and personal use, subject to the fair-use limits in section 2.
 
-٢. الاشتراك والفوترة
-• مجاناً: محاولة تجريبية واحدة (بالإضافة إلى معاينة واحدة بدون حساب).
-• الخطة الاحترافية: 2.99$ شهرياً (عبر Stripe). تشمل 30 رمزاً شهرياً.
-• تُعاد رموز الخطة الاحترافية في بداية كل شهر.
-• يمكن إلغاء الاشتراك في أي وقت عبر بوابة الفوترة. لا يوجد استرداد للأشهر الجزئية.
-• تُعالَج المدفوعات بواسطة Stripe وتخضع لشروط خدمة Stripe.
+2. FREE USE, FAIR USE & EXISTING SUBSCRIPTIONS
+• Alimne is free to use. No payment, card or paid plan is needed, and you can try it without an account.
+• Fair-use limits apply: to keep Alimne free and available to everyone, we limit how many guides can be generated each day per device, per network, per account and across the whole service. Signed-in users get a higher daily allowance than anonymous visitors.
+• These limits may change at any time, and when Alimne is busy a request may wait in a queue or be asked to try again later.
+• If you subscribed before Alimne became free, you can manage or cancel your subscription at any time from Account, via the billing portal. No refunds for partial months.
+• Payments for existing subscriptions are processed by Stripe, Inc. and are subject to Stripe's Terms of Service.
 
-٣. ملفاتك وخصوصيتك
+${TERMS_EN_TAIL}`
+
+const TERMS_EN_LEGACY = `TERMS AND CONDITIONS
+Alimne (علّمني) — a souc.ai product
+Effective: May 2026
+
+1. ABOUT THIS SERVICE
+Alimne is an AI-powered study tool registered under the souc.ai platform. It converts PowerPoint files, PDFs, YouTube videos, and text into structured exam study guides. The service is provided for educational and personal use on a freemium subscription model.
+
+2. SUBSCRIPTION & BILLING
+• Free: 2 anonymous previews (no account needed), then 3 free guides on sign-up and 3 free guides every month.
+• Pro plan: $2.99/month (billed via Stripe). Includes 30 guides per month plus priority processing.
+• Free and Pro monthly allowances reset at the start of each calendar month.
+• Subscriptions can be cancelled anytime via the billing portal. No refunds for partial months.
+• Payments are processed by Stripe, Inc. and are subject to Stripe's Terms of Service.
+
+${TERMS_EN_TAIL}`
+
+
+const TERMS_AR_TAIL = `٣. ملفاتك وخصوصيتك
 • تُعالَج الملفات التي ترفعها في ذاكرة الخادم فقط ولا تُكتب على أي تخزين دائم.
 • لا تُحتفظ بأي نسخة من مستنداتك بعد اكتمال المعالجة.
 • تُحفظ أدلة الدراسة المولَّدة في ذاكرة الخادم المؤقتة لمدة 15 دقيقة للتنزيل ثم تُحذف تلقائياً.
@@ -1583,9 +1693,43 @@ Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصط
 ١٠. التواصل
 للأسئلة والاستفسارات: hello@souc.ai`
 
-function TermsModal({ lang, onClose }) {
+const TERMS_AR = `الشروط والأحكام
+Alimne (علّمني) — منتج souc.ai
+ساري المفعول: مايو 2026 · آخر تحديث: أكتوبر 2026
+
+١. عن هذه الخدمة
+Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصطناعي مسجّلة تحت منصة souc.ai. تحوّل ملفات PowerPoint وPDF ومقاطع YouTube والنصوص إلى أدلة دراسة منظمة للاختبارات. تُقدَّم الخدمة مجاناً للاستخدام التعليمي والشخصي، وفق حدود الاستخدام العادل الواردة في البند ٢.
+
+٢. الاستخدام المجاني والاستخدام العادل والاشتراكات القائمة
+• علّمني مجاني للاستخدام. لا حاجة إلى دفع أو بطاقة أو خطة مدفوعة، ويمكنك تجربته دون حساب.
+• تُطبَّق حدود الاستخدام العادل: لإبقاء علّمني مجانياً ومتاحاً للجميع، نضع حداً يومياً لعدد الأدلة التي يمكن إنشاؤها لكل جهاز ولكل شبكة ولكل حساب وللخدمة ككل. ويحصل المستخدمون المسجّلون على حدّ يومي أعلى من الزوّار بلا حساب.
+• قد تتغيّر هذه الحدود في أي وقت، وعندما يكون علّمني مزدحماً قد ينتظر طلبك في طابور أو يُطلب منك المحاولة لاحقاً.
+• إذا كنت قد اشتركت قبل أن يصبح علّمني مجانياً، يمكنك إدارة اشتراكك أو إلغاؤه في أي وقت من «حسابك» عبر بوابة الفوترة. لا يوجد استرداد للأشهر الجزئية.
+• تُعالَج مدفوعات الاشتراكات القائمة بواسطة Stripe وتخضع لشروط خدمة Stripe.
+
+${TERMS_AR_TAIL}`
+
+const TERMS_AR_LEGACY = `الشروط والأحكام
+Alimne (علّمني) — منتج souc.ai
+ساري المفعول: مايو 2026
+
+١. عن هذه الخدمة
+Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصطناعي مسجّلة تحت منصة souc.ai. تحوّل ملفات PowerPoint وPDF ومقاطع YouTube والنصوص إلى أدلة دراسة منظمة للاختبارات. تُقدَّم الخدمة للاستخدام التعليمي والشخصي وفق نموذج اشتراك مجاني مدفوع.
+
+٢. الاشتراك والفوترة
+• مجاناً: محاولة تجريبية واحدة (بالإضافة إلى معاينة واحدة بدون حساب).
+• الخطة الاحترافية: 2.99$ شهرياً (عبر Stripe). تشمل 30 رمزاً شهرياً.
+• تُعاد رموز الخطة الاحترافية في بداية كل شهر.
+• يمكن إلغاء الاشتراك في أي وقت عبر بوابة الفوترة. لا يوجد استرداد للأشهر الجزئية.
+• تُعالَج المدفوعات بواسطة Stripe وتخضع لشروط خدمة Stripe.
+
+${TERMS_AR_TAIL}`
+
+
+function TermsModal({ lang, onClose, freeMode = true }) {
   const isAr = lang === 'ar'
-  const content = isAr ? TERMS_AR : TERMS_EN
+  // Token-mode text only while the server is in token mode (ALIMNE_FREE_MODE=0)
+  const content = isAr ? (freeMode ? TERMS_AR : TERMS_AR_LEGACY) : (freeMode ? TERMS_EN : TERMS_EN_LEGACY)
   return (
     <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
       <div className="modal-box" onClick={e => e.stopPropagation()}
@@ -1616,8 +1760,8 @@ function TermsModal({ lang, onClose }) {
 // Inline role=alert messages (not toasts), confirm-email panel with resend,
 // forgot password, and an in-app-browser notice instead of a Google button that
 // can't work there.
-function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice }) {
-  const t = T[lang] || T['en']
+function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice, freeMode = true, fair = null }) {
+  const t = tFor(lang, freeMode)
   const isAr = lang === 'ar'
   const [mode, setMode]         = useState(initialMode === 'signup' ? 'signup' : 'signin')
   const [email, setEmail]       = useState(initialEmail || '')
@@ -1734,6 +1878,15 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
           {!sentTo && (
             <div style={{fontSize:'0.82rem', color:'var(--text-muted)', lineHeight:1.55}}>
               {isSignup ? t.loginSubSignup : t.loginSub}
+            </div>
+          )}
+          {/* Why bother (free mode): only things an account really gets — see perksOf() */}
+          {!sentTo && freeMode && (
+            <div role="note" style={{display:'flex', alignItems:'flex-start', gap:'0.45rem', marginTop:'0.85rem', padding:'0.6rem 0.75rem',
+              borderRadius:10, background:'rgba(79,142,247,0.08)', border:'1px solid rgba(79,142,247,0.2)',
+              fontSize:'0.78rem', lineHeight:1.5, color:'var(--text-secondary)', textAlign: isAr ? 'right' : 'left'}}>
+              <Sparkles size={14} color="var(--accent)" style={{flexShrink:0, marginTop:2}} />
+              <span>{t.perksNote(perksOf(t, fair))}</span>
             </div>
           )}
         </div>
@@ -1893,8 +2046,9 @@ function SetPasswordModal({ onClose, lang, sbClient }) {
 }
 
 // ── Upgrade Modal ──────────────────────────────────────────────────────────────
+// Token mode only (ALIMNE_FREE_MODE=0): never rendered in free mode.
 function UpgradeModal({ onClose, onUpgrade, onManage, isSubscribed, lang }) {
-  const t = T[lang] || T['en']
+  const t = tFor(lang, false)
   const isAr = lang === 'ar'
   return (
     <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
@@ -1945,8 +2099,8 @@ function UpgradeModal({ onClose, onUpgrade, onManage, isSubscribed, lang }) {
 }
 
 // ── Account Modal ──────────────────────────────────────────────────────────────
-function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSubscribed, lang, loadErr, onRetry }) {
-  const t = T[lang] || T['en']
+function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSubscribed, lang, loadErr, onRetry, freeMode = true, fair = null }) {
+  const t = tFor(lang, freeMode)
   const isAr = lang === 'ar'
   const status = String(userInfo?.subscription_status || 'free').toLowerCase()
   const liveSub = hasLiveSub(userInfo)
@@ -1956,6 +2110,7 @@ function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSub
     : t.planFree
   const periodEnd = userInfo?.subscription_period_end ? String(userInfo.subscription_period_end).slice(0, 10) : ''
   const canManage = liveSub || !!userInfo?.has_billing
+  const billingStatus = liveSub || status === 'canceled' || status === 'past_due' || status === 'unpaid'
   const row = (label, value) => (
     <div style={{
       display:'flex', justifyContent:'space-between', gap:'1rem', padding:'0.55rem 0',
@@ -1998,16 +2153,23 @@ function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSub
             </div>
           )}
           {row(t.accountPlan, isSubscribed ? t.planPro : t.planFree)}
-          {row(t.accountStatus, statusLabel)}
+          {/* free mode: a status row only where billing is involved (otherwise it just repeats "Free") */}
+          {(!freeMode || billingStatus) && row(t.accountStatus, statusLabel)}
           {isSubscribed && periodEnd && row(t.renewsOn, periodEnd)}
-          {row(t.guidesLeft, userInfo?.tokens_remaining ?? '…')}
+          {freeMode
+            ? (fair?.user_daily ? row(t.accountAllowance, t.accountPerDay(fair.user_daily)) : null)
+            : row(t.guidesLeft, userInfo?.tokens_remaining ?? '…')}
           <div style={{marginTop:'1.25rem', display:'flex', flexDirection:'column', gap:'0.6rem'}}>
+            {/* people who still pay are told plainly, and can cancel */}
+            {freeMode && liveSub && (
+              <div style={{fontSize:'0.8rem', color:'var(--text-secondary)', lineHeight:1.55, textAlign:'center'}}>{t.accountFreeNote}</div>
+            )}
             {canManage && (
               <button className="submit-btn" style={{width:'100%', justifyContent:'center', padding:'0.75rem'}} onClick={onManage}>
                 {t.manageBtn}
               </button>
             )}
-            {!liveSub && (
+            {!freeMode && !liveSub && (
               <button className="submit-btn" style={{width:'100%', justifyContent:'center', padding:'0.75rem'}} onClick={onUpgrade}>
                 <Sparkles size={15} /> {t.upgradeBtn}
               </button>
@@ -2027,8 +2189,9 @@ function AccountModal({ onClose, onManage, onUpgrade, onSignOut, userInfo, isSub
 
 
 // ── Email Capture Modal (shown before the paywall) ──────────────────────────────
+// Token mode only (ALIMNE_FREE_MODE=0): its one trigger is the 402 signin_for_more.
 function EmailCaptureModal({ onClose, onSubmit, onSkip, lang }) {
-  const t = T[lang] || T['en']
+  const t = tFor(lang, false)
   const isAr = lang === 'ar'
   const [email, setEmail] = useState('')
   const [busy, setBusy] = useState(false)
@@ -2079,6 +2242,64 @@ function EmailCaptureModal({ onClose, onSubmit, onSkip, lang }) {
 }
 
 
+// ── Join card: after an anonymous visitor's first guide (free mode) ────────────
+// Non-blocking and dismissible. It only names what an account really adds: a higher daily
+// allowance, Chat (needs an account) and the invite link. No countdown, no pressure.
+function JoinCard({ t, isAr, fair, onJoin, onDismiss }) {
+  return (
+    <div className="glass" role="region" aria-label={t.joinTitle}
+      style={{marginTop:'1rem', padding:'0.95rem 1.15rem', position:'relative', direction: isAr ? 'rtl' : 'ltr',
+        border:'1px solid rgba(79,142,247,0.28)'}}>
+      <button className="modal-close" onClick={onDismiss} aria-label={t.close}
+        style={{position:'absolute', top:8, insetInlineEnd:8}}><X size={15} /></button>
+      <div style={{display:'flex', alignItems:'center', gap:'0.45rem', marginBottom:'0.4rem', paddingInlineEnd:'1.8rem'}}>
+        <Sparkles size={15} color="var(--accent)" />
+        <span style={{fontWeight:700, fontSize:'0.9rem', color:'var(--text-primary)'}}>{t.joinTitle}</span>
+      </div>
+      <div style={{fontSize:'0.8rem', color:'var(--text-secondary)', lineHeight:1.55, marginBottom:'0.75rem', paddingInlineEnd:'1.8rem'}}>
+        {t.joinBody(perksOf(t, fair))}
+      </div>
+      <button className="submit-btn" style={{flex:'none', padding:'0.55rem 1.1rem', fontSize:'0.85rem'}} onClick={onJoin}>
+        <LogIn size={14} /> {t.emailBtnSignup}
+      </button>
+    </div>
+  )
+}
+
+// ── Invite a friend (signed in) ────────────────────────────────────────────────
+// Free mode: a plain share link plus how many friends joined (the stats endpoint's `total`).
+// Token mode keeps the old reward copy.
+function ReferralCard({ t, isAr, freeMode, link, stats, copied, onCopy }) {
+  const joined = freeMode && stats && typeof stats.total === 'number' ? stats.total : null
+  return (
+    <div className="glass" style={{marginTop:'1rem', padding:'1rem 1.25rem', direction: isAr ? 'rtl' : 'ltr'}}>
+      <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'0.55rem', flexWrap:'wrap', gap:'0.4rem'}}>
+        <div style={{display:'flex', alignItems:'center', gap:'0.45rem'}}>
+          <Gift size={14} color="#fbbf24" />
+          <span style={{fontWeight:700, fontSize:'0.88rem', color:'var(--text-primary)'}}>{t.referTitle}</span>
+        </div>
+        {freeMode ? (joined !== null && (
+          <span style={{fontSize:'0.73rem', color: joined > 0 ? '#22c55e' : 'var(--text-muted)', fontWeight:500}}>{t.referJoined(joined)}</span>
+        )) : (stats && (
+          <span style={{fontSize:'0.73rem', color: stats.paid > 0 ? '#22c55e' : 'var(--text-muted)', fontWeight:500}}>{t.referStats(stats.paid)}</span>
+        ))}
+      </div>
+      <div style={{fontSize:'0.78rem', color:'var(--text-muted)', marginBottom:'0.7rem', lineHeight:1.55}}>{t.referSub}</div>
+      <div style={{display:'flex', gap:'0.5rem', alignItems:'center'}}>
+        <input readOnly dir="ltr" value={link}
+          style={{flex:1, minWidth:0, padding:'0.45rem 0.75rem', borderRadius:8,
+            border:'1px solid var(--glass-border)', background:'var(--glass-light)',
+            color:'var(--text-secondary)', fontSize:'0.78rem', fontFamily:'inherit', outline:'none', cursor:'text'}}
+          onClick={e => e.target.select()} />
+        <button className="ctrl-btn" style={copied ? {borderColor:'rgba(34,197,94,0.4)', color:'#22c55e'} : {}} onClick={onCopy}>
+          {copied ? <CheckCircle2 size={13} /> : <Copy size={13} />}
+          <span className="ctrl-label"> {copied ? t.referCopied : t.referCopy}</span>
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ── Main App ───────────────────────────────────────────────────────────────────
 export default function App() {
   const [theme, setTheme]   = useState(() => ls.get('alimne_theme') === 'light' ? 'light' : 'dark')
@@ -2120,7 +2341,11 @@ export default function App() {
   const [showEmailCapture, setShowEmailCapture] = useState(false)
   const [emailCaptured, setEmailCaptured] = useState(() => !!ls.get('alimne_lead'))
   const [authLoading, setAuthLoading] = useState(!!sb)
-  const [anonInfo, setAnonInfo]       = useState(null)  // {limit, remaining} for signed-out users
+  const [anonInfo, setAnonInfo]       = useState(null)  // {limit, remaining} for signed-out users (token mode only)
+  // Free mode is the default: /api/config only has to say free_mode:false to bring the token UI back
+  const [freeMode, setFreeMode]       = useState(true)
+  const [fair, setFair]               = useState(null)  // {device_daily, user_daily} from /api/config
+  const [joinDismissed, setJoinDismissed] = useState(() => ls.get('alimne_join_dismissed') === '1')
 
   const openLogin = (mode = 'signin', notice = null) => {
     setLoginMode(mode); setLoginNotice(notice); setLoginKey(k => k + 1); setShowLogin(true)
@@ -2134,7 +2359,7 @@ export default function App() {
   // UI strings + direction only; the API still receives `lang` unchanged ('auto' included).
   // Only the user (chooseLang) ever changes `lang` — never a guide's detected language.
   const uiLang = lang === 'auto' ? (NAV_AR ? 'ar' : 'en') : lang
-  const t = T[uiLang] || T['en']
+  const t = useMemo(() => tFor(uiLang, freeMode), [uiLang, freeMode])
   const isAr = uiLang === 'ar'
 
   // Refs for async flows that outlive a render (a batch can run for minutes)
@@ -2142,6 +2367,8 @@ export default function App() {
   const userInfoRef = useRef(userInfo); userInfoRef.current = userInfo
   const queueRef    = useRef(queue);    queueRef.current = queue
   const tRef        = useRef(t);        tRef.current = t
+  const langRef     = useRef(uiLang);   langRef.current = uiLang
+  const freeRef     = useRef(freeMode); freeRef.current = freeMode
   const lastUid     = useRef(null)
   const meSeq       = useRef(0)
   const rehydrating = useRef({})
@@ -2199,8 +2426,9 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ── /api/config: anon counters + auth_enabled only. Retried with backoff; if it
-  //    never loads, auth stays enabled (the Supabase client doesn't depend on it).
+  // ── /api/config: free_mode + fair-use numbers, auth_enabled, and (token mode) the anon counters.
+  //    Retried with backoff; if it never loads, auth stays enabled (the Supabase client doesn't
+  //    depend on it) and the client stays in free mode, its default.
   useEffect(() => {
     let live = true
     ;(async () => {
@@ -2211,6 +2439,9 @@ export default function App() {
           const cfg = await r.json()
           if (!live) return
           setAuthEnabled(cfg.auth_enabled !== false)
+          setFreeMode(cfg.free_mode !== false)
+          if (cfg.fair_use && typeof cfg.fair_use === 'object')
+            setFair({ device_daily: posInt(cfg.fair_use.device_daily), user_daily: posInt(cfg.fair_use.user_daily) })
           if (cfg.anon_free_limit !== undefined)
             setAnonInfo({ limit: cfg.anon_free_limit, remaining: cfg.anon_remaining ?? cfg.anon_free_limit })
           return
@@ -2320,7 +2551,11 @@ export default function App() {
       if (r && r.ok) {
         const d = await r.json().catch(() => null)
         if (stale()) return
-        if (d && !d.error) { setUserInfo(d); setUserInfoErr(false); return }
+        if (d && !d.error) {
+          setUserInfo(d); setUserInfoErr(false)
+          if (d.free_mode === true) setFreeMode(true)   // the server is in free mode (config may have been missed or stale)
+          return
+        }
       }
       if (attempt < 2) await sleep(1500 * (attempt + 1))
     }
@@ -2371,11 +2606,15 @@ export default function App() {
 
   const copyReferral = (code) => {
     const link = `${window.location.origin}?ref=${code}`
-    navigator.clipboard.writeText(link).then(() => {
+    // clipboard missing / blocked → show the link in a toast so it can still be copied by hand
+    Promise.resolve().then(() => navigator.clipboard.writeText(link)).then(() => {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
-    }).catch(() => {})
+    }).catch(() => toast(link, 'info'))
   }
+
+  // The dismissal is remembered on this device (ls = localStorage in try/catch; blocked storage just means "this visit")
+  const dismissJoin = () => { ls.set('alimne_join_dismissed', '1'); setJoinDismissed(true) }
 
   // Authenticated JSON call: fresh token, one silent refresh + retry on 401
   const authedFetch = async (url, opts = {}, ms = 20000) => {
@@ -2402,6 +2641,8 @@ export default function App() {
     if (ok && d.url) { window.location.href = d.url; return }
     if (handled) return
     if (status === 401) { openLogin('signin'); return }
+    // The server turned free mode on while this tab still showed the old upgrade UI → follow it
+    if (status === 410 || d?.code === 'free_now') { setFreeMode(true); setShowUpgrade(false); toast(T[langRef.current]?.freeNow || T.en.freeNow, 'info'); return }
     toast(friendlyErr(t, status ? (d.error || failText) : '', status, d), 'error')
   }
   const handleCheckout      = () => goToStripe('/api/stripe/checkout', t.paymentError)
@@ -2431,7 +2672,7 @@ export default function App() {
   const latestItem = id => queueRef.current.find(i => i.id === id)
   const canRestore = it => !!(it && it.guideBlob && it.sig)
 
-  // 401 / 402 that a token refresh can't fix
+  // 401 / 402 that a token refresh can't fix. A 402 only exists in token mode (ALIMNE_FREE_MODE=0).
   const handleAuthError = (status, data, id) => {
     const tt = tRef.current
     const code = data?.code
@@ -2441,16 +2682,20 @@ export default function App() {
       return true
     }
     if (status === 402) {
+      // We believed the server was in free mode (default / stale config) but it is charging tokens:
+      // follow it into the token flow, with the token copy, so the item is never left without a way forward.
+      if (freeRef.current) { freeRef.current = false; setFreeMode(false) }
+      const lt = tFor(langRef.current, false)
       // Anonymous visitor out of free previews → invite sign-up (free tokens).
       // Signed-in user out of tokens → show the upgrade / subscribe modal.
       if (code === 'signin_for_more') {
         if (!sessionRef.current) setAnonInfo(a => a ? { ...a, remaining: data?.tokens_remaining ?? 0 } : a)
         if (emailCaptured || ls.get('alimne_lead')) openLogin('signup')
         else setShowEmailCapture(true)
-        if (id) updateItem(id, { status: 'error', error: tt.signInForMore, step: null })
+        if (id) updateItem(id, { status: 'error', error: lt.signInForMore, step: null })
       } else {
         setShowUpgrade(true)
-        if (id) updateItem(id, { status: 'error', error: hasLiveSub(userInfoRef.current) ? tt.proUsedUp : tt.freeUsedUp, step: null })
+        if (id) updateItem(id, { status: 'error', error: hasLiveSub(userInfoRef.current) ? lt.proUsedUp : lt.freeUsedUp, step: null })
       }
       return true
     }
@@ -2593,20 +2838,26 @@ export default function App() {
       const counts = { sections: ev.sections, keywords: ev.keywords, flashcards: ev.flashcards, mcqs: ev.mcqs }
       updateItem(id, { status: 'done', jobId: ev.job_id, step: 'done', msg: null, error: null, counts, partial: !!ev.partial,
         guide: null, guideBlob: null, sig: null, filename: null, pdfBlob: null, pdfName: null, shareUrl: null, busy: null })
-      if (!demo && ev.tokens_remaining !== undefined) {
+      // Token balance: token mode only. Free mode reports none (omitted or null) and shows none.
+      if (!demo && !freeRef.current && ev.tokens_remaining != null) {
         // only a request that carried a Bearer token reports the account balance
         if (hadBearer) setUserInfo(u => u ? { ...u, tokens_remaining: ev.tokens_remaining } : u)
         else if (!sessionRef.current) setAnonInfo(a => a ? { ...a, remaining: ev.tokens_remaining } : a)
         else fetchUserInfo()
       }
       if (ev.job_id) cacheGuide(id, ev.job_id)
+    } else if (ev.step === 'queued') {
+      // Waiting for a free generation slot: not an error. The line shows the position, localized.
+      const pos = Math.floor(Number(ev.position))
+      updateItem(id, { step: 'queued', msg: null, queuePos: pos > 0 ? pos : 0 })
     } else {
       updateItem(id, { step: ev.step, msg: ev.msg })
     }
   }
 
   // One generation for item `id`: fresh auth per attempt, one silent refresh + retry
-  // on an auth failure. → 'done' | 'error' | 'auth' ('auth' = stop the batch)
+  // on an auth failure. → 'done' | 'error' | 'auth' | 'stop' ('auth' / 'stop' = stop the batch:
+  // sign-in is needed, or the server refused for fair use / is busy, so the rest would be refused too)
   const runGeneration = async (id, url, makeOpts, demo = false) => {
     for (let attempt = 0; attempt < 2; attempt++) {
       const headers = demo ? {} : await authHeaders()
@@ -2618,13 +2869,14 @@ export default function App() {
       if (!demo && attempt === 0 && sessionRef.current &&
           (r.status === 401 || (r.status === 402 && code === 'signin_for_more'))) {
         const rf = await tryRefresh()
-        if (rf === 'ok') { updateItem(id, { status: 'processing', error: null, step: 'extract', msg: tt.starting }); continue }
+        if (rf === 'ok') { updateItem(id, { status: 'processing', error: null, errCode: null, step: 'extract', msg: tt.starting }); continue }
         if (rf === 'failed') { await expireSession(); updateItem(id, { status: 'error', error: tt.sessionExpired, step: null }); return 'auth' }
         updateItem(id, { status: 'error', error: tt.errNetwork, step: null }); return 'auth'
       }
       if (!demo && (r.status === 401 || r.status === 402)) { handleAuthError(r.status, r.data, id); return 'auth' }
-      updateItem(id, { status: 'error', error: friendlyErr(tt, r.msg, r.status, r.data), step: null })
-      return 'error'
+      // Per-item error with its server code: the card offers Retry, and sign-in on the device refusal
+      updateItem(id, { status: 'error', error: friendlyErr(tt, r.msg, r.status, r.data), errCode: code || null, step: null })
+      return !demo && STOP_CODES.has(code) ? 'stop' : 'error'
     }
     return 'error'
   }
@@ -2633,7 +2885,7 @@ export default function App() {
 
   const runFile = (id, file) => {
     const o = genOpts()
-    updateItem(id, { status: 'processing', error: null, step: 'extract', msg: t.starting })
+    updateItem(id, { status: 'processing', error: null, errCode: null, step: 'extract', msg: t.starting })
     return runGeneration(id, '/api/summarize-stream', headers => {
       const fd = new FormData()
       fd.append('file', file)
@@ -2653,7 +2905,8 @@ export default function App() {
     setRunning(true)
     try {
       for (const item of pending) {
-        if ((await runFile(item.id, item.file)) === 'auth') break   // sign-in / paywall: leave the rest queued
+        const res = await runFile(item.id, item.file)
+        if (res === 'auth' || res === 'stop') break   // sign-in needed / fair-use or busy refusal: leave the rest queued
       }
     } finally {
       setRunning(false)
@@ -2664,7 +2917,7 @@ export default function App() {
   const runYoutube = async (id, url) => {
     const o = genOpts()
     setRunning(true)
-    updateItem(id, { status: 'processing', error: null, step: 'extract', msg: t.fetchingTranscript })
+    updateItem(id, { status: 'processing', error: null, errCode: null, step: 'extract', msg: t.fetchingTranscript })
     try {
       return await runGeneration(id, '/api/youtube', headers => ({
         method: 'POST',
@@ -2686,7 +2939,7 @@ export default function App() {
   const runText = async (id, src) => {
     const o = genOpts()
     setRunning(true)
-    updateItem(id, { status: 'processing', error: null, step: 'extract', msg: t.processingText })
+    updateItem(id, { status: 'processing', error: null, errCode: null, step: 'extract', msg: t.processingText })
     try {
       return await runGeneration(id, '/api/summarize-text', headers => ({
         method: 'POST',
@@ -2715,7 +2968,7 @@ export default function App() {
   //    no credit). The activation unlock for visitors with nothing to upload. ──
   const runSample = async (id, sLang) => {
     setRunning(true)
-    updateItem(id, { status: 'processing', error: null, step: 'extract', msg: t.sampleMsg })
+    updateItem(id, { status: 'processing', error: null, errCode: null, step: 'extract', msg: t.sampleMsg })
     try {
       // demo spends no preview — anonymous on purpose, doesn't touch token state
       return await runGeneration(id, '/api/summarize-text', () => ({
@@ -2748,7 +3001,7 @@ export default function App() {
     if (running || !src) return
     if (src.type === 'file' && !cur.file) { toast(t.reselectFile, 'info'); return }
     if (src.type === 'text' && !src.text && !src.url) { toast(t.repasteText, 'info'); return }
-    if (src.type !== 'sample' && !window.confirm(t.usesCredit)) return
+    if (src.type !== 'sample' && !freeMode && !window.confirm(t.usesCredit)) return   // token mode only: a retry spends a credit
     updateItem(cur.id, { guide: null, guideBlob: null, sig: null, pdfBlob: null, shareUrl: null, partial: false })
     if (src.type === 'file') {
       setRunning(true)
@@ -2970,13 +3223,13 @@ export default function App() {
                 {authEnabled && !authLoading && (
                   session ? (
                     <>
-                      {/* Token counter (or a retry when the account couldn't load) */}
+                      {/* Retry when the account couldn't load; the token counter exists in token mode only */}
                       {userInfoErr && !userInfo ? (
                         <button className="ctrl-btn" onClick={() => fetchUserInfo()} title={`${t.accountLoadFailed} ${t.retry}`}
                           style={{borderColor:'rgba(239,68,68,0.4)',color:'#ef4444'}}>
                           <AlertCircle size={12} /><span className="ctrl-label"> {t.retry}</span>
                         </button>
-                      ) : (() => {
+                      ) : !freeMode && (() => {
                         const rem  = userInfo?.tokens_remaining ?? null
                         const low  = rem !== null && rem <= 1 && !isSubscribed
                         const dead = rem !== null && rem <= 0
@@ -3011,8 +3264,8 @@ export default function App() {
                     </>
                   ) : (
                     <>
-                      {/* Anonymous free-preview counter */}
-                      {anonInfo && anonInfo.limit > 0 && (
+                      {/* Anonymous free-preview counter (token mode only) */}
+                      {!freeMode && anonInfo && anonInfo.limit > 0 && (
                         <button
                           className="ctrl-btn"
                           style={{
@@ -3067,6 +3320,9 @@ export default function App() {
               <div className="hero-badge"><Sparkles size={12} />{t.badge}</div>
               <h1>{t.h1a} <span>{t.h1b}</span></h1>
               <p>{t.sub}</p>
+              {t.heroFree && (
+                <p style={{marginTop:'0.6rem', fontWeight:700, fontSize:'0.95rem', color:'var(--privacy-text, #16a34a)'}}>{t.heroFree}</p>
+              )}
             </div>
 
             {/* Instant demo — zero-friction activation CTA (first screen only).
@@ -3121,6 +3377,9 @@ export default function App() {
                   <div className="drop-icon"><Upload size={22} /></div>
                   <div className="drop-title">{t.dropTitle}</div>
                   <div className="drop-sub">{t.dropSub}</div>
+                  {t.dropFree && (
+                    <div className="drop-sub" style={{marginTop:'0.4rem', fontWeight:600, color:'var(--privacy-text, #16a34a)'}}>{t.dropFree}</div>
+                  )}
                 </div>
               )}
 
@@ -3337,48 +3596,11 @@ export default function App() {
               </div>
             )}
 
-            {/* Referral card — visible only when signed in */}
+            {/* Invite a friend — visible only when signed in */}
             {session && userInfo?.referral_code && (
-              <div className="glass" style={{
-                marginTop:'1rem', padding:'1rem 1.25rem',
-                direction: isAr ? 'rtl' : 'ltr',
-              }}>
-                <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'0.55rem', flexWrap:'wrap', gap:'0.4rem'}}>
-                  <div style={{display:'flex', alignItems:'center', gap:'0.45rem'}}>
-                    <Gift size={14} color="#fbbf24" />
-                    <span style={{fontWeight:700, fontSize:'0.88rem', color:'var(--text-primary)'}}>{t.referTitle}</span>
-                  </div>
-                  {refStats && (
-                    <span style={{fontSize:'0.73rem', color: refStats.paid > 0 ? '#22c55e' : 'var(--text-muted)', fontWeight:500}}>
-                      {t.referStats(refStats.paid)}
-                    </span>
-                  )}
-                </div>
-                <div style={{fontSize:'0.78rem', color:'var(--text-muted)', marginBottom:'0.7rem', lineHeight:1.55}}>
-                  {t.referSub}
-                </div>
-                <div style={{display:'flex', gap:'0.5rem', alignItems:'center'}}>
-                  <input
-                    readOnly
-                    value={`${window.location.origin}?ref=${userInfo.referral_code}`}
-                    style={{
-                      flex:1, padding:'0.45rem 0.75rem', borderRadius:8,
-                      border:'1px solid var(--glass-border)', background:'var(--glass-light)',
-                      color:'var(--text-secondary)', fontSize:'0.78rem', fontFamily:'inherit',
-                      outline:'none', cursor:'text',
-                    }}
-                    onClick={e => e.target.select()}
-                  />
-                  <button
-                    className="ctrl-btn"
-                    style={copied ? {borderColor:'rgba(34,197,94,0.4)', color:'#22c55e'} : {}}
-                    onClick={() => copyReferral(userInfo.referral_code)}
-                  >
-                    {copied ? <CheckCircle2 size={13} /> : <Copy size={13} />}
-                    <span className="ctrl-label"> {copied ? t.referCopied : t.referCopy}</span>
-                  </button>
-                </div>
-              </div>
+              <ReferralCard t={t} isAr={isAr} freeMode={freeMode} stats={refStats} copied={copied}
+                link={`${window.location.origin}?ref=${userInfo.referral_code}`}
+                onCopy={() => copyReferral(userInfo.referral_code)} />
             )}
 
             {/* Queue */}
@@ -3407,7 +3629,7 @@ export default function App() {
 
                 {/* Items */}
                 {queue.map((item, i) => {
-                  const sc = STATUS_COLOR[item.status] || STATUS_COLOR.queued
+                  const sc = STATUS_COLOR[badgeKey(item)] || STATUS_COLOR.queued
                   const failed = item.status === 'expired' || item.status === 'error'
                   const src = item.source || (item.file ? { type: 'file' } : null)
                   const restorable = canRestore(item)
@@ -3434,17 +3656,24 @@ export default function App() {
                           {/* own script decides the direction (an Arabic file name stays RTL in an English UI); aligned with the row */}
                           <div className="queue-name" dir="auto" style={{textAlign: isAr ? 'right' : 'left'}}>{item.name}</div>
                           {item.error && <div style={{fontSize:'0.72rem',color:'#ef4444',marginTop:2}}>{item.error}</div>}
+                          {/* the one refusal where an account helps: a higher daily allowance than this anonymous device */}
+                          {offersSignIn(item, session) && (
+                            <button className="ctrl-btn" onClick={() => openLogin('signup')}
+                              style={{marginTop:6, borderColor:'var(--accent)', color:'var(--accent)'}}>
+                              <LogIn size={12} /><span> {t.signInFreeCta}</span>
+                            </button>
+                          )}
                           {item.status === 'expired' && <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{t.expiredNote}</div>}
                           {hint && <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{hint}</div>}
                           {item.status === 'done' && item.partial && <div style={{fontSize:'0.72rem',color:'#fbbf24',marginTop:2}}>{t.partialNote}</div>}
                           {item.status === 'processing' && (
-                            <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{item.msg || t.processing}</div>
+                            <div style={{fontSize:'0.72rem',color:'var(--text-muted)',marginTop:2}}>{procLine(t, item)}</div>
                           )}
                         </div>
 
                         <div className="queue-status-badge"
                           style={{background:sc.bg,color:sc.color,border:`1px solid ${sc.border}`}}>
-                          {t[item.status] || item.status}
+                          {t[badgeKey(item)] || item.status}
                         </div>
 
                         {!running && (
@@ -3559,6 +3788,11 @@ export default function App() {
               </div>
             )}
 
+            {/* After a visitor's first real guide: a quiet, dismissible invitation to create a free account */}
+            {showJoinCard({ freeMode, authEnabled, authLoading, session, dismissed: joinDismissed, queue }) && (
+              <JoinCard t={t} isAr={isAr} fair={fair} onJoin={() => openLogin('signup')} onDismiss={dismissJoin} />
+            )}
+
             {/* Info pills */}
             {!hasQueue && (
               <div className="info-row">
@@ -3582,9 +3816,7 @@ export default function App() {
               {isAr ? 'سياسة الخصوصية' : 'Privacy Policy'}
             </a>
             &nbsp;·&nbsp;
-            {isAr
-              ? 'جرّب مجاناً · تُحذف الملفات تلقائياً'
-              : 'Free to try · Files deleted automatically'}
+            {t.footerFree}
           </div>
           <a
             href="https://souc.ai"
@@ -3616,14 +3848,14 @@ export default function App() {
           onClose={() => setChatModal(null)} />
       )}
       {showHistory  && <HistoryModal onClose={() => setShowHistory(false)} />}
-      {showTerms    && <TermsModal lang={uiLang} onClose={() => setShowTerms(false)} />}
+      {showTerms    && <TermsModal lang={uiLang} freeMode={freeMode} onClose={() => setShowTerms(false)} />}
       {showLogin    && (
         <LoginModal key={loginKey} onClose={() => { setShowLogin(false); setLoginNotice(null) }}
-          lang={uiLang} sbClient={sb} initialMode={loginMode}
+          lang={uiLang} sbClient={sb} initialMode={loginMode} freeMode={freeMode} fair={fair}
           initialEmail={ls.get('alimne_lead') || ''} notice={loginNotice} />
       )}
       {showSetPw && sb && <SetPasswordModal onClose={() => setShowSetPw(false)} lang={uiLang} sbClient={sb} />}
-      {showUpgrade  && (
+      {!freeMode && showUpgrade && (
         <UpgradeModal
           onClose={() => setShowUpgrade(false)}
           onUpgrade={handleCheckout}
@@ -3643,9 +3875,11 @@ export default function App() {
           lang={uiLang}
           loadErr={userInfoErr}
           onRetry={() => fetchUserInfo()}
+          freeMode={freeMode}
+          fair={fair}
         />
       )}
-      {showEmailCapture && (
+      {!freeMode && showEmailCapture && (
         <EmailCaptureModal
           onClose={() => setShowEmailCapture(false)}
           onSubmit={submitLead}
