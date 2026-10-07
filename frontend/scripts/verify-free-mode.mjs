@@ -29,7 +29,10 @@
 //     (no email form, no sign-up toggle) with a quiet link to an email sign-in-only view; inside an in-app
 //     browser (the module is loaded a second time under an in-app user agent) it is a notice, "Open in browser"
 //     and the email form with its sign-up; the link handed to the real browser (?join=1 and the invite code,
-//     nothing else), the intent:// / x-safari-https:// addresses, and the words in the Terms.
+//     nothing else), the intent:// / x-safari-https:// addresses, and the words in the Terms; where Google is
+//     blocked (every in-app browser, known by name or not), what ?join=1 does on arrival, and which error a
+//     sign-in came back with (an expired email link, or a Google sign-in that failed).
+//   What only a browser can show (effects, clicks, the keyboard focus) is in verify-login-flows.mjs.
 // Exit code 0 = everything passed. No network, no DOM, no secrets.
 import { build } from 'esbuild'
 import fs from 'node:fs'
@@ -52,7 +55,8 @@ const EXPOSE = ['T', 'LEGACY', 'tFor', 'friendlyErr', 'streamSSE', 'perksOf', 'p
   'signinText', 'holdsDeviceCount', 'AR_THE_COUNT', 'stashPlan', 'stashItems', 'signinStash',
   'STASH_MAX_BYTES', 'STASH_MAX_FILES', 'STASH_MAX_AGE_MS', 'STASH_TAB_KEY', 'TERMS_STASH', 'stashToast',
   // Google-only sign-up, and the way out of an in-app browser
-  'IN_APP', 'JOIN_IN_URL', 'joinLink', 'browserHandoff', 'withoutJoin', 'TERMS_ACCOUNT']
+  'IN_APP', 'JOIN_IN_URL', 'joinLink', 'browserHandoff', 'withoutJoin', 'TERMS_ACCOUNT',
+  'GOOGLE_BLOCKED', 'googleBlockedIn', 'joinAnswer', 'authUrlNotice', 'TERMS_EN_TAIL', 'TERMS_AR_TAIL']
 
 await build({
   entryPoints: [appPath], bundle: true, format: 'esm', platform: 'node', outfile: outFile,
@@ -864,11 +868,12 @@ const count = (text, piece) => text.split(piece).length - 1
 // the Google button itself (its label closes the button; its logo is the only thing drawn in Google's yellow)
 const googleBtn = (html, t) => count(html, `${esc(t.loginBtn)}</button>`)
 const GOOGLE_LOGO = '#FFC107'
+const reEsc = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')   // a text, as a piece of a RegExp
 const TERMS_LINE = { en: 'By continuing, you agree to our Terms &amp; Conditions', ar: 'بالمتابعة، أنت توافق على شروطنا وأحكامنا' }
 // the copy this change added or reworded
 const LOGIN_KEYS = ['loginSub', 'loginTitleSignup', 'loginSubSignup', 'emailSignInLink', 'emailSignInTitle', 'emailSignInSub', 'backToGoogle',
-  'inAppGoogle', 'openInBrowser', 'openManual', 'orEmailSignup', 'orEmailSignin', 'wrongPassword']
-check('this module was loaded in a normal browser', M.IN_APP === false && M.JOIN_IN_URL === false)
+  'inAppGoogle', 'openInBrowser', 'openManual', 'orEmailSignup', 'orEmailSignin', 'wrongPassword', 'wrongPasswordInApp', 'inAppBanner']
+check('this module was loaded in a normal browser', M.IN_APP === false && M.GOOGLE_BLOCKED === false && M.JOIN_IN_URL === false)
 for (const k of LOGIN_KEYS) check(`sign-in copy '${k}' exists in EN and AR, as text`, typeof T.en[k] === 'string' && T.en[k] && typeof T.ar[k] === 'string' && /[؀-ۿ]/.test(T.ar[k]))
 check('the copy that went with the old email-first modal is gone', !('orDivider' in T.en) && !('orDivider' in T.ar))
 check('EN title / sub: sign-up', T.en.loginTitleSignup === 'Create your free account' && T.en.loginSubSignup === 'Continue with Google. No password, no card.')
@@ -890,6 +895,14 @@ for (const lang of ['en', 'ar']) {
       html.includes(esc(mode === 'signup' ? t.loginSubSignup : t.loginSub)))
     check(`${lang}: ${mode} keeps the perks note and the Terms line`, html.includes(esc(t.perksNote(M.perksOf(t, fair)))) && html.includes(TERMS_LINE[lang]))
     check(`${lang}: ${mode} has the quiet link for accounts that were made with an email`, count(html, esc(t.emailSignInLink)) === 1)
+    check(`${lang}: ${mode} is a dialog named by its title, and it can take the focus`,
+      count(html, 'role="dialog" aria-modal="true" aria-labelledby="login-title"') === 1 &&
+      new RegExp(`<div id="login-title" tabindex="-1" style="[^"]*">${reEsc(esc(mode === 'signup' ? t.loginTitleSignup : t.signIn))}</div>`).test(html))
+    check(`${lang}: ${mode}: the Google button and the quiet link are real buttons (a key press works on them)`,
+      new RegExp(`<button type="button" class="submit-btn"[^>]*><svg.*?</svg>${reEsc(esc(t.loginBtn))}</button>`).test(html) &&
+      new RegExp(`<button type="button" style="[^"]*">${reEsc(esc(t.emailSignInLink))}</button>`).test(html))
+    check(`${lang}: ${mode}: the quiet link is drawn in the secondary text colour, not the faint one`,
+      new RegExp(`<button type="button" style="[^"]*color:var\\(--text-secondary\\)[^"]*">${reEsc(esc(t.emailSignInLink))}</button>`).test(html))
     check(`${lang}: ${mode} shows nothing of the in-app view`, [t.inAppGoogle, t.openInBrowser, t.openManual, t.copyLink].every(x => !html.includes(esc(x))))
     const noticed = loginOf(M, lang, { initialMode: mode, notice: { type: 'error', text: t.sessionExpired } })
     check(`${lang}: ${mode} still shows a notice (session expired, an OAuth error) above the Google button`,
@@ -922,6 +935,9 @@ const UA = {
   igAndroid: 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UQ1A.240205.004; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.6478.134 Mobile Safari/537.36 Instagram 340.0.0.22.109 Android',
   igIphone: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 340.0.2.19.105',
   desktop: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  androidChrome: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.134 Mobile Safari/537.36',
+  // an iPhone app's own web view, of an app IN_APP does not know by name
+  linkedInIphone: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 [LinkedInApp]/9.29.8962',
 }
 const jl = M.joinLink, bh = M.browserHandoff, wj = M.withoutJoin
 check('the link for the real browser is the site and ?join=1', jl(ORIGIN, '', null) === 'https://alimne.app/?join=1' && jl(ORIGIN, undefined, undefined) === 'https://alimne.app/?join=1')
@@ -937,6 +953,17 @@ check('an invite code that is not a plain code never travels', ['a b', '<script>
 const out = jl(ORIGIN, '?ref=ab12cd34', null)
 check('Android: an intent:// address with scheme=https, for the default browser (no Chrome needed)',
   bh(out, UA.igAndroid) === 'intent://alimne.app/?join=1&ref=AB12CD34#Intent;scheme=https;end' && !/package=|chrome/i.test(bh(out, UA.igAndroid)))
+// A plain android.webkit.WebView does not know intent: and loads it as a page: its own error page, in place of
+// Alimne. So only the apps this was written for are handed the address; anywhere else the modal shows the way by hand.
+const wvOf = (tail) => `Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UQ1A.240205.004; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.6478.134 Mobile Safari/537.36${tail}`
+const ANDROID_APPS = { facebook: ' [FB_IAB/FB4A;FBAV/470.0.0.0.1;]', tiktok: ' musical_ly_2023405040 BytedanceWebview/d8a21c6', tiktokTrill: ' trill_2023405040 JsSdk/1.0',
+  snapchat: ' Snapchat/12.90.0.46 (Pixel 8; Android 14; gzip)', line: ' Line/14.9.1/IAB' }
+check('Android: every app it was written for is handed the intent:// address',
+  Object.values(ANDROID_APPS).every(tail => bh(out, wvOf(tail)) === 'intent://alimne.app/?join=1&ref=AB12CD34#Intent;scheme=https;end'),
+  Object.entries(ANDROID_APPS).filter(([, tail]) => !bh(out, wvOf(tail))).map(([k]) => k).join(','))
+check('Android: a web view of an unknown app is handed NO address (it would show its own error page for one)',
+  bh(out, wvOf('')) === '' && bh(out, wvOf(' [LinkedInApp]/4.1.918')) === '' && bh(out, wvOf(' MicroMessenger/8.0.47.2560 WeChat/arm64')) === '' &&
+  bh(out, wvOf(' KAKAOTALK 10.4.5')) === '' && bh(out, UA.androidChrome) === '')
 check('iPhone / iPad: x-safari-https://', bh(out, UA.igIphone) === 'x-safari-https://alimne.app/?join=1&ref=AB12CD34' &&
   bh(out, UA.igIphone.replace('iPhone;', 'iPad;')).startsWith('x-safari-https://alimne.app/'))
 check('no such address on other devices, or for a link that is not https: the modal then shows the way by hand',
@@ -964,6 +991,11 @@ for (const lang of ['en', 'ar']) {
   check(`${lang}: the notice says Google sign-in is not allowed inside this app, and names no app and no browser`,
     /not allowed inside this app|غير مسموح به داخل هذا التطبيق/.test(t.inAppGoogle) && /Google/.test(t.inAppGoogle) &&
     [t.inAppGoogle, t.openManual].every(x => !/Instagram|Facebook|TikTok|Snapchat|LINE|Safari|Chrome/i.test(x)))
+  check(`${lang}: the downloads banner on the same page names no app and no browser either`,
+    /inside this app|داخل هذا التطبيق/.test(t.inAppBanner) && /alimne\.app/.test(t.inAppBanner) && !/Instagram|Facebook|TikTok|Snapchat|LINE|Safari|Chrome/i.test(t.inAppBanner))
+  check(`${lang}: a wrong password inside an app says to open Alimne in the browser for Google, not to use a button that is not there`,
+    t.wrongPasswordInApp !== t.wrongPassword && /Google/.test(t.wrongPasswordInApp) && (lang === 'en' ? /open Alimne in your browser/.test(t.wrongPasswordInApp) : /افتح علّمني في متصفحك/.test(t.wrongPasswordInApp)) &&
+    !/Instagram|Facebook|TikTok|Snapchat|LINE|Safari|Chrome/i.test(t.wrongPasswordInApp))
   check(`${lang}: the way by hand names the menu, "Open in browser" and the link to copy`,
     lang === 'en' ? /menu/.test(t.openManual) && /Open in browser/.test(t.openManual) && /copy the link/.test(t.openManual)
       : /قائمة/.test(t.openManual) && t.openManual.includes(t.openInBrowser) && /انسخ الرابط/.test(t.openManual))
@@ -973,10 +1005,13 @@ for (const lang of ['en', 'ar']) {
     check(`${lang}: in-app ${mode} shows the notice and a primary "Open in browser" button`,
       html.includes(esc(t.inAppGoogle)) && new RegExp(`<button type="button" class="submit-btn"[^>]*>(?:<svg.*?</svg>)? ?${esc(t.openInBrowser)}</button>`).test(html))
     check(`${lang}: in-app ${mode} keeps "Copy link", and shows the way by hand only after a try that went nowhere`, html.includes(esc(t.copyLink)) && !html.includes(esc(t.openManual)))
+    check(`${lang}: in-app ${mode}: the live region that will say the way by hand is there from the start, empty`, count(html, '<div role="status"></div>') === 1)
     check(`${lang}: in-app ${mode} has NO Google button (it cannot work there)`, googleBtn(html, t) === 0 && !html.includes(GOOGLE_LOGO))
     check(`${lang}: in-app ${mode} has the email form under a divider that says what it is for`,
       count(html, '<form') === 1 && html.includes('type="email"') && html.includes('type="password"') && html.includes(esc(signup ? t.orEmailSignup : t.orEmailSignin)) &&
       html.indexOf(esc(t.openInBrowser)) < html.indexOf(esc(signup ? t.orEmailSignup : t.orEmailSignin)) && html.indexOf(esc(signup ? t.orEmailSignup : t.orEmailSignin)) < html.indexOf('<form'))
+    check(`${lang}: in-app ${mode}: the divider that introduces the email form can be read (secondary text colour, not the faint one)`,
+      new RegExp(`<div style="[^"]*color:var\\(--text-secondary\\)[^"]*"><span style="[^"]*"></span>${reEsc(esc(signup ? t.orEmailSignup : t.orEmailSignin))}<span`).test(html))
     check(`${lang}: in-app ${mode} keeps the sign-up / sign-in toggle`, html.includes(esc(signup ? t.haveAccount : t.noAccount)) && !html.includes(esc(signup ? t.noAccount : t.haveAccount)))
     check(`${lang}: in-app ${mode} submits as ${signup ? 'a new account (new password, no "forgot")' : 'a sign-in (current password, "forgot password")'}`, signup
       ? html.includes(esc(t.emailBtnSignup)) && html.includes('autoComplete="new-password"') && !html.includes(esc(t.forgotPw))
@@ -1015,6 +1050,139 @@ for (const lang of ['en', 'ar']) {
       unqualified(x, lang).length === 0 && scan(x, lang).length === 0 && !/never stored|nothing stored|no data stored|no storage/i.test(x) && !/—/.test(x)))
   check(`${lang}: with no free guide at all (ANON_FREE_USES=0) the Terms still say how an account is made`, M.termsText(lang, true, 0).includes(made))
   check(`${lang}: token mode keeps its old Terms`, !M.termsText(lang, false, 3).includes(made) && !M.termsText(lang, false, 3).includes(M.TERMS_ACCOUNT[lang]))
+}
+
+for (const lang of ['en', 'ar']) {
+  const s7 = lang === 'en' ? ['7. THIRD-PARTY SERVICES', '8. LIMITATION OF LIABILITY'] : ['٧. الخدمات الخارجية', '٨. تحديد المسؤولية']
+  const google = lang === 'en' ? "• Google: for sign-in with your Google account (subject to Google's terms at policies.google.com)."
+    : '• Google: لتسجيل الدخول بحسابك في Google (خاضع لشروط Google على policies.google.com).'
+  check(`${lang}: the Terms name Google among the services Alimne relies on (section 7), in both modes, with no em dash`, [true, false].every(free => {
+    const terms = M.termsText(lang, free, 3)
+    return terms.indexOf(google) > terms.indexOf(s7[0]) && terms.indexOf(google) < terms.indexOf(s7[1])
+  }) && (lang === 'en' ? M.TERMS_EN_TAIL : M.TERMS_AR_TAIL).includes(google) && !/—/.test(google))
+}
+
+// ── 13d. where Google is blocked ─────────────────────────────────────────────────────
+// IN_APP knows iPhone apps by name only (Android has the generic "; wv)" mark). The sign-in dialog is the one way
+// to an account, so it decides by GOOGLE_BLOCKED: everything IN_APP knows, other apps' own browsers known by name,
+// and any iPhone / iPad page whose user agent has no "Safari/" (every real browser there says it; an app's own
+// web view does not). The user agents below are written from the published formats, not captured on devices.
+section('13d. Google-only sign-up: where Google is blocked (every in-app browser, known by name or not)')
+const gb = M.googleBlockedIn
+const IOS = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)'
+const EMBEDDED = {
+  'Instagram, Android': UA.igAndroid, 'Instagram, iPhone': UA.igIphone,
+  'Facebook, iPhone': `${IOS} Mobile/15E148 [FBAN/FBIOS;FBAV/470.0.0.38.109;FBBV/615163771;FBDV/iPhone15,2;FBMD/iPhone;FBSN/iOS;FBSV/17.5.1]`,
+  'Facebook, Android': wvOf(ANDROID_APPS.facebook), 'TikTok, Android': wvOf(ANDROID_APPS.tiktok), 'TikTok (trill), Android': wvOf(ANDROID_APPS.tiktokTrill),
+  'TikTok, iPhone': `${IOS} Mobile/15E148 musical_ly_35.2.0 JsSdk/2.0 NetType/WIFI Channel/App Store ByteLocale/en Region/AE BytedanceWebview/d8a21c6`,
+  'TikTok (trill), iPhone': `${IOS} Mobile/15E148 trill_35.2.0 JsSdk/2.0 NetType/WIFI Channel/App Store ByteLocale/en Region/SA BytedanceWebview/d8a21c6`,
+  'Snapchat, iPhone': `${IOS} Version/17.5 Mobile/15E148 Safari/604.1 Snapchat/12.90.0.46 (like Safari/8618.2.12.11.6, panda)`,
+  'Snapchat, Android': wvOf(ANDROID_APPS.snapchat), 'LINE, iPhone': `${IOS} Mobile/15E148 Safari Line/14.9.1`, 'LINE, Android': wvOf(ANDROID_APPS.line),
+  'an unknown Android web view': wvOf(''),
+  'LinkedIn, iPhone': UA.linkedInIphone, 'LinkedIn, Android': wvOf(' [LinkedInApp]/4.1.918'),
+  'X, iPhone': `${IOS} Mobile/15E148 Twitter for iPhone/10.48`,
+  'WeChat, iPhone': `${IOS} Mobile/15E148 MicroMessenger/8.0.50(0x18003233) NetType/WIFI Language/en`,
+  'Threads, iPhone': `${IOS} Mobile/15E148 Barcelona 340.0.2.19.105 (iPhone15,2; iOS 17_5_1; en_US; en; scale=3.00; 1179x2556; 620816700)`,
+  'KakaoTalk, iPhone': `${IOS} Mobile/15E148 KAKAOTALK 10.8.5`, 'Pinterest, iPhone': `${IOS} Mobile/15E148 [Pinterest/iOS]`,
+  'a bare iPhone web view (any other app)': `${IOS} Mobile/15E148`,
+  'a bare iPad web view': 'Mozilla/5.0 (iPad; CPU OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148',
+}
+const REAL = {
+  'Safari, iPhone': `${IOS} Version/17.5 Mobile/15E148 Safari/604.1`, 'Chrome, iPhone': `${IOS} CriOS/126.0.6478.153 Mobile/15E148 Safari/604.1`,
+  'Firefox, iPhone': `${IOS} FxiOS/127.0 Mobile/15E148 Safari/605.1.15`, 'Edge, iPhone': `${IOS} Version/17.0 EdgiOS/126.0.2592.56 Mobile/15E148 Safari/605.1.15`,
+  'the Google app, iPhone': `${IOS} GSA/323.0.647062479 Mobile/15E148 Safari/604.1`, 'DuckDuckGo, iPhone': `${IOS} Version/17.5 Mobile/15E148 DuckDuckGo/7 Safari/605.1.15`,
+  'Safari, iPad (desktop mode)': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+  'Chrome, Android': UA.androidChrome,
+  'Samsung Internet': 'Mozilla/5.0 (Linux; Android 14; SAMSUNG SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/121.0.0.0 Mobile Safari/537.36',
+  'Firefox, Android': 'Mozilla/5.0 (Android 14; Mobile; rv:127.0) Gecko/127.0 Firefox/127.0',
+  'Chrome, desktop': UA.desktop, 'Firefox, desktop': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0',
+  'Safari, Mac': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+  'Edge, desktop': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0',
+}
+for (const [name, ua] of Object.entries(EMBEDDED)) check(`Google is blocked: ${name}`, gb(ua) === true && gb(ua, false) === true)
+for (const [name, ua] of Object.entries(REAL)) check(`Google works (the Google button stays): ${name}`, gb(ua) === false && gb(ua, false) === false)
+check('a page opened from the iPhone Home Screen is not inside another app: it keeps the Google button', gb(`${IOS} Mobile/15E148`, true) === false && gb(UA.igIphone, true) === true)
+check('no user agent at all is not an in-app browser', gb('') === false && gb(undefined) === false && gb(null) === false)
+// The old test alone (IN_APP) missed these: they were given a Google button that Google refuses, and no email sign-up
+const IN_APP_OLD = /Instagram|FBAN|FBAV|FB_IAB|TikTok|musical_ly|Snapchat|Line\/|; wv\)/i
+check('GOOGLE_BLOCKED covers everything IN_APP knows, and the iPhone apps it does not',
+  Object.values(EMBEDDED).filter(ua => IN_APP_OLD.test(ua)).every(ua => gb(ua)) &&
+  ['LinkedIn, iPhone', 'X, iPhone', 'WeChat, iPhone', 'Threads, iPhone', 'TikTok (trill), iPhone', 'a bare iPhone web view (any other app)'].every(k => !IN_APP_OLD.test(EMBEDDED[k]) && gb(EMBEDDED[k])))
+check('iPhone: every web view is asked with x-safari-https:// (one that does not know it stays on the page)',
+  ['LinkedIn, iPhone', 'X, iPhone', 'a bare iPhone web view (any other app)', 'Instagram, iPhone'].every(k => bh(out, EMBEDDED[k]) === 'x-safari-https://alimne.app/?join=1&ref=AB12CD34'))
+
+// the same module once more, the way LinkedIn on an iPhone loads it: IN_APP (the downloads) says no, GOOGLE_BLOCKED says yes
+console.warn = (...a) => { if (!String(a[0]).includes('Multiple GoTrueClient instances')) realWarn(...a) }
+setNavLang('en-US', UA.linkedInIphone)
+const MW = await import(pathToFileURL(outFile).href + '?ios-webview')
+// ...and the way an in-app browser loads the link when the hand-off came back into the same app
+setNavLang('en-US', UA.igAndroid)
+fakeWindow.location.search = '?join=1'
+const MR = await import(pathToFileURL(outFile).href + '?in-app-join')
+fakeWindow.location.search = ''
+// ...and a Home Screen page on an iPhone (no "Safari/" in its user agent, but not inside another app)
+Object.defineProperty(globalThis, 'navigator', { value: { language: 'en-US', userAgent: `${IOS} Mobile/15E148`, standalone: true, clipboard: undefined }, configurable: true })
+const MH = await import(pathToFileURL(outFile).href + '?home-screen')
+setNavLang('en-US')
+console.warn = realWarn
+check('LinkedIn on an iPhone: the downloads test is as it was, the sign-in dialog knows better', MW.IN_APP === false && MW.GOOGLE_BLOCKED === true)
+check('the module loaded as Instagram is blocked too, and a Home Screen page is not', MI.GOOGLE_BLOCKED === true && MR.GOOGLE_BLOCKED === true && MR.JOIN_IN_URL === true && MH.GOOGLE_BLOCKED === false && MH.IN_APP === false)
+for (const lang of ['en', 'ar']) {
+  const t = T[lang]
+  for (const mode of ['signup', 'signin']) {
+    const html = loginOf(MW, lang, { initialMode: mode })
+    const signup = mode === 'signup'
+    check(`${lang}: LinkedIn on an iPhone, ${mode}: the notice, "Open in browser", "Copy link", and NO Google button`,
+      html.includes(esc(t.inAppGoogle)) && html.includes(`${esc(t.openInBrowser)}</button>`) && html.includes(esc(t.copyLink)) && googleBtn(html, t) === 0 && !html.includes(GOOGLE_LOGO))
+    check(`${lang}: LinkedIn on an iPhone, ${mode}: the email form, ${signup ? 'as a sign-up (the way to an account that is left there)' : 'as a sign-in, with the toggle to sign-up'}`,
+      count(html, '<form') === 1 && html.includes(esc(signup ? t.orEmailSignup : t.orEmailSignin)) && html.includes(esc(signup ? t.haveAccount : t.noAccount)) &&
+      (signup ? html.includes(esc(t.emailBtnSignup)) && html.includes('autoComplete="new-password"') : html.includes(esc(t.emailBtn)) && html.includes('autoComplete="current-password"')))
+  }
+  const home = loginOf(MH, lang)
+  check(`${lang}: a Home Screen page keeps the Google-only dialog`, googleBtn(home, t) === 1 && !home.includes('<form') && !home.includes(esc(t.inAppGoogle)))
+  const bounced = loginOf(MR, lang)
+  check(`${lang}: ?join=1 opened inside an app again: the way by hand is on screen from the start`,
+    new RegExp(`<div role="status" style="[^"]*">${reEsc(esc(t.openManual))}</div>`).test(bounced) && bounced.includes(`${esc(t.openInBrowser)}</button>`) && bounced.includes(esc(t.copyLink)))
+  check(`${lang}: ...and not in an in-app browser that was not sent there by ?join=1`, !loginOf(MI, lang).includes(esc(t.openManual)))
+}
+
+// ?join=1 on arrival: the decision the page makes once the session restore has answered
+const ja = M.joinAnswer
+const arrived = { join: true, authLoading: false, asked: false, session: null, authEnabled: true, urlErr: null, recovery: false }
+check('?join=1, nobody signed in: the sign-up modal opens', ja(arrived) === true)
+check('...not before the session restore has answered, not twice, and not without ?join=1 (null = nothing to answer now)',
+  ja({ ...arrived, authLoading: true }) === null && ja({ ...arrived, asked: true }) === null && ja({ ...arrived, join: false }) === null)
+check('...not for a visitor who is signed in, nor where sign-in is switched off', ja({ ...arrived, session: { user: { id: 'u1' } } }) === false && ja({ ...arrived, authEnabled: false }) === false)
+check('...and never over a link that came back with a sign-in error, or for a password reset',
+  ja({ ...arrived, urlErr: { code: 'otp_expired' } }) === false && ja({ ...arrived, recovery: true }) === false)
+check('the page that loaded with ?join=1 would open it; the one without would not', MJ.JOIN_IN_URL === true && M.JOIN_IN_URL === false &&
+  ja({ ...arrived, join: MJ.JOIN_IN_URL }) === true && ja({ ...arrived, join: M.JOIN_IN_URL }) === null)
+
+// A sign-in that came back with an error in the address. Only an expired EMAIL link opens the email view.
+const an = M.authUrlNotice
+const sameNotice = (a, b) => a.key === b.key && a.byEmail === b.byEmail
+check('an expired email link (otp_expired) opens the email sign-in view with "that link has expired"',
+  sameNotice(an({ code: 'otp_expired', err: 'access_denied', desc: 'Email link is invalid or has expired' }), { key: 'linkExpired', byEmail: true }) &&
+  sameNotice(an({ code: 'otp_expired', err: null, desc: null }), { key: 'linkExpired', byEmail: true }) &&
+  sameNotice(an({ code: '401', err: 'unauthorized_client', desc: 'Email link is invalid or has expired' }), { key: 'linkExpired', byEmail: true }))
+check('a Google sign-in that failed (bad_oauth_state: "OAuth callback with invalid state") stays on the Google button',
+  sameNotice(an({ code: 'bad_oauth_state', err: 'invalid_request', desc: 'OAuth callback with invalid state' }), { key: 'authLinkError', byEmail: false }))
+check('...and so does every other error that is not an email link, whatever its wording',
+  [{ code: 'bad_oauth_callback', err: 'invalid_request', desc: 'OAuth state parameter missing' }, { code: null, err: 'access_denied', desc: 'The user denied access' },
+    { code: 'unexpected_failure', err: 'server_error', desc: 'Unable to exchange external code: invalid_grant' }, { code: 'flow_state_expired', err: 'invalid_request', desc: 'Flow state has expired' },
+    { code: 'signup_disabled', err: 'access_denied', desc: 'Signups not allowed for this instance' }, { code: null, err: 'server_error', desc: null }, {}, null, undefined]
+    .every(e => sameNotice(an(e), { key: 'authLinkError', byEmail: false })))
+for (const lang of ['en', 'ar']) {
+  const t = T[lang]
+  const came = an({ code: 'bad_oauth_state', err: 'invalid_request', desc: 'OAuth callback with invalid state' })
+  const back = loginOf(M, lang, { initialMode: 'signin', notice: { type: 'error', text: t[came.key], byEmail: came.byEmail } })
+  check(`${lang}: a failed Google return renders the error above the Google button, with no password field`,
+    back.includes(esc(t.authLinkError)) && !back.includes(esc(t.linkExpired)) && googleBtn(back, t) === 1 && !back.includes('type="password"') &&
+    back.indexOf(esc(t.authLinkError)) < back.indexOf(GOOGLE_LOGO))
+  const late = an({ code: 'otp_expired', err: 'access_denied', desc: 'Email link is invalid or has expired' })
+  const mail = loginOf(M, lang, { initialMode: 'signin', notice: { type: 'error', text: t[late.key], byEmail: late.byEmail } })
+  check(`${lang}: an expired email link renders the email sign-in view with "that link has expired"`,
+    mail.includes(esc(t.linkExpired)) && mail.includes('type="password"') && googleBtn(mail, t) === 0 && mail.includes(esc(t.backToGoogle)))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

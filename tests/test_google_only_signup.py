@@ -18,6 +18,11 @@ What the client (frontend/src/App_dev.jsx, LoginModal) must do:
     x-safari-https://), the manual way when the page is still in front about 1.8 s later, the
     Copy link button, and under a divider the email form with its sign-up / sign-in toggle exactly
     as it worked before. No Google button there.
+    "In-app" for the sign-in dialog is GOOGLE_BLOCKED: every browser IN_APP knows, other apps' own
+    browsers known by name, and any iPhone / iPad page that is not in a real browser (no "Safari/"
+    in its user agent). IN_APP itself, which the downloads decide by, is unchanged. An Android web
+    view of an app that is not known by name gets no intent:// address (a plain web view shows its
+    own error page for one): the manual way shows at once there.
   * The link handed to the real browser is https://<origin>/?join=1 (plus the invite code, nothing
     else). On load ?join=1 comes off the address and, with nobody signed in, the sign-up modal opens.
     The OAuth return, the recovery / confirmation links and the referral code are left alone.
@@ -28,10 +33,15 @@ And every place that says how an account is made says the same: the in-app Terms
 There is no JS test runner. These are static checks of the source and of the bundle in dist/, plus
 the Flask pages through the test client (offline). The rendered modal (both browsers, both
 languages) is checked by frontend/scripts/verify-free-mode.mjs, section 13, which
-tests/test_free_mode_client.py runs.
+tests/test_free_mode_client.py runs. What only a browser can show (the dialog opening on ?join=1,
+where a click and a key press lead, where the keyboard focus is, which address the page asks for)
+is driven in a local headless Chrome by frontend/scripts/verify-login-flows.mjs, offline, against
+the bundle in dist/: the last test here runs it, and is skipped on a machine without such a browser.
 """
 import os
 import re
+import shutil
+import subprocess
 
 import pytest
 
@@ -41,11 +51,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_JSX = os.path.join(ROOT, "frontend", "src", "App_dev.jsx")
 DIST = os.path.join(ROOT, "dist")
 VERIFY = os.path.join(ROOT, "frontend", "scripts", "verify-free-mode.mjs")
+FLOWS = os.path.join(ROOT, "frontend", "scripts", "verify-login-flows.mjs")
 MANUAL = os.path.join(ROOT, "docs", "FREE-MODE.md")
 
 # The copy this change added or reworded (the same list the node script checks in both languages)
 LOGIN_KEYS = ["loginSub", "loginTitleSignup", "loginSubSignup", "emailSignInLink", "emailSignInTitle", "emailSignInSub",
-              "backToGoogle", "inAppGoogle", "openInBrowser", "openManual", "orEmailSignup", "orEmailSignin", "wrongPassword"]
+              "backToGoogle", "inAppGoogle", "openInBrowser", "openManual", "orEmailSignup", "orEmailSignin", "wrongPassword",
+              "wrongPasswordInApp", "inAppBanner"]
 
 
 def _read(path):
@@ -85,16 +97,16 @@ def _modal(src):
 
 
 def _views(modal):
-    """The modal's bodies: (in-app browser, email sign-in view, the default view, what follows all three).
-    The marks are whole lines at the branch's own indent (12 spaces)."""
+    """The modal's bodies: (another app's browser, email sign-in view, the default view, what follows all three).
+    The marks are whole lines at the branch's own indent (14 spaces)."""
     def at(mark, start=0):
         m = re.compile("^" + re.escape(mark) + "$", re.M).search(modal, start)
         assert m, f"LoginModal: {mark.strip()!r} not found"
         return m.start()
-    a = at("            {IN_APP ? (")
-    b = at("            ) : emailOnly ? (", a)
-    c = at("            ) : (", b)
-    d = at("            )}", c)
+    a = at("              {GOOGLE_BLOCKED ? (")
+    b = at("              ) : emailOnly ? (", a)
+    c = at("              ) : (", b)
+    d = at("              )}", c)
     return modal[a:b], modal[b:c], modal[c:d], modal[d:]
 
 
@@ -130,9 +142,12 @@ def test_the_default_view_is_one_google_button_and_no_email_form():
     assert default.index("{alertBox}") < default.index("onClick={google}")
     # the email view is closed by default: only the link, or an email link that came back expired, opens it
     assert re.search(r"const \[byEmail, setByEmail\]\s*= useState\(!!notice\?\.byEmail\)", modal)
-    assert "const emailOnly = !IN_APP && byEmail" in modal
-    assert modal.count("onClick={google}") == 1 and modal.count("setByEmail(true)") == 1
-    assert "setByEmail(true)" in default and "{t.emailSignInLink}" in default, "the quiet link for the accounts made with an email"
+    assert "const emailOnly = !GOOGLE_BLOCKED && byEmail" in modal
+    # one way into the email view and one way out, both through showEmail (the only place that sets it)
+    assert "  const showEmail = (on) => { switchedAt.current = Date.now(); setByEmail(on); setMsg(null); setNeedConfirm(false) }\n" in modal
+    assert modal.count("setByEmail(") == 1, "nothing but showEmail opens or closes the email view"
+    assert modal.count("onClick={google}") == 1 and modal.count("showEmail(true)") == 1
+    assert "onClick={() => showEmail(true)}" in default and "{t.emailSignInLink}" in default, "the quiet link for the accounts made with an email"
     assert default.index("onClick={google}") < default.index("{t.emailSignInLink}"), "the link sits under the button"
 
 
@@ -147,13 +162,13 @@ def test_the_gate_reason_the_perks_note_and_the_terms_line_stay():
     # short titles for both modes; the line under them comes from the pack (token mode keeps its own promise)
     assert "{sentTo ? t.checkInboxTitle : emailOnly ? t.emailSignInTitle : isSignup ? t.loginTitleSignup : t.signIn}" in modal
     sub = _block(modal, r"  const sub = ", r"\n  const later")
-    assert "!IN_APP ? (isSignup ? t.loginSubSignup : t.loginSub)" in sub and "(isSignup && !freeMode) ? t.loginSubSignup : null" in sub
+    assert "!GOOGLE_BLOCKED ? (isSignup ? t.loginSubSignup : t.loginSub)" in sub and "(isSignup && !freeMode) ? t.loginSubSignup : null" in sub
 
 
 def test_the_email_view_signs_in_and_can_create_no_account():
     modal = _modal(_src())
     in_app, email_view, default, _ = _views(modal)
-    assert "{emailForm}" in email_view and "{t.backToGoogle}" in email_view and "setByEmail(false)" in email_view
+    assert "{emailForm}" in email_view and "{t.backToGoogle}" in email_view and "onClick={() => showEmail(false)}" in email_view
     for gone in ("setMode(", "t.noAccount", "t.haveAccount", "onClick={google}", "t.orEmailSignup"):
         assert gone not in email_view, f"the email view is sign-in only: found {gone}"
     form = _block(modal, r"  const emailForm = \(", r"\n  \)\n")
@@ -170,7 +185,7 @@ def test_sign_up_is_reachable_only_inside_an_in_app_browser():
     src = _src()
     modal = _modal(src)
     assert src.count("auth.signUp(") == 1 and modal.count("auth.signUp(") == 1, "one sign-up call, in the modal"
-    assert "  const creating = IN_APP && isSignup\n" in modal, "an email account is created inside an in-app browser only"
+    assert "  const creating = GOOGLE_BLOCKED && isSignup\n" in modal, "an email account is created inside another app's browser only"
     auth = _block(modal, r"  const emailAuth = \(e\) => \{", r"\n  \}\n")
     assert "isSignup" not in auth, "nothing but `creating` may decide between sign-up and sign-in"
     assert auth.index("if (creating) {") < auth.index("sbClient.auth.signUp(") < auth.index("} else {") < auth.index("sbClient.auth.signInWithPassword(")
@@ -184,19 +199,94 @@ def test_sign_up_is_reachable_only_inside_an_in_app_browser():
     assert "{emailForm}" not in default
 
 
+def test_the_dialog_is_named_takes_the_focus_and_keeps_the_keyboard_inside():
+    """Found by driving the bundle in a browser (verify-login-flows.mjs repeats it): the link that opened the email
+    view was unmounted with the focus on it, so the focus fell to <body> and Tab walked the page behind the dialog;
+    and "Back to Google sign-in" and "Continue with Google" were the same DOM button (unkeyed siblings), so a
+    second Enter on Back started the Google redirect."""
+    modal = _modal(_src())
+    in_app, email_view, default, _ = _views(modal)
+    # no control of one view is ever reused as a control of another
+    assert '<Fragment key="in-app">' in in_app and '<Fragment key="email">' in email_view and '<Fragment key="google">' in default
+    assert "<>" not in in_app + email_view + default, "the three views are keyed, not bare fragments"
+    assert "import { useState, useRef, useCallback, useEffect, useMemo, Fragment } from 'react'" in _src()
+    # the focus follows the visitor: into the email field, and back to the link that leads there (not the Google button)
+    assert "ref={emailRef} type=\"email\"" in modal and "ref={emailLinkRef} onClick={() => showEmail(true)}" in default
+    follow = _block(modal, r"  useEffect\(\(\) => \{\n    if \(!switchedAt\.current\) return", r"\n  \}, \[emailOnly\]\)")
+    assert "const to = emailOnly ? emailRef : emailLinkRef" in follow and "to.current?.focus?.()" in follow
+    # a second tap or Enter meant for the link just used does not act on what took its place
+    assert "  const holdStray = (e) => { if (Date.now() - switchedAt.current < 400) { e.preventDefault(); e.stopPropagation() } }\n" in modal
+    assert "onClickCapture={holdStray} onSubmitCapture={holdStray}>\n              {GOOGLE_BLOCKED ? (" in modal, "it guards all three views"
+    # the dialog: named by its title, focused when it opens, Tab kept inside
+    assert 'role="dialog" aria-modal="true" aria-labelledby="login-title" ref={boxRef}' in modal
+    assert '<div id="login-title" tabIndex={-1} ref={titleRef} ' in modal and "onKeyDown={keepTabInside}" in modal
+    # the focus goes to the title: not to a button (a stray Enter would start a sign-in), not to the box itself
+    assert "  useEffect(() => { titleRef.current?.focus?.() }, [])\n" in modal
+    assert "boxRef.current?.focus" not in modal and "autoFocus" not in modal
+    assert "useEscapeKey(onClose)" in modal
+    trap = _block(modal, r"  const keepTabInside = \(e\) => \{", r"\n  \}\n")
+    assert "if (e.key !== 'Tab' || !boxRef.current) return" in trap and "e.preventDefault(); (e.shiftKey ? last : first).focus()" in trap
+    assert "if (e.shiftKey ? at === first : at === last)" in trap
+    # the quiet link can be read: it was var(--text-muted), 2.8:1 on the dark dialog
+    link = default[default.index("ref={emailLinkRef}"):]
+    assert "color:'var(--text-secondary)'" in link and "var(--text-muted)" not in link and "padding:'0.5rem 0.25rem'" in link
+    # a wrong password inside another app's browser does not point at a Google button that is not there
+    assert ("  const errText = (err) => { const text = authErrText(t, err); "
+            "return GOOGLE_BLOCKED && text === t.wrongPassword ? t.wrongPasswordInApp : text }\n") in modal
+    assert "catch (err) { setMsg({ type: 'error', text: errText(err) }) }" in _block(modal, r"  const guarded = async \(fn\) => \{", r"\n  \}\n")
+
+
 # ── 2. an in-app browser: the notice, the way out, the email form ─────────────
 def test_in_app_detection_is_unchanged():
     assert ("const IN_APP = (() => { try { return /Instagram|FBAN|FBAV|FB_IAB|TikTok|musical_ly|Snapchat|Line\\/|; wv\\)/i"
             ".test(navigator.userAgent || '') } catch { return false } })()") in _src()
 
 
+def test_the_sign_in_dialog_decides_by_where_google_is_blocked_not_by_the_named_apps_alone():
+    """IN_APP knows iPhone apps by name only. The dialog used it alone to choose between the Google button and the
+    in-app view, so a link opened inside LinkedIn, X, WeChat or any other iPhone app's own web view got a Google
+    button that Google refuses (403 disallowed_useragent) and no way to make an account at all. Before Google-only
+    sign-up that visitor still had the email form."""
+    src = _src()
+    modal = _modal(src)
+    blocked = _block(src, r"^function googleBlockedIn\(ua, standalone = false\) \{", r"^\}\n")
+    assert "if (EMBEDDED_RE.test(s)) return true" in blocked
+    assert "return /iPhone|iPad|iPod/i.test(s) && !/Safari\\//i.test(s) && !standalone" in blocked, \
+        "an iPhone / iPad page with no Safari/ in its user agent is an app's own web view (a Home Screen page is not)"
+    named = re.search(r"^const EMBEDDED_RE = /(.+)/i$", src, re.M)
+    assert named, "EMBEDDED_RE not found"
+    # everything IN_APP knows, and the apps it does not
+    for token in ("Instagram", "FBAN", "FBAV", "FB_IAB", "TikTok", "musical_ly", "Snapchat", "Line\\/", "; wv\\)",
+                  "LinkedInApp", "Twitter", "MicroMessenger", "Barcelona", "BytedanceWebview", "trill_", "KAKAOTALK", "Pinterest"):
+        assert token in named.group(1).split("|"), f"EMBEDDED_RE lost {token}"
+    # a superset of IN_APP by construction, read once at load
+    assert ("const GOOGLE_BLOCKED = IN_APP || (() => { try { return googleBlockedIn(navigator.userAgent, navigator.standalone === true) } "
+            "catch { return false } })()") in src
+    # the dialog decides by it everywhere, and by IN_APP nowhere
+    assert not re.search(r"\bIN_APP\b", modal), "LoginModal still decides something by IN_APP"
+    for must in ("  const creating = GOOGLE_BLOCKED && isSignup\n", "  const emailOnly = !GOOGLE_BLOCKED && byEmail\n",
+                 "    if (!GOOGLE_BLOCKED) return\n", "              {GOOGLE_BLOCKED ? (\n"):
+        assert must in modal, f"LoginModal lost {must.strip()!r}"
+    # ...and the downloads decide by IN_APP as before: nothing outside the dialog reads the wider test
+    after = src[src.index("function SetPasswordModal("):]
+    assert "GOOGLE_BLOCKED" not in after
+    for must in ("if (IN_APP && typeof navigator.canShare === 'function') prefetchPdf(id, jobId)", "if (IN_APP && cur.pdfBlob) {",
+                 "if (IN_APP) { inAppDownload(`/api/export/anki/${jobId}`); return }", "            {IN_APP && (\n"):
+        assert must in after, f"the download paths changed: {must.strip()}"
+
+
 def test_the_in_app_view_keeps_email_sign_up_and_offers_open_in_browser():
     modal = _modal(_src())
     in_app, email_view, default, _ = _views(modal)
-    for must in ("{t.inAppGoogle}", 'className="submit-btn" onClick={openInBrowser}', "{t.openInBrowser}", "{stayed && (",
-                 "{t.openManual}", "onClick={copyLink}", "t.copyLink", "{emailForm}", "isSignup ? t.orEmailSignup : t.orEmailSignin",
+    for must in ("{t.inAppGoogle}", 'className="submit-btn" onClick={openInBrowser}', "{t.openInBrowser}",
+                 "{stayed ? t.openManual : ''}", "onClick={copyLink}", "t.copyLink", "{emailForm}", "isSignup ? t.orEmailSignup : t.orEmailSignin",
                  "{isSignup ? t.haveAccount : t.noAccount}"):
         assert must in in_app, f"the in-app view lost {must}"
+    # the way by hand is said by a live region that is there from the start: one that arrives together with its
+    # text is not reliably announced by a screen reader
+    assert ("<div role=\"status\" style={stayed ? {marginTop:'0.6rem', fontWeight:600, color:'var(--text-primary)'} : undefined}>"
+            "{stayed ? t.openManual : ''}</div>") in in_app
+    assert "{stayed && (" not in in_app
     assert "onClick={google}" not in in_app and "t.loginBtn" not in in_app, "no Google button where Google refuses to work"
     order = [in_app.index(x) for x in ("{t.inAppGoogle}", "onClick={openInBrowser}", "onClick={copyLink}", "t.orEmailSignup", "{emailForm}", "t.haveAccount")]
     assert order == sorted(order), "notice, Open in browser, Copy link, the divider, the form, the toggle"
@@ -222,6 +312,9 @@ def test_open_in_browser_tries_once_and_fails_gracefully():
     # whether the page left is seen, not guessed: hidden since the tap means the phone followed
     assert "document.addEventListener('visibilitychange', away)" in modal and "document.removeEventListener('visibilitychange', away)" in modal
     assert "if (document.visibilityState === 'hidden') wentAway.current = true" in modal
+    # a page that another app's browser opened with ?join=1 is a hand-off that came back into the same app:
+    # the way by hand is on screen from the start there, instead of the same button alone
+    assert re.search(r"const \[stayed, setStayed\]\s*= useState\(GOOGLE_BLOCKED && JOIN_IN_URL\)", modal)
     # one try per tap and nothing that could loop or blank the page
     assert modal.count("window.location.href = ") == 1 and "openInBrowser()" not in src
     for risky in ("location.reload", "location.replace", "location.assign", "window.open(", "setInterval(", "browser_fallback_url"):
@@ -234,8 +327,13 @@ def test_open_in_browser_tries_once_and_fails_gracefully():
 def test_the_handoff_addresses_and_the_link_they_carry():
     src = _src()
     hand = _block(src, r"^function browserHandoff\(link, ua\) \{", r"^\}\n")
-    assert "if (/Android/i.test(ua || '')) return `intent://${m[1]}#Intent;scheme=https;end`" in hand, \
-        "Android: an intent with scheme=https (the default browser)"
+    assert "if (/Android/i.test(ua || '')) return HANDOFF_APPS_RE.test(ua) ? `intent://${m[1]}#Intent;scheme=https;end` : ''" in hand, \
+        "Android: an intent with scheme=https (the default browser), inside the named apps only"
+    # an Android web view of an unknown app gets NO address: a plain web view loads intent: as a page, which is its
+    # own error page in place of Alimne. The generic '; wv)' mark is therefore not in the list.
+    apps = re.search(r"^const HANDOFF_APPS_RE = /(.+)/i$", src, re.M)
+    assert apps and "wv" not in apps.group(1), "the list of apps that are handed an intent:// address"
+    assert set(apps.group(1).split("|")) == {"Instagram", "FBAN", "FBAV", "FB_IAB", "TikTok", "musical_ly", "trill_", "BytedanceWebview", "Snapchat", "Line\\/"}
     assert "if (/iPhone|iPad|iPod/i.test(ua || '')) return `x-safari-https://${m[1]}`" in hand
     assert "package=" not in hand and "chrome" not in hand.lower(), "no hard dependency on Chrome"
     assert r"/^https:\/\/(.+)$/" in hand and "if (!m) return ''" in hand, "only an https link has such an address"
@@ -254,11 +352,18 @@ def test_join_opens_the_sign_up_modal_once_and_comes_off_the_address():
             "catch { return false } })()") in src, "?join=1 is read once, at load"
     block = _block(src, r'^  // ── Arrived from "Open in browser"', r"^  // ── /api/config")
     assert "window.history.replaceState(window.history.state, '', withoutJoin(window.location))" in block
-    assert "if (!JOIN_IN_URL) return" in block and "if (!JOIN_IN_URL || authLoading || joinAsked.current) return" in block
-    assert "joinAsked.current = true" in block, "the modal opens once per page load"
-    assert "if (!session && authEnabled && !AUTH_URL_ERR && !RECOVERY_IN_URL) openLogin('signup')" in block, \
-        "only with nobody signed in, and never over a link that came back with an error or for a password reset"
+    assert "if (!JOIN_IN_URL) return" in block
+    # the decision is one pure function (verify-free-mode.mjs runs it; verify-login-flows.mjs watches it happen)
+    assert ("const open = joinAnswer({ join: JOIN_IN_URL, authLoading, asked: joinAsked.current, session, authEnabled, "
+            "urlErr: AUTH_URL_ERR, recovery: RECOVERY_IN_URL })") in block
+    assert block.index("if (open === null) return") < block.index("joinAsked.current = true") < block.index("if (open) openLogin('signup')"), \
+        "nothing to answer yet -> wait; then answered once per page load; then open or not"
+    assert block.count("openLogin(") == 1
     assert "}, [authLoading])" in block, "it waits for the session restore to answer"
+    answer = _block(src, r"^function joinAnswer\(\{ join, authLoading, asked, session, authEnabled, urlErr, recovery \}\) \{", r"^\}\n")
+    assert "if (!join || authLoading || asked) return null" in answer
+    assert "return !session && !!authEnabled && !urlErr && !recovery" in answer, \
+        "only with nobody signed in, and never over a link that came back with an error or for a password reset"
     for leak in ("signinStash", "gateNote", "openGate(", "setSession", "sb.auth"):
         assert leak not in block, f"?join=1 must not touch {leak}"
     without = _block(src, r"^function withoutJoin\(loc\) \{", r"^\}\n")
@@ -278,9 +383,27 @@ def test_the_referral_capture_the_oauth_return_and_recovery_are_as_they_were():
     assert "const sb = (() => { try { return createClient(SB_URL, SB_ANON) }" in src
     assert "sbClient.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } })" in src
     assert "await sbClient.auth.updateUser({ password: pw })" in _block(src, r"^function SetPasswordModal\(", r"^\}\n")
-    # an email link that came back expired opens the modal on the view where a password can be typed
+
+
+def test_only_an_expired_email_link_opens_the_email_view_a_failed_google_return_keeps_the_google_button():
+    """The error a sign-in comes back with was called "an expired link" whenever its description said "invalid" or
+    "expired". Supabase answers a Google sign-in whose state went stale (a visitor who took a few minutes at
+    Google) with error_code=bad_oauth_state, "OAuth callback with invalid state": that opened the email-only view,
+    with "that link has expired... try signing in with your password", for someone who has no password and whose
+    only way to an account is the Google button that view does not have."""
+    src = _src()
     err = _block(src, r"^  // ── OAuth / email-link errors", r'^  // ── Arrived from "Open in browser"')
-    assert "openLogin('signin', { type: 'error', text: expired ? t.linkExpired : t.authLinkError, byEmail: expired })" in err
+    assert "const { key, byEmail } = authUrlNotice(e)" in err
+    assert "openLogin('signin', { type: 'error', text: t[key], byEmail })" in err
+    assert "const expired" not in err and "t.linkExpired" not in err, "no second opinion on what the error was"
+    notice = _block(src, r"^function authUrlNotice\(e\) \{", r"^\}\n")
+    assert "const emailLink = e?.code === 'otp_expired' || /email link/i.test(e?.desc || '')" in notice
+    assert "return { key: emailLink ? 'linkExpired' : 'authLinkError', byEmail: emailLink }" in notice
+    assert "/expired|invalid/i" not in src, "the test that took any 'invalid' for an email link"
+    # both texts exist, in both languages
+    for lang in ("en", "ar"):
+        for key in ("linkExpired", "authLinkError"):
+            _line(_pack(src, lang), key)
 
 
 # ── 4. the words ──────────────────────────────────────────────────────────────
@@ -303,10 +426,14 @@ def test_the_title_and_sub_are_short_and_true():
     assert _line(en, "emailSignInLink") == "    emailSignInLink: 'Signed up with email? Sign in with email',"
     assert _line(ar, "loginTitleSignup") == "    loginTitleSignup: 'أنشئ حسابك المجاني',"
     assert _line(ar, "loginSubSignup") == "    loginSubSignup: 'تابِع عبر Google. بدون كلمة مرور وبدون بطاقة.',"
-    # the notice names no app that was not detected (and no browser the phone may not have)
+    # the notice names no app that was not detected (and no browser the phone may not have); nor does the
+    # downloads banner on the same page, nor the wrong-password line of the in-app view
     for pack in (en, ar):
-        for key in ("inAppGoogle", "openManual"):
+        for key in ("inAppGoogle", "openManual", "inAppBanner", "wrongPasswordInApp"):
             assert not re.search(r"Instagram|Facebook|TikTok|Snapchat|Safari|Chrome", _line(pack, key)), key
+    assert "inside this app" in _line(en, "inAppBanner") and "داخل هذا التطبيق" in _line(ar, "inAppBanner")
+    assert "open Alimne in your browser and sign in with Google." in _line(en, "wrongPasswordInApp")
+    assert "فافتح علّمني في متصفحك وسجّل الدخول عبر Google." in _line(ar, "wrongPasswordInApp")
     assert "not allowed inside this app" in _line(en, "inAppGoogle") and "غير مسموح به داخل هذا التطبيق" in _line(ar, "inAppGoogle")
     assert _line(en, "orEmailSignup") == "    orEmailSignup: 'or sign up with email here',"
 
@@ -315,7 +442,7 @@ def test_the_copy_of_the_old_email_first_modal_is_gone():
     src = _src()
     for dead in ("orDivider", "Free, no card needed — create your account in a minute.", "مجاني وبدون بطاقة — أنشئ حسابك خلال دقيقة.",
                  "or use email below", "أو استخدم البريد الإلكتروني بالأسفل", "Use Continue with Google.", "'Create your account'",
-                 "'Sign in to your account'", "doesn't work inside this app"):
+                 "'Sign in to your account'", "doesn't work inside this app", "inside Instagram/TikTok", "داخل Instagram/TikTok"):
         assert dead not in src, f"stale sign-up copy still in App_dev.jsx: {dead!r}"
     # every key the modal reads exists in the pack (a typo would render nothing, silently)
     modal = _modal(src)
@@ -344,6 +471,13 @@ def test_the_in_app_terms_say_how_an_account_is_made_and_what_it_keeps():
     for legacy in ("TERMS_EN_LEGACY", "TERMS_AR_LEGACY", "TERMS_EN_TAIL", "TERMS_AR_TAIL"):
         body = _block(src, r"^const %s = `" % legacy, r"^`|`\n")
         assert "Accounts are created with Google" not in body and "يُنشأ الحساب عبر Google" not in body
+    # section 7 ("This service relies on") names Google, as /privacy does: it is the way an account is made.
+    # It is in the part both modes share, where it is equally true (the sign-in dialog is the same one).
+    en_tail, ar_tail = _block(src, r"^const TERMS_EN_TAIL = `", r"`"), _block(src, r"^const TERMS_AR_TAIL = `", r"`")
+    en_line = "• Google: for sign-in with your Google account (subject to Google's terms at policies.google.com)."
+    ar_line = "• Google: لتسجيل الدخول بحسابك في Google (خاضع لشروط Google على policies.google.com)."
+    assert en_line in en_tail[en_tail.index("7. THIRD-PARTY SERVICES"):en_tail.index("8. LIMITATION OF LIABILITY")]
+    assert ar_line in ar_tail[ar_tail.index("٧. الخدمات الخارجية"):ar_tail.index("٨. تحديد المسؤولية")]
 
 
 # ── 6. /terms and /privacy ────────────────────────────────────────────────────
@@ -401,9 +535,13 @@ def test_the_served_bundle_is_the_google_only_client():
                    "Back to Google sign-in", "Google sign-in is not allowed inside this app.", "Open in browser",
                    "or sign up with email here", "#Intent;scheme=https;end", "x-safari-https://", "/?join=1",
                    "أنشئ حسابك المجاني", "فتح في المتصفح", "أو أنشئ حسابك بالبريد الإلكتروني هنا",
-                   "Accounts are created with Google", "We never see your Google password"):
+                   "Accounts are created with Google", "We never see your Google password",
+                   # after review: the wider test for an embedded browser, the named dialog, the reworded lines
+                   "LinkedInApp", "MicroMessenger", "login-title", "open Alimne in your browser and sign in with Google.",
+                   "Downloads may not work inside this app.", "Google: for sign-in with your Google account"):
         assert marker in js, f"{name} is missing {marker!r} - rebuild: cd frontend && npm run build"
-    for stale in ("create your account in a minute", "or use email below", "Use Continue with Google.", "doesn't work inside this app"):
+    for stale in ("create your account in a minute", "or use email below", "Use Continue with Google.", "doesn't work inside this app",
+                  "inside Instagram/TikTok"):
         assert stale not in js, f"{name} still ships the old sign-up copy {stale!r} - rebuild: cd frontend && npm run build"
     assert js.count(".auth.signUp(") == 1, "one sign-up call in the bundle"
 
@@ -411,7 +549,9 @@ def test_the_served_bundle_is_the_google_only_client():
 def test_the_node_script_checks_the_rendered_modal_in_both_browsers():
     script = _read(VERIFY)
     for must in ("13. Google-only sign-up: the modal in a normal browser", "13b. Google-only sign-up: the way out of an in-app browser",
-                 "13c. Google-only sign-up: the Terms say how an account is made", "'?in-app'", "MI.IN_APP === true"):
+                 "13c. Google-only sign-up: the Terms say how an account is made", "'?in-app'", "MI.IN_APP === true",
+                 "13d. Google-only sign-up: where Google is blocked", "'?ios-webview'", "MW.IN_APP === false && MW.GOOGLE_BLOCKED === true",
+                 "'?in-app-join'", "bad_oauth_state", "M.joinAnswer", "M.authUrlNotice", "M.googleBlockedIn"):
         assert must in script, f"verify-free-mode.mjs lost its check: {must}"
     keys = re.search(r"const LOGIN_KEYS = \[(.*?)\]", script, re.S).group(1)
     assert sorted(re.findall(r"'(\w+)'", keys)) == sorted(LOGIN_KEYS), "the node script and this file check the same copy"
@@ -421,3 +561,40 @@ def test_the_manual_describes_google_only_sign_up():
     doc = _read(MANUAL)
     for must in ("Continue with Google", "in-app browser", "`?join=1`", "Open in browser", "x-safari-https"):
         assert must in doc, f"docs/FREE-MODE.md does not mention {must!r}"
+
+
+def test_the_manual_does_not_overstate_what_the_client_side_rule_holds():
+    """The rule "email sign-up only inside an in-app browser" lives in the shipped client alone: Supabase's email
+    sign-up stays open (the fallback needs it), and its address and public key are in the bundle. The manual said an
+    email account "can only be created" in-app and that email confirmation "only matters" for those accounts, which
+    invites turning confirmation off: the one check on scripted email accounts (40 guides a day each)."""
+    doc = re.sub(r"\s+", " ", _read(MANUAL))
+    for gone in ("It only matters for accounts made inside in-app browsers now", "An email account can only be created inside an in-app browser",
+                 "Email sign-ups now come from in-app browsers only",
+                 # ...and the sentence about a case the client no longer produces
+                 "An email confirmation link opens a new tab: the file stays in the first tab, which becomes signed in too"):
+        assert gone not in doc, f"docs/FREE-MODE.md still says: {gone!r}"
+    for must in ("enforced by the shipped client only", "Keep email confirmation ON", "`GOOGLE_BLOCKED`", "`bad_oauth_state`",
+                 "verify-login-flows.mjs", "presents itself as a normal browser"):
+        assert must in doc, f"docs/FREE-MODE.md does not mention {must!r}"
+    # true because the sign-up endpoint is reachable from anywhere with what the bundle ships
+    src = _src()
+    assert "const SB_URL  = 'https://" in src and "const SB_ANON = '" in src
+    assert re.search(r'^FAIR_USER_DAILY\s*=\s*_env_num\("FAIR_USER_DAILY", 40\)', _read(os.path.join(ROOT, "app.py")), re.M), "40 guides a day per account"
+
+
+# ── 8. the dialog in a real browser ───────────────────────────────────────────
+_HAVE_NODE = shutil.which("node")
+
+
+@pytest.mark.skipif(not _HAVE_NODE, reason="node not available")
+def test_the_login_flows_in_a_real_browser():
+    """Drives the bundle in dist/ in a local headless Chrome / Edge, offline (the script answers every request
+    itself): ?join=1 on arrival, a failed Google return, the keyboard focus, a double tap, which Supabase call a
+    normal browser and an in-app one can make, and "Open in browser". Skipped where no such browser is installed."""
+    r = subprocess.run(["node", FLOWS], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=420)
+    if r.returncode == 77:
+        pytest.skip((r.stdout.strip().splitlines() or ["no browser"])[-1])
+    assert r.returncode == 0, "verify-login-flows.mjs failed:\n" + "\n".join(
+        [l for l in r.stdout.splitlines() if "FAIL" in l or "passed" in l][-40:]) + "\n" + r.stderr[-2000:]
+    assert re.search(r"^\d+ passed, 0 failed$", r.stdout.strip().splitlines()[-1])
