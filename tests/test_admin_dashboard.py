@@ -14,6 +14,9 @@ WHAT THIS GUARDS
     4. Free mode has no Tokens column, no "+ Tokens" action and no MRR card; legacy
        mode (ALIMNE_FREE_MODE=0) gets them back exactly.
     5. /admin still needs the cookie or the X-Admin-Token header.
+    6. A bad ROW can never take the page down: a date that cannot be real (year
+       9999), a number that is not one, a row that is not a row. The helpers skip
+       it, and every section is guarded a second time around them.
 
 EVERYTHING IS OFFLINE: Supabase is an in-memory fake that really applies the
 filters, the order and the limit of each query. The token is a dummy test value.
@@ -350,6 +353,9 @@ def test_signup_stats_accepts_a_naive_now_as_utc():
 @pytest.mark.parametrize("junk", [
     None, "", "not a date", 0, 12345, 3.5, [], {}, object(), "9" * 5000, "2026-13-45T99:99:99Z",
     "0001-01-01T00:00:00+14:00", "9999-12-31T23:59:59-14:00", '2026-10-06"><script>alert(1)</script>',
+    # what Postgres can hold in a timestamptz and Python's calendar cannot
+    "infinity", "-infinity", "10000-01-01T00:00:00+00:00", "294276-12-31T23:59:59+00:00",
+    "0044-03-15T00:00:00+00:00 BC",
 ])
 def test_timestamp_parser_never_raises(junk):
     assert appmod._admin_ts(junk) is None
@@ -562,6 +568,128 @@ def test_user_activity_needs_a_counted_guide_not_just_a_counter_row():
     # ... and so the funnel's last step does not count the refused account either
     users = [_user(1, NOW - timedelta(hours=2)), _user(7, NOW - timedelta(hours=2))]
     assert appmod._admin_funnel([], [], users, NOW, 3, activity=a)["steps"][-1]["value"] == 1
+
+
+# Dates no row of Alimne can really carry. Every one of them parses as a date.
+IMPOSSIBLE = ["9999-12-31T23:59:59+00:00", "9999-12-31T23:59:59.999999Z", "9999-12-31 23:59:59+00", "9999-12-31",
+              "0001-01-01T00:00:00+00:00", "0001-01-01", "1969-12-31T23:59:59Z", "2300-01-01T00:00:00Z"]
+
+
+@pytest.mark.parametrize("when", IMPOSSIBLE + [datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC), datetime.max,
+                                               datetime.min, datetime(1970, 1, 1)])
+def test_a_date_outside_the_years_alimne_can_have_is_not_a_date(when):
+    assert appmod._admin_ts(when) is None
+    assert appmod._admin_date(when) == "" and appmod._admin_when(when) == "—"
+
+
+def test_dates_inside_the_range_still_parse():
+    for text in ("2000-01-01T00:00:00Z", "2024-02-29T12:00:00+00:00", "2099-12-31T23:59:59Z"):
+        assert appmod._admin_ts(text) is not None, text
+
+
+@pytest.mark.parametrize("start", IMPOSSIBLE + ["2026-10-09T00:30:00+00:00"])      # ... or 2 days ahead of the clock
+def test_a_counter_whose_window_cannot_be_real_counts_nothing(start):
+    row = {"key": "fair:global", "count": 1900, "window_start": start, "last_at": start}
+    assert appmod._admin_counter_now(row, NOW) == (0, None)
+    b = appmod._admin_budget([row, dict(row, key="fair:global:anon")], NOW, 2000, 1200)
+    assert (b["used"], b["pct"], b["warn"], b["resets_in_s"]) == (0, 0.0, False, None)
+    assert (b["anon"]["used"], b["anon"]["resets_in_s"]) == (0, None)
+
+
+def test_a_counter_tolerates_clock_skew_and_a_naive_now():
+    row = {"count": 5, "window_start": _iso(NOW + timedelta(seconds=40))}       # the database clock is a little ahead
+    used, left = appmod._admin_counter_now(row, NOW)
+    assert used == 5 and 24 * 3600 <= left <= 24 * 3600 + 40
+    assert appmod._admin_counter_now({"count": 5, "window_start": _iso(NOW - timedelta(hours=1))},
+                                     datetime(2026, 10, 7, 0, 30)) == (5, 23 * 3600)
+    # a window length the calendar cannot hold never ends: the count stands, there is no reset to show
+    for hours in (10 ** 8, 10 ** 12, 10 ** 30):
+        assert appmod._admin_counter_now({"count": 5, "window_start": _iso(NOW)}, NOW, window_hours=hours) == (5, None)
+
+
+@pytest.mark.parametrize("when", IMPOSSIBLE)
+def test_helpers_skip_a_row_with_an_impossible_date(when):
+    # an anonymous device "last seen" then is not a device of the last 7 days
+    g = appmod._admin_gate_devices([{"key": "gate:dev:z", "count": 3, "last_at": when},
+                                    _counter("gate:dev:a", 3, NOW - timedelta(hours=1))], 3, NOW)
+    assert (g["devices"], g["at_gate"]) == (1, 1)
+    # an account's counter keeps its guides, without a date and outside any running window
+    a = appmod._admin_user_activity([{"key": f"fair:user:{_uid(1)}", "count": 2, "window_start": when, "last_at": when}], NOW)
+    assert a == {_uid(1): {"last_at": None, "recent": 0}}
+    # a visit day counts in the all-time total only; an account signed up "then" is in no day and no funnel
+    v = appmod._admin_visits([{"day": when, "count": 7}, {"day": "2026-10-07", "count": 5}], NOW)
+    assert (v["total"], v["today"], v["window"]) == (12, 5, 5)
+    users = [{"id": _uid(1), "created_at": when}, _user(2, NOW - timedelta(minutes=10))]
+    s = appmod._admin_signup_stats(users, NOW)
+    assert (s["today"], s["last7"], s["total"]) == (1, 1, 2)
+    f = appmod._admin_funnel([], [], users, NOW, 3)
+    assert f["steps"][3]["value"] == 1
+
+
+def test_rows_from_the_near_future_are_not_counted_in_the_window():
+    """A date a few years ahead is inside the calendar, yet no device was last
+    seen then and no account signed up then."""
+    ahead = _iso(NOW + timedelta(days=400))
+    g = appmod._admin_gate_devices([{"key": "gate:dev:z", "count": 3, "last_at": ahead}], 3, NOW)
+    assert (g["devices"], g["at_gate"]) == (0, 0)
+    a = appmod._admin_user_activity([{"key": f"fair:user:{_uid(1)}", "count": 2, "window_start": ahead, "last_at": ahead}], NOW)
+    assert a == {_uid(1): {"last_at": None, "recent": 0}}
+    users = [_user(1, ahead), _user(2, NOW - timedelta(hours=1))]
+    f = appmod._admin_funnel([], [], users, NOW, 3)
+    s = appmod._admin_signup_stats(users, NOW)
+    assert f["steps"][3]["value"] == s["last7"] == 1            # the funnel and the sign-up cards agree
+
+
+JUNK_ROWS = [
+    None, "garbage", 7, 2.5, [], {}, {"key": None}, {"key": 5, "count": 5}, {"key": ["fair:global"], "count": 1},
+    {"key": "fair:global", "count": 10 ** 400, "window_start": "2026-10-07T00:00:00+00:00", "last_at": []},
+    {"key": "fair:global:anon", "count": float("inf"), "window_start": "9999-12-31T23:59:59Z"},
+    {"key": "fair:user:" + _uid(1), "count": float("nan"), "window_start": [], "last_at": {}},
+    {"key": "fair:user:" + _uid(2), "count": "9" * 5000, "window_start": "9999-12-31T23:59:59Z", "last_at": "0001-01-01"},
+    {"key": "fair:user:" + _uid(3), "count": 2, "window_start": datetime.max, "last_at": datetime.min},
+    {"key": "gate:dev:x", "count": 3, "last_at": "9999-12-31T23:59:59+00:00"},
+    {"key": "gate:dev:y", "count": True, "last_at": 12345},
+    {"key": "gate:dev:z", "count": 10 ** 400, "last_at": "2026-10-06T00:00:00Z"},
+    {"day": "9999-12-31", "count": 10 ** 400}, {"day": {}, "count": []}, {"day": "2026-10-07", "count": float("inf")},
+    {"day": "2026-10-06", "count": "9" * 5000},
+    {"created_at": "9999-12-31T23:59:59Z", "id": [], "generations_count": {}},
+    {"created_at": 10 ** 400, "id": None, "generations_count": 10 ** 400},
+    {"created_at": datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC), "id": {}}, {"created_at": datetime.max},
+    {"created_at": datetime.min, "generations_count": float("nan")},
+]
+
+
+def test_every_data_helper_is_total_over_junk_rows():
+    """No row, whatever is in it, may raise out of a helper."""
+    for now in (NOW, datetime(2026, 10, 7, 0, 30), datetime(2026, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)):
+        appmod._admin_signup_stats(JUNK_ROWS, now, total=10 ** 400)
+        appmod._admin_visits(JUNK_ROWS, now)
+        a = appmod._admin_user_activity(JUNK_ROWS, now)
+        for limit in (3, 0, 10 ** 400, "x", None, float("nan")):
+            appmod._admin_gate_devices(JUNK_ROWS, limit, now)
+            for exact in (None, (10 ** 400, "x"), (5,), "ab", 7, (None, None), (float("inf"), float("nan"))):
+                appmod._admin_funnel(JUNK_ROWS, JUNK_ROWS, JUNK_ROWS, now, limit, activity=a, device_counts=exact)
+        for limit in (2000, 0, -5, 10 ** 400, "x", None, float("inf")):
+            appmod._admin_budget(JUNK_ROWS, now, limit, limit)
+        for row in JUNK_ROWS:
+            for hours in (24, 0, -1, 10 ** 30):
+                appmod._admin_counter_now(row, now, hours)
+            if isinstance(row, dict):
+                appmod._admin_made_guide(row, a)
+                appmod._admin_legacy_sub(row)
+    assert set(a) == {_uid(3)}                                   # the one junk counter that still says "2 guides"
+
+
+def test_numbers_that_are_not_numbers():
+    for junk in (10 ** 400, -10 ** 400, "9" * 5000, "9" * 300, float("inf"), float("-inf"), float("nan"), [], {}, None, True):
+        assert appmod._admin_int(junk) == 0 and appmod._admin_int(junk, 3) == 3, junk
+    assert appmod._admin_int("12") == 12 and appmod._admin_int(7.9) == 7 and appmod._admin_int(-4) == -4
+    assert appmod._admin_rate(10 ** 400, 1) is None and appmod._admin_rate(1, "x") is None
+    assert appmod._admin_rate("x", 4) is None and appmod._admin_rate(None, None) is None
+    for junk in (float("nan"), float("inf"), float("-inf"), "x", [], 10 ** 400):
+        assert appmod._admin_pct(junk) == "-" and appmod._admin_pct(junk, cap=1.0) == "-", junk
+    assert appmod._admin_duration(10 ** 400) and appmod._admin_duration(float("inf")) == "—"
+    assert appmod._admin_duration("x") == "—" and appmod._admin_duration(3700) == "1 h 1 min"
 
 
 # ═════════════════════════ 2. the page ═══════════════════════════════════════════
@@ -832,6 +960,183 @@ def test_queries_work_on_the_real_postgrest_builder(client, monkeypatch):
     assert len(seen) >= 6
     assert all("limit=" in s for s in seen), seen
     assert any("key=like.gate%3Adev%3A%25" in s and "last_at=gte.2026-10-01T00%3A00%3A00Z" in s for s in seen), seen
+
+
+# ── a bad row can never take the page down ──────────────────────────────────────
+STEADY = ("signups-today", "signups-yesterday", "signups-7d", "funnel-visits", "funnel-devices", "funnel-gate",
+          "funnel-accounts", "funnel-activated", "gate-signup-rate", "budget-used", "budget-pct", "budget-anon-pct",
+          "gens-total", "accounts-active")
+
+
+def _status(client):
+    return client.get("/admin", headers=HDR).status_code
+
+
+@pytest.mark.parametrize("when", IMPOSSIBLE)
+def test_a_budget_counter_with_an_impossible_window_does_not_take_the_page_down(client, monkeypatch, when):
+    """The reported case: one anon_usage row with window_start in the year 9999."""
+    sb = sample_db()
+    for r in sb.tables["anon_usage"]:
+        if r["key"] in ("fair:global", "fair:global:anon"):
+            r["window_start"] = when
+    _use(monkeypatch, sb)
+    assert _status(client) == 200
+    html = _page(client)
+    assert (_num(html, "budget-used"), _num(html, "budget-pct"), _num(html, "budget-anon-pct")) == ("0", "0%", "0%")
+    assert "no guide counted in the current window" in html
+    assert _num(html, "signups-total") == "40" and _num(html, "funnel-devices") == "120"
+    assert "could not" not in html.lower()                       # a skipped row is not a failed read
+
+
+@pytest.mark.parametrize("when", IMPOSSIBLE)
+def test_rows_with_impossible_dates_change_nothing_on_the_page(client, monkeypatch, when):
+    base = _page_of(client, monkeypatch, sample_db())
+    sb = sample_db()
+    odd = _user(41, when, email="odd@example.com", last_used_at=when, subscription_period_end=when,
+                subscription_status="active", subscription_id="sub_legacy_9")
+    sb.tables["users"].append(odd)
+    a = sb.tables["anon_usage"]
+    a.append({"key": "gate:dev:" + "e" * 32, "count": 3, "window_start": when, "last_at": when})
+    a.append({"key": f"fair:user:{_uid(1)}", "count": 2, "window_start": when, "last_at": when})   # a token-era account
+    a.append({"key": f"fair:user:{odd['id']}", "count": 1, "window_start": when, "last_at": when})
+    a.append({"key": "fair:global:zz", "count": 9, "window_start": when, "last_at": when})
+    sb.tables["visit_stats"].append({"day": when, "count": 7})
+    sb.tables["usage_events"].append({"kind": "anon", "source": "file", "city": "Dubai", "country": "AE", "created_at": when})
+    sb.tables["leads"].append({"email": "odd-lead@example.com", "source": "paywall", "created_at": when})
+    _use(monkeypatch, sb)
+    assert _status(client) == 200
+    html = _page(client)
+    for key in STEADY:
+        want = {"gens-total": "8", "accounts-active": "17"}.get(key, _num(base, key))   # one more event, one more active account
+        assert _num(html, key) == want, key
+    assert _num(html, "signups-total") == "41"                   # the odd account exists, in no day
+    assert _num(html, "visits-total") == f"{int(_num(base, 'visits-total').replace(',', '')) + 7:,}"
+    assert "could not" not in html.lower()
+    # the date that cannot be real is shown nowhere: not as text, not in an attribute
+    d = _doc(html)
+    year = when[:4]
+    assert not re.search(r"\b%s-\d\d-\d\d" % year, " ".join(d.text))
+    assert all(not re.search(r"\b%s-\d\d-\d\d" % year, v or "") for _, at in d.attrs for v in at.values())
+    rows = {r["data-email"]: r for r in d.rows}
+    assert len(rows) == 41
+    assert (rows["odd@example.com"]["data-joined"], rows["odd@example.com"]["data-lastused"],
+            rows["odd@example.com"]["data-renews"]) == ("", "", "")
+    assert rows["odd@example.com"]["data-used"] == "1" and rows["odd@example.com"]["data-legacy"] == "1"
+    assert rows["user1@example.com"]["data-lastused"] == "2026-09-27"      # its real, older date stays
+    assert "odd-lead@example.com" in html
+
+
+def test_junk_rows_in_every_table_never_take_the_page_down(client, monkeypatch):
+    sb = sample_db()
+    for table in ("users", "anon_usage", "visit_stats", "usage_events", "leads"):
+        sb.tables[table].extend(r for r in JUNK_ROWS if isinstance(r, dict))
+    for free in (True, False):
+        monkeypatch.setattr(appmod, "FREE_MODE", free)
+        _use(monkeypatch, sb)
+        assert _status(client) == 200
+        html = _page(client)
+        for s in SECTIONS:
+            assert f'id="{s}"' in html
+        assert "user1@example.com" in html and "9999" not in html
+
+
+def test_text_that_cannot_be_encoded_never_takes_the_page_down(client, monkeypatch):
+    """A lone surrogate (what a JSON "\\ud83d" without its other half becomes) cannot
+    be written as UTF-8: the response would fail AFTER the page was built."""
+    sb = sample_db()
+    sb.tables["users"][0].update(name="Broken \ud83d name", email="lone\udc00@example.com",
+                                 referral_code="\ud800", subscription_status="\udfff")
+    sb.tables["leads"].append({"email": "x\ud800@example.com", "source": "\udfff", "created_at": _iso(NOW)})
+    sb.tables["usage_events"].append({"kind": "\ud800", "source": "\ud800", "city": "\ud800", "country": "",
+                                      "created_at": _iso(NOW)})
+    _use(monkeypatch, sb)
+    monkeypatch.setattr(appmod, "_visitors", [{"ip": "1.2.3.4\ud800", "time": "t", "path": "/\ud800", "ua": "ua \udc00",
+                                               "isp": "\ud800", "city": "\udbff", "country": "\ud800"}])
+    monkeypatch.setattr(appmod, "_blocked_ips", {"9.9.9.9\ud800"})
+    for free in (True, False):
+        monkeypatch.setattr(appmod, "FREE_MODE", free)
+        r = client.get("/admin", headers=HDR)
+        assert r.status_code == 200
+        html = r.get_data().decode("utf-8")                       # valid UTF-8, all of it
+        assert "Broken ? name" in html and "lone?@example.com" in html
+        assert _num(html, "signups-total") == "40" and len(_doc(html).rows) == 40
+
+
+GUARDED = ["_admin_user_activity", "_admin_signup_stats", "_admin_funnel", "_admin_visits", "_admin_budget",
+           "_admin_gen_gate", "_admin_signups_html", "_admin_funnel_html", "_admin_budget_html",
+           "_admin_legacy_sub", "_admin_date", "_admin_when"]
+
+
+@pytest.mark.parametrize("free", [True, False])
+@pytest.mark.parametrize("helper", GUARDED)
+def test_a_section_that_cannot_be_computed_never_takes_the_page_down(client, monkeypatch, helper, free):
+    """The second guard: even if a helper did raise on some row, the page still
+    renders, says which part is missing, and shows nothing of the error itself."""
+    def boom(*args, **kwargs):
+        raise OverflowError(DB_ERROR_CANARY)
+    monkeypatch.setattr(appmod, "FREE_MODE", free)
+    monkeypatch.setattr(appmod, helper, boom)
+    _use(monkeypatch, sample_db())
+    assert _status(client) == 200
+    html = _page(client)
+    pos = [html.index(f'id="{s}"') for s in SECTIONS]
+    assert pos == sorted(pos)
+    assert "could not" in html.lower() and "OverflowError" in html
+    assert DB_ERROR_CANARY not in html
+    assert "Recent visitors" in html and 'id="subTable"' in html and "function subFilter" in html
+    # a number made from the part that failed is "-", never a real-looking 0
+    dashes = {"_admin_signup_stats": ("signups-today", "signups-7d", "signups-total"),
+              "_admin_funnel": ("funnel-visits", "funnel-devices", "funnel-gate", "funnel-accounts",
+                                "funnel-activated", "gate-signup-rate"),
+              "_admin_visits": ("visits-total",), "_admin_budget": ("budget-used", "budget-pct"),
+              "_admin_user_activity": ("funnel-activated", "accounts-active"),
+              "_admin_legacy_sub": ("accounts-active",), "_admin_date": ("accounts-active",)}.get(helper, ())
+    for key in dashes:
+        assert _num(html, key) == "-", key
+    # ... and what does not depend on it is still right
+    if helper not in ("_admin_signup_stats", "_admin_signups_html"):
+        assert _num(html, "signups-total") == "40" and _num(html, "signups-7d") == "27"
+    if helper not in ("_admin_budget", "_admin_budget_html"):
+        assert _num(html, "budget-pct") == "61%"
+    if helper not in ("_admin_legacy_sub", "_admin_date"):
+        assert "user1@example.com" in html and len(_doc(html).rows) == 40
+
+
+def test_one_account_row_that_cannot_be_shown_is_skipped_and_said(client, monkeypatch):
+    real = appmod._admin_legacy_sub
+
+    def picky(user):
+        if user.get("email") == "user7@example.com":
+            raise ValueError(DB_ERROR_CANARY)
+        return real(user)
+    monkeypatch.setattr(appmod, "_admin_legacy_sub", picky)
+    html = _page_of(client, monkeypatch, sample_db())
+    d = _doc(html)
+    assert len(d.rows) == 39 and "user7@example.com" not in html and "user8@example.com" in html
+    note = re.search(r'<p class="note err" data-err="user-rows">(.*?)</p>', html, re.S).group(1)
+    assert "1 account row could not be shown" in note and DB_ERROR_CANARY not in html
+    assert _num(html, "signups-total") == "40" and _num(html, "funnel-accounts") == "27"   # counted all the same
+
+
+def test_generation_and_lead_rows_that_cannot_be_shown_are_skipped_and_said(client, monkeypatch):
+    def boom(value):
+        raise ValueError(DB_ERROR_CANARY)
+    monkeypatch.setattr(appmod, "_admin_when", boom)
+    html = _page_of(client, monkeypatch, sample_db())
+    assert re.search(r'data-err="generation-rows">7 rows could not be shown', html)
+    assert re.search(r'data-err="lead-rows">1 row could not be shown', html)
+    assert DB_ERROR_CANARY not in html and _num(html, "gens-total") == "7"
+
+
+def test_a_failed_computation_is_logged_without_any_row_data(client, monkeypatch, caplog):
+    def boom(*args, **kwargs):
+        raise ValueError("secret-looking row value user1@example.com")
+    monkeypatch.setattr(appmod, "_admin_budget", boom)
+    with caplog.at_level("WARNING", logger="app"):
+        _page_of(client, monkeypatch, sample_db())
+    lines = [r.getMessage() for r in caplog.records if "admin dashboard" in r.getMessage()]
+    assert lines and all("ValueError" in m for m in lines)
+    assert not any("user1@example.com" in m or "secret-looking" in m for m in lines)
 
 
 # ═════════════════════════ 3. escaping and secrets ═══════════════════════════════

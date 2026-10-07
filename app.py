@@ -1804,7 +1804,10 @@ def admin_session():
 # and today's AI budget. The helpers below are PURE: plain lists/dicts in, plain
 # dicts out, no Flask and no Supabase, so they are unit-tested directly
 # (tests/test_admin_dashboard.py). _admin_load() does every database read;
-# admin_page() only renders. Every value they are handed may be junk or hostile.
+# admin_page() only renders. Every value they are handed may be junk or hostile:
+# the helpers are TOTAL (they skip a row they cannot read, they never raise), and
+# admin_page guards every block a second time (_admin_safe, _admin_section), so
+# no row, whatever is in it, can take the page down.
 import datetime as _admin_dt     # module level on purpose: never a lazy import inside a request thread
 
 _ADMIN_USERS_MAX     = 2000   # newest accounts loaded (table + day counts); the total is an exact count
@@ -1816,6 +1819,12 @@ _ADMIN_USER_COLS = ("id,email,name,created_at,generations_count,last_used_at,ref
                     "subscription_period_end,tokens_remaining")
 _ADMIN_DOW = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _ADMIN_MON = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+# Sanity bounds for what a row may hold. A row is skipped past them, never trusted:
+# one '9999-12-31' in a timestamp column would overflow the first sum made with it.
+_ADMIN_TS_MIN  = _admin_dt.datetime(2000, 1, 1, tzinfo=_admin_dt.timezone.utc)   # no row of Alimne is older ...
+_ADMIN_TS_MAX  = _admin_dt.datetime(2100, 1, 1, tzinfo=_admin_dt.timezone.utc)   # ... or this far ahead
+_ADMIN_SKEW    = _admin_dt.timedelta(days=1)   # how far ahead of this server's clock a database time is still believed
+_ADMIN_INT_MAX = 10 ** 15                      # no count of anything here is bigger
 
 def _admin_now():
     """The dashboard's clock: aware UTC 'now' (one place, so tests can pin it)."""
@@ -1829,31 +1838,36 @@ def _admin_utc(now):
 
 def _admin_ts(v):
     """A Supabase timestamp (or a 'YYYY-MM-DD' day) → aware UTC datetime, or None.
-    Never raises, whatever it is given."""
+    Never raises, whatever it is given. A date outside 2000-2099 is not a date a
+    row of Alimne can carry (corrupt, or edited by hand), so it is None as well:
+    whoever asked then skips the row instead of doing sums with it."""
     try:
         if isinstance(v, _admin_dt.datetime):
-            return _admin_utc(v)
-        if not isinstance(v, str) or len(v) > 40:
+            d = _admin_utc(v)
+        elif not isinstance(v, str) or len(v) > 40:
             return None
-        d = _parse_ts(v)
-        return d.astimezone(_admin_dt.timezone.utc) if d else None
-    except (ValueError, OverflowError, OSError):
+        else:
+            d = _parse_ts(v)
+            d = d.astimezone(_admin_dt.timezone.utc) if d else None
+        return d if (d is not None and _ADMIN_TS_MIN <= d < _ADMIN_TS_MAX) else None
+    except (ValueError, OverflowError, OSError, TypeError):
         return None
 
 def _admin_int(v, default=0):
-    """A database number as an int; anything else (None, text, a mock) → default."""
+    """A database number as an int; anything else (None, text, a mock, inf / nan, a
+    value too big to be a count of anything) → default. Never raises."""
     if isinstance(v, bool):
         return default
-    if isinstance(v, int):
-        return v
     try:
         if isinstance(v, float):
-            return int(v)
-        if isinstance(v, str):
-            return int(v.strip())
+            v = int(v)                    # inf and nan raise
+        elif isinstance(v, str):
+            v = int(v.strip())            # so does a number with thousands of digits
+        elif not isinstance(v, int):
+            return default
     except (ValueError, OverflowError):
-        pass
-    return default
+        return default
+    return v if -_ADMIN_INT_MAX <= v <= _ADMIN_INT_MAX else default
 
 def _admin_is_count(v):
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
@@ -1877,13 +1891,24 @@ def _admin_window_start(now, days):
     return _admin_dt.datetime(first.year, first.month, first.day, tzinfo=_admin_dt.timezone.utc)
 
 def _admin_rate(num, den):
-    """num / den, or None when there is nothing to divide by."""
-    return (num / den) if den and den > 0 else None
+    """num / den, or None when there is nothing to divide by (or nothing that
+    divides). Never raises."""
+    try:
+        return (num / den) if den and den > 0 else None
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return None
 
 def _admin_pct(rate, cap=None):
-    """A rate as text: '-' for no data, one decimal under 10%, and '100%+' past
-    `cap` (a conversion between two separately counted things can pass 100%)."""
-    if rate is None:
+    """A rate as text: '-' for no data (or for anything that is not a finite
+    number), one decimal under 10%, and '100%+' past `cap` (a conversion between
+    two separately counted things can pass 100%)."""
+    if rate is None or isinstance(rate, bool):
+        return "-"
+    try:
+        rate = float(rate)
+    except (TypeError, ValueError, OverflowError):
+        return "-"
+    if rate != rate or rate in (float("inf"), float("-inf")):
         return "-"
     if cap is not None and rate > cap:
         return f"{int(cap * 100 + 0.5)}%+"
@@ -1919,31 +1944,42 @@ def _admin_signup_stats(users, now, days=14, total=None):
 def _admin_counter_now(row, now, window_hours=24):
     """(units used in the counter row's CURRENT window, seconds until it resets or
     None). anon_consume only zeroes a counter on its next use, so a row whose
-    window is over still holds the old count: that is 0 now."""
+    window is over still holds the old count: that is 0 now. A row whose window
+    cannot be real (no start, a start that is not a date, a start well ahead of
+    the clock) counts nothing. Never raises."""
     if not isinstance(row, dict):
         return 0, None
     start = _admin_ts(row.get("window_start"))
     if start is None:
         return 0, None
-    left = (start + _admin_dt.timedelta(hours=window_hours) - now).total_seconds()
+    now = _admin_utc(now)
+    if start > now + _ADMIN_SKEW:
+        return 0, None
+    used = max(0, _admin_int(row.get("count")))
+    try:
+        left = (start + _admin_dt.timedelta(hours=window_hours) - now).total_seconds()
+    except (OverflowError, TypeError, ValueError):
+        return used, None             # a window the calendar cannot hold never ends: the count stands
     if left <= 0:
         return 0, None
-    return max(0, _admin_int(row.get("count"))), int(left)
+    return used, int(left)
 
 def _admin_gate_devices(rows, limit, now, days=7):
     """anon_usage rows 'gate:dev:<device>' → {"devices": anonymous devices that made
     at least 1 guide in the window, "at_gate": those that used all `limit` free
     guides, i.e. were shown the sign-in gate}. A row with count 0 was charged and
-    refunded (no guide), so it is not a device that made one. A `limit` below 1 is
-    read as 1 here; the funnel never asks when there is no free guide at all."""
-    start = _admin_window_start(now, days)
+    refunded (no guide), so it is not a device that made one; a row last used at a
+    time that is not one (or is ahead of the clock) is not in the window. A `limit`
+    below 1 is read as 1 here; the funnel never asks when there is no free guide."""
+    now = _admin_utc(now)
+    start, ahead = _admin_window_start(now, days), now + _ADMIN_SKEW
     limit = max(1, _admin_int(limit, 3))
     devices = at_gate = 0
     for r in rows or ():
         if not isinstance(r, dict) or not str(r.get("key") or "").startswith("gate:dev:"):
             continue
         n, ts = _admin_int(r.get("count")), _admin_ts(r.get("last_at"))
-        if n < 1 or ts is None or ts < start:
+        if n < 1 or ts is None or ts < start or ts > ahead:
             continue
         devices += 1
         if n >= limit:
@@ -1960,21 +1996,28 @@ def _admin_user_activity(rows, now, window_hours=24):
     knows whether the guide is allowed and anon_refund only takes the unit back, so
     an account whose one attempt was refused or failed keeps a row with count 0."""
     now, out = _admin_utc(now), {}
+    ahead = now + _ADMIN_SKEW
     for r in rows or ():
         if not isinstance(r, dict):
             continue
         key = str(r.get("key") or "")
         uid = key[len("fair:user:"):] if key.startswith("fair:user:") else ""
         if uid and _admin_int(r.get("count")) >= 1:
-            out[uid] = {"last_at": _admin_ts(r.get("last_at")),
+            last = _admin_ts(r.get("last_at"))
+            out[uid] = {"last_at": last if (last is not None and last <= ahead) else None,   # never a "last used" in the future
                         "recent": _admin_counter_now(r, now, window_hours)[0]}
     return out
 
 def _admin_made_guide(user, activity):
     """True when this account has made at least one guide: the lifetime counter
     (token era) or a counted guide on its own fair-use counter (free mode)."""
-    return (_admin_int(user.get("generations_count")) > 0
-            or str(user.get("id") or "") in (activity or {}))
+    if not isinstance(user, dict):
+        return False
+    try:
+        return (_admin_int(user.get("generations_count")) > 0
+                or str(user.get("id") or "") in (activity or {}))
+    except TypeError:
+        return False
 
 # Subscription states in which Stripe can still charge the customer → the words
 # shown for them. The webhook writes 'active' (for active and trialing), 'past_due'
@@ -1989,6 +2032,7 @@ def _admin_legacy_sub(user):
     always find it and cancel it: a billing state (_ADMIN_SUB_BILLING), or a Stripe
     subscription id on file whose state is anything but 'canceled' (unknown is
     treated as live). "label" is the state in words, for the badge."""
+    user = user if isinstance(user, dict) else {}
     status = str(user.get("subscription_status") or "free").strip().lower() or "free"
     legacy = status in _ADMIN_SUB_BILLING or (bool(user.get("subscription_id")) and status != "canceled")
     return {"status": status, "active": status == "active", "legacy": legacy,
@@ -2014,6 +2058,17 @@ def _admin_visits(visit_rows, now, days=7):
             window += c
     return {"total": total, "today": today_n, "window": window}
 
+_ADMIN_FUNNEL_STEPS = (("visits", "Visits"), ("devices", "Anonymous devices"),
+                       ("gate", "Reached the sign-in gate"), ("accounts", "New accounts"),
+                       ("activated", "Made a guide"))
+
+def _admin_funnel_blank(days=7):
+    """The funnel with nothing in it: what the page falls back to (and shows as
+    '-') if the funnel could not be computed. Static, so it cannot fail in turn."""
+    return {"days": days, "gate_signup_rate": None, "gate_live": True, "gate_from_first": False,
+            "steps": [{"key": key, "label": label, "value": 0, "na": False, "base": None, "rate": None}
+                      for key, label in _ADMIN_FUNNEL_STEPS]}
+
 def _admin_funnel(visit_rows, gate_rows, users, now, gate_limit, activity=None, days=7,
                   device_counts=None):
     """The sign-up funnel of the last `days` UTC days (today included):
@@ -2026,30 +2081,33 @@ def _admin_funnel(visit_rows, gate_rows, users, now, gate_limit, activity=None, 
     A `gate_limit` of 0 (ANON_FREE_USES=0: sign in from the very first guide) sets
     "gate_from_first": nobody can make a guide without an account, so the two
     device steps are "na" (not applicable, no rate) and new accounts are measured
-    against visits."""
+    against visits. A row with a date that is not one is in no window."""
     start = _admin_window_start(now, days)
+    today = _admin_utc(now).date()
     visits = _admin_visits(visit_rows, now, days)["window"]
     from_first = _admin_int(gate_limit, 3) <= 0
     devices = at_gate = 0
     if not from_first:
         gate = _admin_gate_devices(gate_rows, gate_limit, now, days)
         devices, at_gate = gate["devices"], gate["at_gate"]
-        if device_counts:
-            devices = max(devices, _admin_int(device_counts[0]))
-            at_gate = max(at_gate, _admin_int(device_counts[1]))
+        try:
+            exact_devices, exact_gate = device_counts
+        except (TypeError, ValueError):   # None, or not a pair
+            exact_devices = exact_gate = 0
+        devices = max(devices, _admin_int(exact_devices))
+        at_gate = max(at_gate, _admin_int(exact_gate))
     accounts = activated = 0
     for u in users or ():
         ts = _admin_ts(u.get("created_at")) if isinstance(u, dict) else None
-        if ts is None or ts < start:
+        # the very days the sign-up cards count: the window's first day up to today
+        if ts is None or ts < start or ts.date() > today:
             continue
         accounts += 1
         if _admin_made_guide(u, activity):
             activated += 1
-    values = [("visits", "Visits", visits), ("devices", "Anonymous devices", devices),
-              ("gate", "Reached the sign-in gate", at_gate), ("accounts", "New accounts", accounts),
-              ("activated", "Made a guide", activated)]
+    values = (visits, devices, at_gate, accounts, activated)
     steps, prev = [], None            # prev: (key, value) of the last step that applies
-    for key, label, value in values:
+    for (key, label), value in zip(_ADMIN_FUNNEL_STEPS, values):
         na = from_first and key in ("devices", "gate")
         measured = prev is not None and not na
         steps.append({"key": key, "label": label, "value": value, "na": na,
@@ -2090,11 +2148,33 @@ def _admin_gen_gate(g):
             "waiting": len(waiting) if isinstance(waiting, (list, tuple)) else 0,
             "wait_max": wait_max if _admin_is_count(wait_max) else None}
 
+def _admin_log_failure(what, exc):
+    """Log a dashboard failure by type and place only. An exception's message can
+    quote the value that broke it (an e-mail, a name): that stays out of the log."""
+    tb, where = getattr(exc, "__traceback__", None), "?"
+    while tb is not None:
+        where = f"{os.path.basename(tb.tb_frame.f_code.co_filename)} line {tb.tb_lineno}"
+        tb = tb.tb_next
+    _log.warning("admin dashboard: could not compute %s: %s (%s)", what, type(exc).__name__, where)
+
+def _admin_safe(errors, name, fn, fallback):
+    """One block's computation, guarded a second time. The helpers skip bad rows
+    themselves; if one raises all the same, the block is named in `errors` (the
+    page then shows '-' and a small note for it, exactly as for a failed read),
+    `fallback` is used, and everything else renders. Never raises."""
+    try:
+        return fn()
+    except Exception as exc:
+        _admin_log_failure(name, exc)
+        errors.setdefault(name, type(exc).__name__)
+        return fallback
+
 def _admin_load(sb, now, gate_limit):
     """Every database read of the dashboard, through the service-role client `sb`.
     Read-only, column- and row-bounded, each in its own try/except (a failed block
     is named in "errors" and the page renders the rest), and all of them share
-    _ADMIN_LOAD_BUDGET_S so a slow database cannot pin a web thread for long."""
+    _ADMIN_LOAD_BUDGET_S so a slow database cannot pin a web thread for long.
+    The rows are taken out of each response inside the same guard."""
     out = {"users": [], "users_total": None, "activity_rows": [], "gate_rows": [], "gate_exact": None,
            "fair_rows": [], "visit_rows": [], "gens": [], "gens_total": 0, "leads": [], "errors": {}}
     if sb is None:
@@ -2113,6 +2193,9 @@ def _admin_load(sb, now, gate_limit):
             out["errors"][name] = type(exc).__name__
             return None
 
+    def both(res):
+        return _admin_rows(res), _admin_exact(res)
+
     def users():
         def run(cols):
             return (sb.table("users").select(cols, count="exact")
@@ -2123,23 +2206,24 @@ def _admin_load(sb, now, gate_limit):
             # Most likely a column of a later migration is missing: take what the table has.
             _log.info("admin dashboard: users column list refused (%s), reading all columns", type(exc).__name__)
             return run("*")
-    res = read("users", users)
+    res = read("users", lambda: both(users()))
     if res is not None:
-        out["users"], out["users_total"] = _admin_rows(res), _admin_exact(res)
+        out["users"], out["users_total"] = res
 
     # count >= 1: a row left at 0 by a refused or refunded attempt is not a guide,
     # and must not take a place under the row cap either.
-    res = read("activity", lambda: sb.table("anon_usage").select("key,count,window_start,last_at")
-               .like("key", "fair:user:%").gte("count", 1)
-               .order("last_at", desc=True).limit(_ADMIN_ACTIVITY_MAX).execute())
+    res = read("activity", lambda: _admin_rows(
+        sb.table("anon_usage").select("key,count,window_start,last_at")
+          .like("key", "fair:user:%").gte("count", 1)
+          .order("last_at", desc=True).limit(_ADMIN_ACTIVITY_MAX).execute()))
     if res is not None:
-        out["activity_rows"] = _admin_rows(res)
+        out["activity_rows"] = res
 
     def gate():
         res = (sb.table("anon_usage").select("key,count,last_at", count="exact")
                  .like("key", "gate:dev:%").gte("last_at", since).gte("count", 1)
                  .order("last_at", desc=True).limit(_ADMIN_GATE_MAX).execute())
-        rows, total = _admin_rows(res), _admin_exact(res)
+        rows, total = both(res)
         exact = None
         if total is not None and total > len(rows):
             # The response was capped (PostgREST max-rows): count the gate devices exactly.
@@ -2154,28 +2238,29 @@ def _admin_load(sb, now, gate_limit):
     if res is not None:
         out["gate_rows"], out["gate_exact"] = res
 
-    res = read("budget", lambda: sb.table("anon_usage").select("key,count,window_start,last_at")
-               .like("key", "fair:global%").limit(10).execute())
+    res = read("budget", lambda: _admin_rows(
+        sb.table("anon_usage").select("key,count,window_start,last_at")
+          .like("key", "fair:global%").limit(10).execute()))
     if res is not None:
-        out["fair_rows"] = _admin_rows(res)
+        out["fair_rows"] = res
 
-    res = read("visits", lambda: sb.table("visit_stats").select("day,count")
-               .order("day", desc=True).limit(400).execute())
+    res = read("visits", lambda: _admin_rows(
+        sb.table("visit_stats").select("day,count").order("day", desc=True).limit(400).execute()))
     if res is not None:
-        out["visit_rows"] = _admin_rows(res)
+        out["visit_rows"] = res
 
-    res = read("generations", lambda: sb.table("usage_events")
-               .select("kind,source,country,city,created_at", count="exact")
-               .order("created_at", desc=True).limit(1000).execute())
+    res = read("generations", lambda: both(
+        sb.table("usage_events").select("kind,source,country,city,created_at", count="exact")
+          .order("created_at", desc=True).limit(1000).execute()))
     if res is not None:
-        out["gens"] = _admin_rows(res)
-        exact = _admin_exact(res)
+        out["gens"], exact = res
         out["gens_total"] = exact if exact is not None else len(out["gens"])
 
-    res = read("leads", lambda: sb.table("leads").select("email,source,created_at")
-               .order("created_at", desc=True).limit(500).execute())
+    res = read("leads", lambda: _admin_rows(
+        sb.table("leads").select("email,source,created_at")
+          .order("created_at", desc=True).limit(500).execute()))
     if res is not None:
-        out["leads"] = _admin_rows(res)
+        out["leads"] = res
     return out
 
 # ── Admin dashboard: rendering ─────────────────────────────────────────────────
@@ -2417,6 +2502,27 @@ def _admin_err_note(errors, name, what):
     return (f'<p class="note err" data-err="{_he(name)}">Could not load {_he(what)} '
             f'({_he(errors[name])}). The rest of the page is unaffected; details are in the server log.</p>')
 
+def _admin_skipped_note(errors, skipped, name, what="row"):
+    """A small note for the rows of one table that could not be shown, or ''."""
+    n = skipped.get(name, 0)
+    if not n:
+        return ""
+    return (f'<p class="note err" data-err="{_he(name)}">{n:,} {_he(what)}{"" if n == 1 else "s"} could not be shown '
+            f'({_he(errors.get(name, "error"))}). The rest of the page is unaffected; details are in the server log.</p>')
+
+def _admin_section(sec_id, title, build):
+    """One section's markup, guarded a second time: if building it raises, a short
+    note takes its place (same id, so the page keeps its shape) and the rest of
+    the page renders. Never raises."""
+    try:
+        return build()
+    except Exception as exc:
+        _admin_log_failure(f"section {sec_id}", exc)
+        return (f'\n<section class="sec" id="{_he(sec_id)}">\n  <h3>{_he(title)}</h3>\n'
+                f'  <p class="note err" data-err="{_he(sec_id)}">Could not show this section '
+                f'({_he(type(exc).__name__)}). The rest of the page is unaffected; details are in the server log.</p>\n'
+                f'</section>')
+
 def _admin_n(n, errors=(), *blocks):
     """A count as text ('1,234'), or '-' when a block it is made from could not
     be loaded: an unknown number must never look like a real 0."""
@@ -2433,8 +2539,11 @@ def _admin_when(v):
     return ts.strftime("%Y-%m-%d %H:%M") if ts else "—"
 
 def _admin_duration(seconds):
-    """'5 h 12 min' for a number of seconds."""
-    m = max(0, int(seconds)) // 60
+    """'5 h 12 min' for a number of seconds ('—' for anything that is not one)."""
+    try:
+        m = max(0, int(seconds)) // 60
+    except (TypeError, ValueError, OverflowError):
+        return "—"
     return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min"
 
 def _admin_signups_html(stats, errors, lead_cards=""):
@@ -2453,7 +2562,7 @@ def _admin_signups_html(stats, errors, lead_cards=""):
                  f'<span class="d">{_he(p["day"][8:].lstrip("0"))}</span></div>')
     span = f'{series[0]["label"]} to {series[-1]["label"]}' if series else ""
     def n(key):
-        return _admin_n(stats[key], errors, "users")
+        return _admin_n(stats[key], errors, "users", "signups")
     cards = (lead_cards
              + _admin_card("Sign-ups today", n("today"), "since 00:00 UTC", "signups-today", "hero")
              + _admin_card("Yesterday", n("yesterday"), "the full UTC day", "signups-yesterday", "sky")
@@ -2463,6 +2572,7 @@ def _admin_signups_html(stats, errors, lead_cards=""):
 <section class="sec" id="sec-signups">
   <h3>🚀 Sign-ups <small>days are UTC days</small></h3>
   {_admin_err_note(errors, "users", "the accounts")}
+  {_admin_err_note(errors, "signups", "the sign-up counts")}
   <div class="cards">
     <div class="kpis">{cards}</div>
     <div class="card chart">
@@ -2484,9 +2594,10 @@ _ADMIN_STEP_SUBS = {
 _ADMIN_STEP_OF = {"visits": "of visits", "devices": "of those devices",
                   "gate": "of gate devices", "accounts": "of new accounts"}
 _ADMIN_GATE_FROM_FIRST = "sign-in required from the first guide"
-# the database blocks each step is made from (see "errors" in _admin_load)
-_ADMIN_STEP_BLOCKS = {"visits": ("visits",), "devices": ("gate",), "gate": ("gate",),
-                      "accounts": ("users",), "activated": ("users", "activity")}
+# the blocks each step is made from: the funnel computation itself, and the
+# database reads behind it (see "errors" in _admin_load and _admin_safe)
+_ADMIN_STEP_BLOCKS = {"visits": ("funnel", "visits"), "devices": ("funnel", "gate"), "gate": ("funnel", "gate"),
+                      "accounts": ("funnel", "users"), "activated": ("funnel", "users", "activity")}
 
 def _admin_funnel_html(funnel, gate_limit, errors, totals_cards):
     """Section 2: the 7-day funnel, the gate → sign-up rate with its caveat, and
@@ -2533,8 +2644,8 @@ def _admin_funnel_html(funnel, gate_limit, errors, totals_cards):
                          f'{funnel["days"]} days: sign-in gate data starts when the {gate_limit}-guide gate goes live.</p>')
         rate = None if (lost["gate"] or lost["accounts"]) else funnel["gate_signup_rate"]
         rate_card = _admin_card("Gate → sign-up", _admin_pct(rate, cap=1.0),
-                                f'{_admin_n(steps[3]["value"], errors, "users")} new accounts ÷ '
-                                f'{_admin_n(steps[2]["value"], errors, "gate")} devices at the gate',
+                                f'{_admin_n(steps[3]["value"], errors, "users", "funnel")} new accounts ÷ '
+                                f'{_admin_n(steps[2]["value"], errors, "gate", "funnel")} devices at the gate',
                                 "gate-signup-rate", "hero")
         estimate_note = ('<p class="note">Gate → sign-up is an estimate: devices and accounts are counted separately '
                          '(one person can use several devices, and people also sign up without ever reaching the '
@@ -2542,6 +2653,7 @@ def _admin_funnel_html(funnel, gate_limit, errors, totals_cards):
     return f"""
 <section class="sec" id="sec-funnel">
   <h3>🔻 Funnel <small>last {funnel["days"]} days (UTC days, today included)</small></h3>
+  {_admin_err_note(errors, "funnel", "the funnel")}
   {_admin_err_note(errors, "visits", "the visit counts")}
   <div class="funnel">{steps_html}</div>
   {gate_note}
@@ -2603,6 +2715,7 @@ def _admin_budget_html(budget, gen_gate, errors, free):
 <section class="sec" id="sec-budget">
   <h3>🔋 Today's AI budget + capacity <small>a {wh} h window that starts with its first guide</small></h3>
   {_admin_err_note(errors, "budget", "the budget counters")}
+  {_admin_err_note(errors, "capacity", "the live generation slots")}
   <div class="cards">
     <div class="card wide">{main}</div>
     {anon}
@@ -2718,42 +2831,67 @@ def admin_page():
                    'did not start (details are in the server log).</p>')
     data   = _admin_load(sb, now, gate_limit)
     errors = data["errors"]
+    skipped = {}                       # table → how many of its rows could not be shown
     today  = _admin_utc(now).date()
 
+    def row_failed(name, exc):
+        """One row of a table could not be rendered: leave it out, count it, say so."""
+        if name not in skipped:
+            _admin_log_failure(name, exc)
+            errors.setdefault(name, type(exc).__name__)
+        skipped[name] = skipped.get(name, 0) + 1
+
+    # ── Numbers. The helpers are total over bad rows (they skip them); every call is
+    # guarded a second time all the same (_admin_safe), so a row that slips through
+    # costs one block its numbers ("-" and a small note), never the page.
     users = data["users"]
     _epoch = _admin_dt.datetime(1970, 1, 1, tzinfo=_admin_dt.timezone.utc)
-    users.sort(key=lambda u: _admin_ts(u.get("created_at")) or _epoch, reverse=True)   # newest first
+    _admin_safe({}, "the account order",                      # newest first; the query already sends them so
+                lambda: users.sort(key=lambda u: _admin_ts(u.get("created_at")) or _epoch, reverse=True), None)
     window_h = max(1, _admin_int(g.get("_FAIR_WINDOW_HOURS", 24), 24))   # the fair-use counters' window
-    activity = _admin_user_activity(data["activity_rows"], now, window_h)
-    stats    = _admin_signup_stats(users, now, total=data["users_total"])
-    funnel   = _admin_funnel(data["visit_rows"], data["gate_rows"], users, now, gate_limit,
-                             activity=activity, device_counts=data["gate_exact"])
-    visits   = _admin_visits(data["visit_rows"], now)
-    try:
-        anon_limit = g["_fair_anon_limit"]() if callable(g.get("_fair_anon_limit")) else None
-    except Exception:
-        anon_limit = None
-    budget   = _admin_budget(data["fair_rows"], now, g.get("FAIR_GLOBAL_DAILY", 2000), anon_limit, window_h)
-    gen_gate = _admin_gen_gate(g)
+    activity = _admin_safe(errors, "activity",
+                           lambda: _admin_user_activity(data["activity_rows"], now, window_h), {})
+    stats    = _admin_safe(errors, "signups",
+                           lambda: _admin_signup_stats(users, now, total=data["users_total"]),
+                           {"today": 0, "yesterday": 0, "last7": 0, "total": len(users), "series": []})
+    funnel   = _admin_safe(errors, "funnel",
+                           lambda: _admin_funnel(data["visit_rows"], data["gate_rows"], users, now, gate_limit,
+                                                 activity=activity, device_counts=data["gate_exact"]),
+                           _admin_funnel_blank())
+    visits   = _admin_safe(errors, "visits", lambda: _admin_visits(data["visit_rows"], now),
+                           {"total": 0, "today": 0, "window": 0})
+
+    def budget_now():
+        try:
+            anon_limit = g["_fair_anon_limit"]() if callable(g.get("_fair_anon_limit")) else None
+        except Exception:
+            anon_limit = None
+        return _admin_budget(data["fair_rows"], now, g.get("FAIR_GLOBAL_DAILY", 2000), anon_limit, window_h)
+    budget   = _admin_safe(errors, "budget", budget_now,
+                           {"used": 0, "limit": 0, "pct": None, "warn": False, "resets_in_s": None,
+                            "anon": None, "window_hours": window_h})
+    gen_gate = _admin_safe(errors, "capacity", lambda: _admin_gen_gate(g), None)
 
     # ── Users (the Supabase `users` table) ────────────────────────────────────────
-    subs_rows = ""
-    subs_active = subs_legacy = used_count = 0
-    # Referral tallies: how many people each user invited, and how many paid.
-    _invited, _invited_paid, _id_to_email = {}, {}, {}
-    for u in users:
-        _id_to_email[str(u.get("id") or "")] = u.get("email") or ""
-        rb = str(u.get("referred_by") or "")
-        if rb:
-            _invited[rb] = _invited.get(rb, 0) + 1
-            if u.get("referral_paid"):
-                _invited_paid[rb] = _invited_paid.get(rb, 0) + 1
-    for u in users:
+    def referral_tallies():
+        """How many people each user invited, how many of those paid, and id → e-mail."""
+        invited, paid, emails = {}, {}, {}
+        for u in users:
+            emails[str(u.get("id") or "")] = u.get("email") or ""
+            rb = str(u.get("referred_by") or "")
+            if rb:
+                invited[rb] = invited.get(rb, 0) + 1
+                if u.get("referral_paid"):
+                    paid[rb] = paid.get(rb, 0) + 1
+        return invited, paid, emails
+    _invited, _invited_paid, _id_to_email = _admin_safe(errors, "referrals", referral_tallies, ({}, {}, {}))
+
+    def user_row(u):
+        """One row of the Users table → (markup, active subscriber?, legacy
+        subscriber?, made a guide?)."""
         uid_u  = str(u.get("id") or "")
         plan   = _admin_legacy_sub(u)
         status, active, legacy_sub = plan["status"], plan["active"], plan["legacy"]
-        subs_active += 1 if active else 0
-        subs_legacy += 1 if legacy_sub else 0
         email  = str(u.get("email") or "—")
         name   = str(u.get("name") or "—")
         toks_i = _admin_int(u.get("tokens_remaining"))
@@ -2770,8 +2908,6 @@ def admin_page():
         act    = activity.get(uid_u)
         recent = act["recent"] if act else 0
         made   = max(gens, recent, 1 if act else 0)
-        if made:
-            used_count += 1
         seen = [t for t in (_admin_ts(u.get("last_used_at")), act["last_at"] if act else None) if t]
         last_used = max(seen).strftime("%Y-%m-%d") if seen else ""
         made_html = f'<b style="color:{"#6ee7b7" if made else "#4a5f80"}">{made:,}{"+" if act else ""}</b>'
@@ -2819,7 +2955,7 @@ def admin_page():
             tail = (f'<td style="text-align:center;font-weight:600">{toks_i}</td>'
                     f'<td style="white-space:nowrap">{actions}</td>')
             tok_attr = f' data-tokens="{toks_i}"'
-        subs_rows += f"""
+        row_html = f"""
           <tr class="subrow" data-email="{_he(email.lower())}" data-name="{_he(name.lower())}" data-joined="{_he(joined)}" data-used="{made}" data-recent="{recent}" data-lastused="{_he(last_used)}" data-refby="{_he(refby.lower())}" data-invites="{inv}" data-plan="{_he(plan_txt)}" data-renews="{_he(renews)}" data-legacy="{1 if legacy_sub else 0}" data-active="{1 if active else 0}"{tok_attr}>
             <td class="clip"><b>{_he(email)}</b></td>
             <td class="clip" style="color:#b9c9e6">{_he(name)}</td>
@@ -2830,6 +2966,20 @@ def admin_page():
             <td class="c"{code_title}>{inv_html}</td>
             <td>{plan_html}</td>{tail}
           </tr>"""
+        return row_html, active, legacy_sub, bool(made)
+
+    subs_rows = ""
+    subs_active = subs_legacy = used_count = 0
+    for u in users:
+        try:
+            row_html, is_active, is_legacy, has_made = user_row(u)
+        except Exception as exc:
+            row_failed("user-rows", exc)
+            continue
+        subs_rows   += row_html
+        subs_active += 1 if is_active else 0
+        subs_legacy += 1 if is_legacy else 0
+        used_count  += 1 if has_made else 0
 
     def _sth(label, key, numeric=False):
         return (f'<th class="sort{" c" if numeric else ""}" onclick="subSort(\'{key}\',{1 if numeric else 0})">'
@@ -2845,7 +2995,8 @@ def admin_page():
         csv_head.append("Tokens")
         csv_keys.append("tokens")
     empty_row = (f'<tr><td colspan="{8 if free else 10}" style="padding:2rem;text-align:center;color:#4a5f80">'
-                 + ("Not loaded." if "users" in errors else "No users yet.") + "</td></tr>")
+                 + ("Not loaded." if "users" in errors else
+                    "No row could be shown." if skipped.get("user-rows") else "No users yet.") + "</td></tr>")
     shown_note = ""
     if stats["total"] > len(users) and users:
         shown_note = (f'<p class="note">Showing the newest {len(users):,} of {stats["total"]:,} accounts. '
@@ -2855,7 +3006,7 @@ def admin_page():
         made_note = ('<p class="note">Guides made is the lifetime counter on the account, and only the old token '
                      'system adds to it: free mode keeps no per-account total. A "+" means the account has made '
                      f'guides since Alimne went free; "in last {window_h} h" is its running fair-use window.</p>')
-    users_pills = f'<span class="pill blue">{_admin_n(stats["total"], errors, "users")} users</span>'
+    users_pills = f'<span class="pill blue">{_admin_n(stats["total"], errors, "users", "signups")} users</span>'
     if free and subs_legacy:
         users_pills += f'<span class="pill green">{subs_legacy:,} legacy subscribers</span>'
     if not free:
@@ -2865,6 +3016,8 @@ def admin_page():
   <h3>👥 Users {users_pills}</h3>
   {_admin_err_note(errors, "users", "the accounts")}
   {_admin_err_note(errors, "activity", "the per-account activity since free mode, so 'Guides made' and 'Last used' only show the older counters")}
+  {_admin_err_note(errors, "referrals", "the invite counts, so 'Invited by' and 'Invites' are empty")}
+  {_admin_skipped_note(errors, skipped, "user-rows", "account row")}
   <div class="tools">
     <input id="subSearch" type="text" placeholder="🔎 Search email or name…" oninput="subFilter()">
     <label><input type="checkbox" id="payingOnly" onchange="subFilter()"> {"Legacy subscribers only" if free else "Paying only"}</label>
@@ -2882,30 +3035,40 @@ def admin_page():
 </section>"""
 
     # ── Generations (durable usage events — counts anon + demo, survives restarts) ─
-    gens_rows = ""
     gens_total = data["gens_total"]
-    gens_today = gens_anon = gens_user = gens_demo = 0
-    for G in data["gens"]:
-        k = G.get("kind") or ""
-        if k == "anon":   gens_anon += 1
-        elif k == "demo": gens_demo += 1
-        else:             gens_user += 1
-        ts = _admin_ts(G.get("created_at"))
-        if ts is not None and ts.date() == today:
-            gens_today += 1
-    for G in data["gens"][:200]:
+
+    def gen_tallies():
+        today_n = anon = signed = demo = 0
+        for G in data["gens"]:
+            k = G.get("kind") or ""
+            if k == "anon":   anon += 1
+            elif k == "demo": demo += 1
+            else:             signed += 1
+            ts = _admin_ts(G.get("created_at"))
+            if ts is not None and ts.date() == today:
+                today_n += 1
+        return today_n, anon, signed, demo
+    gens_today, gens_anon, gens_user, gens_demo = _admin_safe(errors, "generation-tally", gen_tallies, (0, 0, 0, 0))
+
+    def gen_row(G):
         k      = str(G.get("kind") or "")
         loc    = ", ".join([str(x) for x in [G.get("city"), G.get("country")] if x]) or "—"
         kcolor = {"user": "#6ee7b7", "anon": "#7cc4ff", "demo": "#a78bfa"}.get(k, "#8aa0c8")
-        gens_rows += f"""
+        return f"""
           <tr>
             <td style="color:#8aa0c8;white-space:nowrap">{_he(_admin_when(G.get("created_at")))}</td>
             <td><span style="color:{kcolor};font-weight:700">{_he(k or '—')}</span></td>
             <td style="color:#8aa0c8;font-size:12px">{_he(G.get('source') or '—')}</td>
             <td>{_he(loc)}</td>
           </tr>"""
+    gens_rows = ""
+    for G in data["gens"][:200]:
+        try:
+            gens_rows += gen_row(G)
+        except Exception as exc:
+            row_failed("generation-rows", exc)
     gens_section = ""
-    if gens_rows or "generations" in errors:
+    if gens_rows or "generations" in errors or skipped.get("generation-rows"):
         gens_table = ""
         if gens_rows:
             gens_table = f"""<div class="box"><table>
@@ -2914,27 +3077,36 @@ def admin_page():
   </table></div>"""
         gens_section = f"""
 <section class="sec" id="sec-gens">
-  <h3>⚡ Recent generations <span class="pill violet">{gens_total:,} total</span><span class="pill">{gens_today:,} today</span></h3>
+  <h3>⚡ Recent generations <span class="pill violet">{gens_total:,} total</span><span class="pill">{_admin_n(gens_today, errors, "generation-tally")} today</span></h3>
   {_admin_err_note(errors, "generations", "the generation log")}
+  {_admin_err_note(errors, "generation-tally", "the split of the generations by day and by who made them")}
+  {_admin_skipped_note(errors, skipped, "generation-rows")}
   {gens_table}
 </section>"""
 
     # ── Leads (emails captured at the old paywall) ───────────────────────────────
-    leads_rows = ""
     leads_count = len(data["leads"])
-    for L in data["leads"]:
-        leads_rows += f"""
+
+    def lead_row(L):
+        return f"""
           <tr>
             <td><b>{_he(L.get('email') or '')}</b></td>
             <td style="color:#8aa0c8;font-size:12px">{_he(L.get('source') or '—')}</td>
             <td style="color:#8aa0c8;white-space:nowrap">{_he(_admin_when(L.get("created_at")))}</td>
           </tr>"""
+    leads_rows = ""
+    for L in data["leads"]:
+        try:
+            leads_rows += lead_row(L)
+        except Exception as exc:
+            row_failed("lead-rows", exc)
     leads_title = "Leads (old paywall emails)" if free else "Leads"
     leads_section = ""
     if leads_count:
         leads_section = f"""
 <section class="sec" id="sec-leads">
   <h3>✉️ {leads_title} <span class="pill pink">{leads_count:,} emails</span></h3>
+  {_admin_skipped_note(errors, skipped, "lead-rows")}
   <div class="box"><table>
     <thead><tr><th>Email</th><th>Source</th><th>Captured (UTC)</th></tr></thead>
     <tbody>{leads_rows}</tbody>
@@ -2962,11 +3134,11 @@ def admin_page():
                     "not loaded" if "visits" in errors else
                     f"{visits['today']:,} today · {visits['window']:,} in the last 7 days", "visits-total", "cyan")
         + _admin_card("Generations (all)", _admin_n(gens_total, errors, "generations"),
-                      "not loaded" if "generations" in errors else
+                      "not loaded" if ("generations" in errors or "generation-tally" in errors) else
                       f"{gens_today:,} today · {gens_anon:,} anon · {gens_demo:,} demo · {gens_user:,} signed-in",
                       "gens-total", "violet")
-        + _admin_card("Accounts that made a guide", _admin_n(used_count, errors, "users", "activity"),
-                      "not loaded" if ("users" in errors or "activity" in errors) else
+        + _admin_card("Accounts that made a guide", _admin_n(used_count, errors, "users", "activity", "user-rows"),
+                      "not loaded" if any(b in errors for b in ("users", "activity", "user-rows")) else
                       f"of {len(users):,} accounts, all time", "accounts-active", "lilac"))
     if not free:
         totals_cards += _admin_card("Leads", f"{leads_count:,}", "emails captured", "leads-total", "pink")
@@ -2974,7 +3146,13 @@ def admin_page():
     cfg = json.dumps({"payAttr": "legacy" if free else "active", "csvHead": csv_head, "csvKeys": csv_keys})
     cfg = cfg.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
     visits_badge = f"{visits['total']:,}" if (sb is not None and "visits" not in errors) else str(len(vis_copy))
-    return f"""<!DOCTYPE html>
+    sec_signups = _admin_section("sec-signups", "🚀 Sign-ups",
+                                 lambda: _admin_signups_html(stats, errors, lead_cards))
+    sec_funnel  = _admin_section("sec-funnel", "🔻 Funnel",
+                                 lambda: _admin_funnel_html(funnel, gate_limit, errors, totals_cards))
+    sec_budget  = _admin_section("sec-budget", "🔋 Today's AI budget + capacity",
+                                 lambda: _admin_budget_html(budget, gen_gate, errors, free))
+    page = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Admin — Alimne</title>
@@ -2992,9 +3170,9 @@ def admin_page():
   </div>
 </div>
 {f'<div class="sec" style="margin-bottom:0">{sb_note}</div>' if sb_note else ''}
-{_admin_signups_html(stats, errors, lead_cards)}
-{_admin_funnel_html(funnel, gate_limit, errors, totals_cards)}
-{_admin_budget_html(budget, gen_gate, errors, free)}
+{sec_signups}
+{sec_funnel}
+{sec_budget}
 {users_section}
 {gens_section}
 {leads_section}
@@ -3017,6 +3195,9 @@ def admin_page():
 <script>var ADMIN_CFG = {cfg};</script>
 <script>{_ADMIN_JS}{"" if free else _ADMIN_JS_TOKENS}</script>
 </body></html>"""
+    # A lone surrogate in a row's text cannot be written as UTF-8, and the response
+    # would fail on it after this function has returned: replace what cannot be encoded.
+    return page.encode("utf-8", "replace").decode("utf-8")
 
 _SAFE_NAME = re.compile(r'[^\w\-. ]')
 _JOB_ID_RE = re.compile(r'^[0-9a-f]{32}$')
