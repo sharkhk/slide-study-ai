@@ -6,7 +6,7 @@ import {
   Globe, X, Files, ChevronDown,
   Youtube, Type, Brain, BarChart2, Map, Printer,
   ThumbsUp, ThumbsDown, MessageSquare, History, ClipboardList, ShieldCheck, ScrollText,
-  LogIn, LogOut, User, Zap, Copy, Gift, Mail, Share2, Check
+  LogIn, LogOut, User, Zap, Copy, Gift, Mail, Share2, Check, ExternalLink
 } from 'lucide-react'
 
 // Alimne brand mark — the "A + spark" glyph (white, for use inside a gradient tile)
@@ -63,14 +63,18 @@ const T = {
     textPlaceholder: 'Paste article text here…',
     urlPlaceholder: 'https://example.com/article (fetches page text)',
     textBtn: 'Generate from Text',
-    // Auth
+    // Auth. Accounts are made with Google. Email and a password are for the accounts that already have one and,
+    // inside an in-app browser (where Google refuses to sign anyone in), for a new account too: see LoginModal.
     loginTitle: 'Sign in to continue',
-    loginSub: 'Sign in to your account',
+    loginSub: 'Continue with the Google account you signed up with. New here? The same button creates a free account.',
     loginBtn: 'Continue with Google',
+    emailSignInLink: 'Signed up with email? Sign in with email',
+    emailSignInTitle: 'Sign in with email',
+    emailSignInSub: 'For accounts created with an email address and a password.',
+    backToGoogle: 'Back to Google sign-in',
     emailPh: 'you@email.com',
     passwordPh: 'Password (min 6 characters)',
     emailBtn: 'Continue with email',
-    orDivider: 'or',
     authWeak: 'Enter a valid email and a password of at least 6 characters.',
     authCheckEmail: 'Account created \u2014 check your email to confirm, then sign in.',
     authError: 'Sign-in failed \u2014 please try again.',
@@ -92,12 +96,12 @@ const T = {
     subSuccess: 'Payment received — activating Alimne Pro…',
     manageBtn: 'Manage / cancel subscription',
     freeNow: 'Alimne is free now — no subscription needed.',
-    loginTitleSignup: 'Create your account',
-    loginSubSignup: 'Free, no card needed — create your account in a minute.',
+    loginTitleSignup: 'Create your free account',
+    loginSubSignup: 'Continue with Google. No password, no card.',
     emailBtnSignup: 'Create free account',
     noAccount: 'New here? Create a free account',
     haveAccount: 'Already have an account? Sign in',
-    wrongPassword: 'Incorrect email or password. Signed up with Google? Use Continue with Google.',
+    wrongPassword: 'Incorrect email or password. If you signed up with Google, sign in with Google instead.',
     accountExists: 'An account already exists for this email. Sign in instead.',
     signInFreeCta: 'Sign in free',
     emailInvalid: 'Please enter a valid email address.',
@@ -245,8 +249,13 @@ const T = {
     checkInbox: (e) => `We sent a confirmation link to ${e}. Open it on this device to finish signing up.`,
     resendEmail: 'Resend email',
     backToSignIn: 'Back to sign in',
-    inAppGoogle: "Google sign-in doesn't work inside this app. Open alimne.app in Safari/Chrome (⋯ → Open in browser), or use email below.",
+    // In-app browsers: the notice, the way out to the real browser, what to do when the phone did not follow, the email form
+    inAppGoogle: 'Google sign-in is not allowed inside this app. Open Alimne in your browser to continue with Google.',
+    openInBrowser: 'Open in browser',
+    openManual: "Nothing opened? In this app's menu (⋯ or ⋮) choose “Open in browser”, or copy the link and paste it into your browser.",
     copyLink: 'Copy link',
+    orEmailSignup: 'or sign up with email here',
+    orEmailSignin: 'or sign in with email here',
     newPwTitle: 'Set a new password',
     newPwSub: 'Choose a new password for your account.',
     newPwPh: 'New password (min 6 characters)',
@@ -301,14 +310,17 @@ const T = {
     textPlaceholder: 'الصق نص المقال هنا…',
     urlPlaceholder: 'https://example.com/article',
     textBtn: 'توليد من النص',
-    // Auth
+    // تسجيل الدخول: يُنشأ الحساب عبر Google، والبريد وكلمة المرور للحسابات التي لها كلمة مرور، ولحساب جديد داخل متصفحات التطبيقات فقط
     loginTitle: 'سجّل الدخول للمتابعة',
-    loginSub: 'سجّل الدخول إلى حسابك',
+    loginSub: 'تابِع بحساب Google الذي سجّلت به. جديد هنا؟ الزر نفسه ينشئ لك حساباً مجانياً.',
     loginBtn: 'المتابعة عبر Google',
+    emailSignInLink: 'سجّلت بالبريد الإلكتروني؟ سجّل الدخول بالبريد',
+    emailSignInTitle: 'تسجيل الدخول بالبريد الإلكتروني',
+    emailSignInSub: 'للحسابات التي أُنشئت ببريد إلكتروني وكلمة مرور.',
+    backToGoogle: 'العودة إلى تسجيل الدخول عبر Google',
     emailPh: 'you@email.com',
     passwordPh: 'كلمة المرور (6 أحرف على الأقل)',
     emailBtn: 'المتابعة بالبريد',
-    orDivider: 'أو',
     authWeak: 'أدخل بريداً صحيحاً وكلمة مرور من 6 أحرف على الأقل.',
     authCheckEmail: 'تم إنشاء الحساب — تحقق من بريدك للتأكيد ثم سجّل الدخول.',
     authError: 'فشل تسجيل الدخول — حاول مجدداً.',
@@ -331,12 +343,12 @@ const T = {
     subSuccess: 'تم استلام الدفع — جارٍ تفعيل Alimne Pro…',
     manageBtn: 'إدارة / إلغاء الاشتراك',
     freeNow: 'علّمني مجاني الآن — لا حاجة إلى اشتراك.',
-    loginTitleSignup: 'أنشئ حسابك',
-    loginSubSignup: 'مجاني وبدون بطاقة — أنشئ حسابك خلال دقيقة.',
+    loginTitleSignup: 'أنشئ حسابك المجاني',
+    loginSubSignup: 'تابِع عبر Google. بدون كلمة مرور وبدون بطاقة.',
     emailBtnSignup: 'إنشاء حساب مجاني',
     noAccount: 'جديد هنا؟ أنشئ حساباً مجانياً',
     haveAccount: 'لديك حساب بالفعل؟ سجّل الدخول',
-    wrongPassword: 'البريد أو كلمة المرور غير صحيحة. سجّلت عبر Google؟ استخدم «المتابعة عبر Google».',
+    wrongPassword: 'البريد أو كلمة المرور غير صحيحة. إن كنت سجّلت عبر Google فسجّل الدخول عبر Google.',
     accountExists: 'يوجد حساب بهذا البريد بالفعل. سجّل الدخول بدلاً من ذلك.',
     signInFreeCta: 'سجّل الدخول مجاناً',
     emailInvalid: 'يرجى إدخال بريد إلكتروني صحيح.',
@@ -478,8 +490,13 @@ const T = {
     checkInbox: (e) => `أرسلنا رابط تأكيد إلى ${e}. افتحه على هذا الجهاز لإكمال التسجيل.`,
     resendEmail: 'إعادة الإرسال',
     backToSignIn: 'العودة لتسجيل الدخول',
-    inAppGoogle: 'تسجيل الدخول عبر Google لا يعمل داخل هذا التطبيق. افتح alimne.app في Safari أو Chrome (⋯ ← فتح في المتصفح)، أو استخدم البريد الإلكتروني بالأسفل.',
+    // متصفحات التطبيقات: التنبيه، وزر الخروج إلى المتصفح، وما العمل إن لم يُفتح، ونموذج البريد
+    inAppGoogle: 'تسجيل الدخول عبر Google غير مسموح به داخل هذا التطبيق. افتح علّمني في متصفحك للمتابعة عبر Google.',
+    openInBrowser: 'فتح في المتصفح',
+    openManual: 'لم يُفتح شيء؟ من قائمة هذا التطبيق (⋯ أو ⋮) اختر «فتح في المتصفح»، أو انسخ الرابط والصقه في متصفحك.',
     copyLink: 'نسخ الرابط',
+    orEmailSignup: 'أو أنشئ حسابك بالبريد الإلكتروني هنا',
+    orEmailSignin: 'أو سجّل الدخول بالبريد الإلكتروني هنا',
     newPwTitle: 'عيّن كلمة مرور جديدة',
     newPwSub: 'اختر كلمة مرور جديدة لحسابك.',
     newPwPh: 'كلمة المرور الجديدة (6 أحرف على الأقل)',
@@ -690,11 +707,42 @@ const AUTH_URL_ERR = (() => {
   } catch { return null }
 })()
 const RECOVERY_IN_URL = (() => { try { return /(^#|&)type=recovery(&|$)/.test(window.location.hash) } catch { return false } })()
+// "Open in browser" inside an in-app browser hands the real browser /?join=1 (see joinLink): the visitor was on the
+// way to an account, so the page that opens there shows the sign-up modal, and takes the mark off its address.
+const JOIN_IN_URL = (() => { try { return new URLSearchParams(window.location.search).get('join') === '1' } catch { return false } })()
 const sb = (() => { try { return createClient(SB_URL, SB_ANON) } catch (e) { console.error('supabase init', e); return null } })()
 
 // Instagram / Facebook / TikTok / Snapchat / LINE / Android WebViews: Google OAuth
 // is blocked and <a download> is usually ignored.
 const IN_APP = (() => { try { return /Instagram|FBAN|FBAV|FB_IAB|TikTok|musical_ly|Snapchat|Line\/|; wv\)/i.test(navigator.userAgent || '') } catch { return false } })()
+// Google refuses to sign anyone in inside those, so the sign-in modal offers "Open in browser" there. The link the
+// real browser is given: the site and ?join=1, plus the invite code this visitor arrived with (the one in the
+// address, else the one kept from it at load). Nothing else of the current address goes along: no hash (sign-in
+// tokens travel there) and no other query data.
+const REF_CODE_RE = /^[A-Za-z0-9]{4,32}$/
+function joinLink(origin, search, keptRef) {
+  let ref = ''
+  try { ref = new URLSearchParams(search || '').get('ref') || '' } catch { /* no readable query */ }
+  if (!ref && typeof keptRef === 'string') ref = keptRef
+  return `${origin}/?join=1${REF_CODE_RE.test(ref) ? `&ref=${ref.toUpperCase()}` : ''}`
+}
+// The address that asks the phone to open `link` in its real browser, or '' when there is none to ask with.
+// Android: an intent with scheme=https, which goes to the default browser, whichever it is. iPhone / iPad:
+// x-safari-https, which opens Safari from iOS 17 on and does nothing before that. Only an https link has one.
+function browserHandoff(link, ua) {
+  const m = /^https:\/\/(.+)$/.exec(String(link || ''))
+  if (!m) return ''
+  if (/Android/i.test(ua || '')) return `intent://${m[1]}#Intent;scheme=https;end`
+  if (/iPhone|iPad|iPod/i.test(ua || '')) return `x-safari-https://${m[1]}`
+  return ''
+}
+// The page's address without ?join=1: the path, any other query data and the hash stay as they are.
+function withoutJoin(loc) {
+  const q = new URLSearchParams(loc.search)
+  q.delete('join')
+  const qs = q.toString()
+  return loc.pathname + (qs ? `?${qs}` : '') + loc.hash
+}
 const NAV_AR = (() => { try { return String(navigator.language || '').toLowerCase().startsWith('ar') } catch { return false } })()
 const MAX_UPLOAD = 50 * 1024 * 1024
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
@@ -1984,6 +2032,7 @@ Alimne is an AI-powered study tool registered under the souc.ai platform. It con
 2. FREE USE, FAIR USE & EXISTING SUBSCRIPTIONS
 • Alimne is free to use. No payment, card or paid plan is needed.
 • Without an account you can make your first {FREE_GUIDES}. After that, a free account is required to make more guides; creating one costs nothing. The sample lecture, and viewing or downloading the guides you already made, stay open to everyone.
+• Accounts are created with Google ("Continue with Google"). Inside an in-app browser (a page opened inside another app), where Google does not allow its sign-in, you can open Alimne in your browser, or create the account with an email address and a password.
 • Fair-use limits apply to accounts: to keep Alimne free and available to everyone, we limit how many guides can be generated each day per account, per network and across the whole service.
 • These limits may change at any time, and when Alimne is busy a request may wait in a queue or be asked to try again later.
 • If you subscribed before Alimne became free, you can manage or cancel your subscription at any time from Account, via the billing portal. No refunds for partial months.
@@ -2062,6 +2111,7 @@ Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصط
 ٢. الاستخدام المجاني والاستخدام العادل والاشتراكات القائمة
 • علّمني مجاني للاستخدام. لا حاجة إلى دفع أو بطاقة أو خطة مدفوعة.
 • يمكنك إنشاء {FREE_GUIDES} دون حساب. بعد ذلك يلزم حساب مجاني لإنشاء المزيد من الأدلة، وإنشاء الحساب لا يكلّف شيئاً. أما المحاضرة النموذجية وعرض الأدلة التي أنشأتها أو تنزيلها فتبقى متاحة للجميع.
+• يُنشأ الحساب عبر Google («المتابعة عبر Google»). أما داخل متصفح أحد التطبيقات (صفحة تُفتح داخل تطبيق آخر)، حيث لا يسمح Google بتسجيل الدخول، فيمكنك فتح علّمني في متصفحك أو إنشاء الحساب ببريد إلكتروني وكلمة مرور.
 • تُطبَّق حدود الاستخدام العادل على الحسابات: لإبقاء علّمني مجانياً ومتاحاً للجميع، نضع حداً يومياً لعدد الأدلة التي يمكن إنشاؤها لكل حساب ولكل شبكة وللخدمة ككل.
 • قد تتغيّر هذه الحدود في أي وقت، وعندما يكون علّمني مزدحماً قد ينتظر طلبك في طابور أو يُطلب منك المحاولة لاحقاً.
 • إذا كنت قد اشتركت قبل أن يصبح علّمني مجانياً، يمكنك إدارة اشتراكك أو إلغاؤه في أي وقت من «حسابك» عبر بوابة الفوترة. لا يوجد استرداد للأشهر الجزئية.
@@ -2097,9 +2147,17 @@ const TERMS_STASH = {
   ar: '• تسجيل الدخول: إذا كان لديك ملف أو رابط أو نص ملصق ينتظر عندما تغادر الصفحة لتسجيل الدخول عبر Google، فإنه يُحفظ في متصفحك فقط (ولا يُرفع قبل أن تضغط «توليد») ليبقى موجوداً عند عودتك. تُحذف هذه النسخة فور استعادتها أو عند تسجيل خروجك، ولا تُستخدم أي نسخة مضى عليها أكثر من 30 دقيقة، بل تُحذف عند فتح علّمني في ذلك المتصفح في المرة التالية.',
 }
 
+// Free mode only, shown just above it in section 3: what an account keeps. It must stay true to what the server stores
+// (_identity_from_payload in app.py: email, name, picture) and to the sign-in modal (Google, or an email and a
+// password that go to Supabase and never to Alimne's own server).
+const TERMS_ACCOUNT = {
+  en: "• Your account: when you continue with Google, Google gives us your name, your email address and your profile picture, with an identifier for your Google account. We keep them in our database (Supabase) to identify your account, to show it to you when you are signed in, and to apply the fair-use limits. We never see your Google password, and we ask Google for nothing else. For an account made with an email address and a password we keep the email address; the password goes directly to our authentication provider (Supabase), never to Alimne's own server.",
+  ar: '• حسابك: عند المتابعة عبر Google يزوّدنا Google باسمك وبريدك الإلكتروني وصورة ملفك الشخصي، مع معرّف لحسابك في Google. نحتفظ بها في قاعدة بياناتنا (Supabase) لتمييز حسابك وعرضه لك عند تسجيل دخولك وتطبيق حدود الاستخدام العادل. لا نرى كلمة مرور Google أبداً، ولا نطلب من Google شيئاً آخر. أما الحساب المنشأ ببريد إلكتروني وكلمة مرور فنحتفظ ببريده الإلكتروني، وتُرسَل كلمة المرور مباشرةً إلى مزوّد المصادقة (Supabase) لا إلى خادم علّمني.',
+}
+
 // The Terms as shown. Free mode names the real number of guides an anonymous visitor may make
 // ({FREE_GUIDES} in the text, from /api/config; with 0 the bullet says an account is required) and discloses
-// the sign-in copy; token mode (ALIMNE_FREE_MODE=0) is the old text as it was.
+// what an account keeps and the sign-in copy; token mode (ALIMNE_FREE_MODE=0) is the old text as it was.
 const termsText = (lang, freeMode, n) => {
   const isAr = lang === 'ar'
   if (!freeMode) return isAr ? TERMS_AR_LEGACY : TERMS_EN_LEGACY
@@ -2111,7 +2169,7 @@ const termsText = (lang, freeMode, n) => {
   return (isAr ? TERMS_AR : TERMS_EN).split('\n')
     .map(line => !line.includes('{FREE_GUIDES}') ? line : k === 0 ? (isAr ? TERMS_AR_RULE_0 : TERMS_EN_RULE_0) : line.replace('{FREE_GUIDES}', guides))
     .join('\n')
-    .replace(section4, `\n${isAr ? TERMS_STASH.ar : TERMS_STASH.en}${section4}`)
+    .replace(section4, `\n${isAr ? TERMS_ACCOUNT.ar : TERMS_ACCOUNT.en}\n${isAr ? TERMS_STASH.ar : TERMS_STASH.en}${section4}`)
 }
 
 function TermsModal({ lang, onClose, freeMode = true, freeUses = FREE_USES_DEFAULT }) {
@@ -2144,9 +2202,14 @@ function TermsModal({ lang, onClose, freeMode = true, freeUses = FREE_USES_DEFAU
 }
 
 // ── Login Modal ────────────────────────────────────────────────────────────────
-// Inline role=alert messages (not toasts), confirm-email panel with resend,
-// forgot password, and an in-app-browser notice instead of a Google button that
-// can't work there. `gate` (free mode): the sign-in gate opened this modal, so it says why, for as long
+// Accounts are made with Google: one "Continue with Google" button, in sign-up and in sign-in mode alike.
+// A quiet link under it opens an email SIGN-IN-ONLY view, for the accounts that have a password: no account
+// can be created there (`notice.byEmail` opens it at once, for an email link that came back expired).
+// Inside an in-app browser (IN_APP) Google refuses to sign anyone in, so there the modal shows a notice,
+// "Open in browser" (the way to Google) and the email form with its sign-up / sign-in toggle: the one place
+// where an account can still be made with an email and a password.
+// Inline role=alert messages (not toasts), confirm-email panel with resend, forgot password.
+// `gate` (free mode): the sign-in gate opened this modal, so it says why, for as long
 // as the modal is open: { reason, uses, text } = the cause ('device' | 'network' | 'pool'), the allowance
 // (0 included) and, for a cause this client does not know, the server's own sentence.
 // `beforeLeave` runs just before the page leaves for Google (it keeps what was waiting, in this browser);
@@ -2156,6 +2219,7 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
   const isAr = lang === 'ar'
   const gateText = freeMode && gate ? signinText(t, gate.reason, gate.uses, gate.text) : null
   const [mode, setMode]         = useState(initialMode === 'signup' ? 'signup' : 'signin')
+  const [byEmail, setByEmail]   = useState(!!notice?.byEmail) // the email sign-in view is open (outside in-app browsers)
   const [email, setEmail]       = useState(initialEmail || '')
   const [password, setPassword] = useState('')
   const [busy, setBusy]         = useState(false)
@@ -2164,10 +2228,26 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
   const [needConfirm, setNeedConfirm] = useState(false)     // email_not_confirmed → offer resend
   const [sentTo, setSentTo]     = useState('')              // sign-up sent → "check your inbox"
   const [copied, setCopied]     = useState(false)
+  const [stayed, setStayed]     = useState(false)           // "Open in browser" was tapped and the page is still in front
   const timers = useRef([])
+  const wentAway = useRef(false)                            // the page was hidden since "Open in browser" was tapped
   useEffect(() => () => timers.current.forEach(clearTimeout), [])
+  useEffect(() => {
+    if (!IN_APP) return
+    const away = () => { if (document.visibilityState === 'hidden') wentAway.current = true }
+    document.addEventListener('visibilitychange', away)
+    return () => document.removeEventListener('visibilitychange', away)
+  }, [])
   useEscapeKey(onClose)
   const isSignup = mode === 'signup'
+  // An account is made with an email and a password inside an in-app browser only: anywhere else the form signs in.
+  const creating = IN_APP && isSignup
+  const emailOnly = !IN_APP && byEmail
+  // The line under the title. In an in-app browser the notice says how it goes there, so only token mode's
+  // own sign-up promise (LEGACY) is shown.
+  const sub = emailOnly ? t.emailSignInSub
+    : !IN_APP ? (isSignup ? t.loginSubSignup : t.loginSub)
+    : (isSignup && !freeMode) ? t.loginSubSignup : null
   const later = (fn, ms) => { const id = setTimeout(fn, ms); timers.current.push(id); return id }
 
   // Runs an auth call with a 20s guard so a hung request never leaves the button spinning.
@@ -2187,7 +2267,7 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
     if (!EMAIL_RE.test(em) || password.length < 6) { setMsg({ type: 'error', text: t.authWeak }); return }
     setMsg(null); setNeedConfirm(false)
     return guarded(async () => {
-      if (isSignup) {
+      if (creating) {
         const { data, error } = await sbClient.auth.signUp({ email: em, password, options: { emailRedirectTo: window.location.origin } })
         if (error) {
           if (error.code === 'user_already_exists' || error.code === 'email_exists') setMode('signin')
@@ -2242,9 +2322,25 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
     }
   }
 
+  // In-app only. The link for the real browser: the site, ?join=1 and the visitor's invite code, nothing else.
+  const outLink = () => joinLink(window.location.origin, window.location.search, ls.get('alimne_ref'))
+
+  // Asks the phone to open that link in its real browser (see browserHandoff). The page cannot be told whether
+  // that worked, so it looks: still in front a moment later means it did not, and the way by hand is shown
+  // (the app's menu, then "Open in browser"; "Copy link" is there either way). One try per tap, never by itself.
+  const openInBrowser = () => {
+    const to = browserHandoff(outLink(), navigator.userAgent)
+    wentAway.current = false
+    setStayed(!to)                 // no such address on this device: straight to the way by hand
+    if (!to) return
+    try { window.location.href = to } catch { /* this browser will not take the address: the check below says so */ }
+    later(() => { if (!wentAway.current) setStayed(true) }, 1800)
+  }
+
   const copyLink = async () => {
-    try { await navigator.clipboard.writeText(window.location.origin); setCopied(true); later(() => setCopied(false), 2000) }
-    catch { setMsg({ type: 'ok', text: window.location.origin }) }   // clipboard blocked → show it to copy by hand
+    const link = outLink()
+    try { await navigator.clipboard.writeText(link); setCopied(true); later(() => setCopied(false), 2000) }
+    catch { setMsg({ type: 'ok', text: link }) }   // clipboard blocked → show it to copy by hand
   }
 
   const inputStyle = {width:'100%', padding:'0.7rem 0.9rem', marginBottom:'0.6rem', borderRadius:10,
@@ -2254,6 +2350,41 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
   const alertBox = msg && (
     <div role="alert" style={{color: msg.type === 'error' ? '#ef4444' : '#22c55e', fontSize:'0.82rem', lineHeight:1.5,
       margin:'0 0 0.7rem', whiteSpace:'normal', textAlign: isAr ? 'right' : 'left', wordBreak:'break-word'}}>{msg.text}</div>
+  )
+  const rule = <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
+  // The one email form: it signs in, and inside an in-app browser it can also create the account (see `creating`)
+  const emailForm = (
+    <form onSubmit={emailAuth} noValidate>
+      <input
+        type="email" value={email} onChange={e => setEmail(e.target.value)}
+        placeholder={t.emailPh} autoComplete="username" inputMode="email" style={inputStyle}
+      />
+      <input
+        type="password" value={password} onChange={e => setPassword(e.target.value)}
+        placeholder={t.passwordPh} autoComplete={creating ? 'new-password' : 'current-password'}
+        style={{...inputStyle, marginBottom: creating ? '0.8rem' : '0.3rem'}}
+      />
+      {!creating && (
+        <div style={{textAlign: isAr ? 'left' : 'right', marginBottom:'0.5rem'}}>
+          <button type="button" onClick={forgot} style={{...linkBtn, fontSize:'0.75rem'}}>{t.forgotPw}</button>
+        </div>
+      )}
+      {alertBox}
+      {needConfirm && (
+        <button type="button" className="ctrl-btn" disabled={busy} onClick={() => resend(email.trim())}
+          style={{width:'100%', justifyContent:'center', marginBottom:'0.7rem'}}>
+          <Mail size={13} /> {t.resendConfirm}
+        </button>
+      )}
+      <button
+        type="submit"
+        className="submit-btn"
+        disabled={busy}
+        style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', marginBottom:'0.75rem', opacity: busy ? 0.7 : 1}}
+      >
+        {busy ? <Loader2 size={15} className="spin" /> : (creating ? t.emailBtnSignup : t.emailBtn)}
+      </button>
+    </form>
   )
   return (
     <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
@@ -2271,7 +2402,7 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
             <AlimneGlyph size={26} />
           </div>
           <div style={{fontWeight:700, fontSize:'1.15rem', color:'var(--text-primary)', marginBottom:'0.4rem'}}>
-            {sentTo ? t.checkInboxTitle : isSignup ? t.loginTitleSignup : t.loginTitle}
+            {sentTo ? t.checkInboxTitle : emailOnly ? t.emailSignInTitle : isSignup ? t.loginTitleSignup : t.signIn}
           </div>
           {/* Why this modal opened: the free guides are used and a free account is needed to make more */}
           {gateText && !sentTo && (
@@ -2282,13 +2413,11 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
               <span>{gateText}</span>
             </div>
           )}
-          {!sentTo && (
-            <div style={{fontSize:'0.82rem', color:'var(--text-muted)', lineHeight:1.55}}>
-              {isSignup ? t.loginSubSignup : t.loginSub}
-            </div>
+          {!sentTo && sub && (
+            <div style={{fontSize:'0.82rem', color:'var(--text-muted)', lineHeight:1.55}}>{sub}</div>
           )}
-          {/* Why bother (free mode): only things an account really gets — see perksOf() */}
-          {!sentTo && freeMode && (
+          {/* Why bother (free mode): only things an account really gets — see perksOf(). Not on the email view: its accounts exist. */}
+          {!sentTo && !emailOnly && freeMode && (
             <div role="note" style={{display:'flex', alignItems:'flex-start', gap:'0.45rem', marginTop:'0.85rem', padding:'0.6rem 0.75rem',
               borderRadius:10, background:'rgba(79,142,247,0.08)', border:'1px solid rgba(79,142,247,0.2)',
               fontSize:'0.78rem', lineHeight:1.5, color:'var(--text-secondary)', textAlign: isAr ? 'right' : 'left'}}>
@@ -2315,62 +2444,46 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
           </div>
         ) : (
           <>
-            {IN_APP && (
-              <div role="note" style={{padding:'0.7rem 0.8rem', borderRadius:10, marginBottom:'1rem',
-                background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.3)',
-                fontSize:'0.78rem', lineHeight:1.5, color:'var(--text-secondary)', textAlign: isAr ? 'right' : 'left'}}>
-                {t.inAppGoogle}
-                <button type="button" className="ctrl-btn" onClick={copyLink}
-                  style={{marginTop:'0.55rem', width:'100%', justifyContent:'center'}}>
-                  {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? t.referCopied : t.copyLink}
-                </button>
-              </div>
-            )}
-            <form onSubmit={emailAuth} noValidate>
-              <input
-                type="email" value={email} onChange={e => setEmail(e.target.value)}
-                placeholder={t.emailPh} autoComplete="username" inputMode="email" style={inputStyle}
-              />
-              <input
-                type="password" value={password} onChange={e => setPassword(e.target.value)}
-                placeholder={t.passwordPh} autoComplete={isSignup ? 'new-password' : 'current-password'}
-                style={{...inputStyle, marginBottom: isSignup ? '0.8rem' : '0.3rem'}}
-              />
-              {!isSignup && (
-                <div style={{textAlign: isAr ? 'left' : 'right', marginBottom:'0.5rem'}}>
-                  <button type="button" onClick={forgot} style={{...linkBtn, fontSize:'0.75rem'}}>{t.forgotPw}</button>
-                </div>
-              )}
-              {alertBox}
-              {needConfirm && (
-                <button type="button" className="ctrl-btn" disabled={busy} onClick={() => resend(email.trim())}
-                  style={{width:'100%', justifyContent:'center', marginBottom:'0.7rem'}}>
-                  <Mail size={13} /> {t.resendConfirm}
-                </button>
-              )}
-              <button
-                type="submit"
-                className="submit-btn"
-                disabled={busy}
-                style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', marginBottom:'0.75rem', opacity: busy ? 0.7 : 1}}
-              >
-                {busy ? <Loader2 size={15} className="spin" /> : (isSignup ? t.emailBtnSignup : t.emailBtn)}
-              </button>
-            </form>
-            <button
-              type="button"
-              onClick={() => { setMode(isSignup ? 'signin' : 'signup'); setMsg(null); setNeedConfirm(false) }}
-              style={{...linkBtn, marginBottom:'1rem'}}
-            >
-              {isSignup ? t.haveAccount : t.noAccount}
-            </button>
-            {!IN_APP && (
+            {IN_APP ? (
               <>
-                <div style={{display:'flex', alignItems:'center', gap:'0.75rem', margin:'0 0 1rem', color:'var(--text-muted)', fontSize:'0.75rem'}}>
-                  <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
-                  {t.orDivider}
-                  <span style={{flex:1, height:1, background:'var(--border, rgba(120,140,180,0.25))'}} />
+                <div role="note" style={{padding:'0.7rem 0.8rem', borderRadius:10, marginBottom:'1rem',
+                  background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.3)',
+                  fontSize:'0.78rem', lineHeight:1.5, color:'var(--text-secondary)', textAlign: isAr ? 'right' : 'left'}}>
+                  {t.inAppGoogle}
+                  <button type="button" className="submit-btn" onClick={openInBrowser}
+                    style={{marginTop:'0.65rem', width:'100%', justifyContent:'center', padding:'0.7rem 1.25rem', fontSize:'0.9rem'}}>
+                    <ExternalLink size={15} /> {t.openInBrowser}
+                  </button>
+                  {stayed && (
+                    <div role="status" style={{marginTop:'0.6rem', fontWeight:600, color:'var(--text-primary)'}}>{t.openManual}</div>
+                  )}
+                  <button type="button" className="ctrl-btn" onClick={copyLink}
+                    style={{marginTop:'0.55rem', width:'100%', justifyContent:'center'}}>
+                    {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? t.referCopied : t.copyLink}
+                  </button>
                 </div>
+                <div style={{display:'flex', alignItems:'center', gap:'0.75rem', margin:'0 0 1rem', color:'var(--text-muted)', fontSize:'0.75rem'}}>
+                  {rule}{isSignup ? t.orEmailSignup : t.orEmailSignin}{rule}
+                </div>
+                {emailForm}
+                <button
+                  type="button"
+                  onClick={() => { setMode(isSignup ? 'signin' : 'signup'); setMsg(null); setNeedConfirm(false) }}
+                  style={{...linkBtn, marginBottom:'1rem'}}
+                >
+                  {isSignup ? t.haveAccount : t.noAccount}
+                </button>
+              </>
+            ) : emailOnly ? (
+              <>
+                {emailForm}
+                <button type="button" style={linkBtn} onClick={() => { setByEmail(false); setMsg(null); setNeedConfirm(false) }}>
+                  {t.backToGoogle}
+                </button>
+              </>
+            ) : (
+              <>
+                {alertBox}
                 <button
                   type="button"
                   className="submit-btn"
@@ -2388,6 +2501,11 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
                     </svg>
                   )}
                   {t.loginBtn}
+                </button>
+                {/* The accounts that were made with an email and a password still sign in: a quiet way to their form */}
+                <button type="button" onClick={() => { setByEmail(true); setMsg(null) }}
+                  style={{...linkBtn, marginTop:'0.85rem', fontSize:'0.76rem', color:'var(--text-muted)', textDecoration:'underline'}}>
+                  {t.emailSignInLink}
                 </button>
               </>
             )}
@@ -2812,6 +2930,7 @@ export default function App() {
   const stashedAt    = useRef(0)         // when THIS page kept a copy for a sign-in it was about to leave for (0 = never)
   const loadDone     = useRef(false)     // the session restore of this page load has answered
   const atLoadSignIn = useRef(false)     // the current sign-in is the one the page loaded with (the return from Google)
+  const joinAsked    = useRef(false)     // ?join=1 was answered in this page load (the sign-up modal opens once)
 
   const setGate = fn => { const next = fn(gateRef.current); gateRef.current = next; setAnonGate(next); setGateKnown(true) }
   // What this page itself can say when it asks for a sign-in: its own device counter, or, for a browser that
@@ -2877,7 +2996,8 @@ export default function App() {
     const e = AUTH_URL_ERR
     if (!e) return
     const expired = e.code === 'otp_expired' || /expired|invalid/i.test(e.desc || '')
-    openLogin('signin', { type: 'error', text: expired ? t.linkExpired : t.authLinkError })
+    // an expired link is an email link (confirmation / reset): the modal opens on the email sign-in view
+    openLogin('signin', { type: 'error', text: expired ? t.linkExpired : t.authLinkError, byEmail: expired })
     try {
       const q = new URLSearchParams(window.location.search)
       ;['error', 'error_code', 'error_description'].forEach(k => q.delete(k))
@@ -2887,6 +3007,20 @@ export default function App() {
     } catch { /* ignore */ }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // ── Arrived from "Open in browser" (?join=1, see joinLink): the mark comes off the address at once, and once
+  //    the session restore has answered with nobody signed in, the sign-up modal opens. Never over a link that
+  //    came back with a sign-in error or for a password reset: those open their own dialog.
+  useEffect(() => {
+    if (!JOIN_IN_URL) return
+    try { window.history.replaceState(window.history.state, '', withoutJoin(window.location)) } catch { /* ignore */ }
+  }, [])
+  useEffect(() => {
+    if (!JOIN_IN_URL || authLoading || joinAsked.current) return
+    joinAsked.current = true
+    if (!session && authEnabled && !AUTH_URL_ERR && !RECOVERY_IN_URL) openLogin('signup')
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authLoading])
 
   // ── /api/config: free_mode + fair-use numbers, auth_enabled, the sign-in gate's numbers (free mode:
   //    anon_free_limit / anon_remaining / signin_after) and, in token mode, the anon preview counters.

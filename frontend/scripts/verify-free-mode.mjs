@@ -24,7 +24,12 @@
 //   * drives the SIGN-IN STASH (what was waiting is kept in this browser's IndexedDB for the Google
 //     round trip) against an in-memory IndexedDB: caps, restore once, tab binding, 30-minute limit,
 //     sign-out, every way IndexedDB can be missing or broken, and the Safari / iOS rule that a File read
-//     back from IndexedDB stops being readable once its record is deleted.
+//     back from IndexedDB stops being readable once its record is deleted;
+//   * checks GOOGLE-ONLY SIGN-UP: in a normal browser the sign-in modal is one "Continue with Google" button
+//     (no email form, no sign-up toggle) with a quiet link to an email sign-in-only view; inside an in-app
+//     browser (the module is loaded a second time under an in-app user agent) it is a notice, "Open in browser"
+//     and the email form with its sign-up; the link handed to the real browser (?join=1 and the invite code,
+//     nothing else), the intent:// / x-safari-https:// addresses, and the words in the Terms.
 // Exit code 0 = everything passed. No network, no DOM, no secrets.
 import { build } from 'esbuild'
 import fs from 'node:fs'
@@ -45,7 +50,9 @@ const EXPOSE = ['T', 'LEGACY', 'tFor', 'friendlyErr', 'streamSSE', 'perksOf', 'p
   'FREE_USES_DEFAULT', 'GATE_CODES', 'countInt', 'gateFromConfig', 'gateAfterDone', 'anonGated', 'termsText', 'AnonCounter',
   // why the server asked for a sign-in, and the copy kept in this browser for the sign-in round trip
   'signinText', 'holdsDeviceCount', 'AR_THE_COUNT', 'stashPlan', 'stashItems', 'signinStash',
-  'STASH_MAX_BYTES', 'STASH_MAX_FILES', 'STASH_MAX_AGE_MS', 'STASH_TAB_KEY', 'TERMS_STASH', 'stashToast']
+  'STASH_MAX_BYTES', 'STASH_MAX_FILES', 'STASH_MAX_AGE_MS', 'STASH_TAB_KEY', 'TERMS_STASH', 'stashToast',
+  // Google-only sign-up, and the way out of an in-app browser
+  'IN_APP', 'JOIN_IN_URL', 'joinLink', 'browserHandoff', 'withoutJoin', 'TERMS_ACCOUNT']
 
 await build({
   entryPoints: [appPath], bundle: true, format: 'esm', platform: 'node', outfile: outFile,
@@ -80,8 +87,8 @@ Object.defineProperty(globalThis, 'document', { configurable: true, writable: tr
   createElement: () => ({ style: {}, setAttribute: noop, appendChild: noop }), body: { appendChild: noop }, head: { appendChild: noop } } })
 Object.defineProperty(globalThis, 'localStorage', { value: local, configurable: true })
 Object.defineProperty(globalThis, 'sessionStorage', { value: session, configurable: true })
-const setNavLang = (language) => Object.defineProperty(globalThis, 'navigator', {
-  value: { language, userAgent: 'Mozilla/5.0 verify-free-mode', clipboard: undefined }, configurable: true })
+const setNavLang = (language, userAgent = 'Mozilla/5.0 verify-free-mode') => Object.defineProperty(globalThis, 'navigator', {
+  value: { language, userAgent, clipboard: undefined }, configurable: true })
 setNavLang('en-US')
 
 const M = await import(pathToFileURL(outFile).href)
@@ -450,7 +457,7 @@ for (const lang of ['en', 'ar']) {
   const gate = (over = {}) => renderToStaticMarkup(h(M.LoginModal, { onClose: noopFn, lang, sbClient: null, initialMode: 'signup', initialEmail: '', notice: null,
     freeMode: true, fair, gate: { reason: 'device', uses: 3 }, ...over }))
   check(`${lang}: gate modal opens in sign-up mode with the clear notice`,
-    gate().includes(esc(t.signinRequired(3))) && gate().includes(t.loginTitleSignup) && gate().includes(t.emailBtnSignup) && scan(gate(), lang).length === 0, scan(gate(), lang).join(','))
+    gate().includes(esc(t.signinRequired(3))) && gate().includes(t.loginTitleSignup) && gate().includes(esc(t.loginBtn)) && scan(gate(), lang).length === 0, scan(gate(), lang).join(','))
   check(`${lang}: the notice uses the number it is given`, gate({ gate: { reason: 'device', uses: 5 } }).includes(esc(t.signinRequired(5))) && !gate({ gate: { reason: 'device', uses: 5 } }).includes(esc(t.signinRequired(3))))
   check(`${lang}: a normal sign-in modal has no gate notice`, [null, undefined].every(g => !gate({ gate: g }).includes('role="status"') && !gate({ gate: g }).includes(esc(t.signinRequired(3)))))
   check(`${lang}: token mode never shows the gate notice`, !gate({ freeMode: false }).includes(esc(t.signinRequired(3))))
@@ -844,6 +851,170 @@ for (const lang of ['en', 'ar']) {
   check(`${lang}: token mode keeps its old privacy line and Terms (no browser copy is made there)`,
     leg.privacy !== t.privacy && !/Google/.test(leg.privacy) && !M.termsText(lang, false, 3).includes(M.TERMS_STASH[lang]) &&
     (lang === 'en' ? /never written to disk or seen by anyone/.test(leg.privacy) : /لا تُكتب على القرص ولا يراها أحد/.test(leg.privacy)))
+}
+
+// ── 13. Google-only sign-up ──────────────────────────────────────────────────────────
+// Accounts are made with Google. A normal browser shows ONE action, "Continue with Google", and a quiet link to an
+// email sign-in-only view for the accounts that have a password. Inside an in-app browser Google refuses to sign
+// anyone in: there the modal is a notice, "Open in browser" and the email form with its sign-up / sign-in toggle.
+section('13. Google-only sign-up: the modal in a normal browser')
+const loginOf = (mod, lang, over = {}) => renderToStaticMarkup(h(mod.LoginModal, { onClose: noopFn, lang, sbClient: null, initialMode: 'signup',
+  initialEmail: '', notice: null, freeMode: true, fair, ...over }))
+const count = (text, piece) => text.split(piece).length - 1
+// the Google button itself (its label closes the button; its logo is the only thing drawn in Google's yellow)
+const googleBtn = (html, t) => count(html, `${esc(t.loginBtn)}</button>`)
+const GOOGLE_LOGO = '#FFC107'
+const TERMS_LINE = { en: 'By continuing, you agree to our Terms &amp; Conditions', ar: 'بالمتابعة، أنت توافق على شروطنا وأحكامنا' }
+// the copy this change added or reworded
+const LOGIN_KEYS = ['loginSub', 'loginTitleSignup', 'loginSubSignup', 'emailSignInLink', 'emailSignInTitle', 'emailSignInSub', 'backToGoogle',
+  'inAppGoogle', 'openInBrowser', 'openManual', 'orEmailSignup', 'orEmailSignin', 'wrongPassword']
+check('this module was loaded in a normal browser', M.IN_APP === false && M.JOIN_IN_URL === false)
+for (const k of LOGIN_KEYS) check(`sign-in copy '${k}' exists in EN and AR, as text`, typeof T.en[k] === 'string' && T.en[k] && typeof T.ar[k] === 'string' && /[؀-ۿ]/.test(T.ar[k]))
+check('the copy that went with the old email-first modal is gone', !('orDivider' in T.en) && !('orDivider' in T.ar))
+check('EN title / sub: sign-up', T.en.loginTitleSignup === 'Create your free account' && T.en.loginSubSignup === 'Continue with Google. No password, no card.')
+check('EN sub: sign-in names the Google account, and says the same button makes a new account', /^Continue with the Google account you signed up with\./.test(T.en.loginSub) && /creates a free account/.test(T.en.loginSub))
+for (const lang of ['en', 'ar']) {
+  const t = T[lang]
+  const words = LOGIN_KEYS.map(k => t[k])
+  check(`${lang}: no em dash in the new sign-in copy`, words.every(w => !/—/.test(w)), words.filter(w => /—/.test(w)).join(' | '))
+  check(`${lang}: the new sign-in copy promises no "one tap" / "instant", no "unlimited", no unqualified "no sign-up"`,
+    words.every(w => !/one[- ]tap|instant|بنقرة واحدة|فوراً|فوري/i.test(w) && scan(w, lang).length === 0 && unqualified(w, lang).length === 0))
+  for (const mode of ['signup', 'signin']) {
+    const html = loginOf(M, lang, { initialMode: mode })
+    check(`${lang}: ${mode} = ONE action, "Continue with Google"`, googleBtn(html, t) === 1 && count(html, GOOGLE_LOGO) === 1 && count(html, 'class="submit-btn"') === 1)
+    check(`${lang}: ${mode} shows no email / password field and no form by default`,
+      !html.includes('<form') && !html.includes('<input') && !html.includes('type="password"') && !html.includes(esc(t.forgotPw)))
+    check(`${lang}: ${mode} has no "or" divider and no sign-up / sign-in toggle`,
+      [t.noAccount, t.haveAccount, t.emailBtnSignup, t.emailBtn, t.orEmailSignup, t.orEmailSignin].every(x => !html.includes(esc(x))))
+    check(`${lang}: ${mode} has the short title and sub`, html.includes(`>${esc(mode === 'signup' ? t.loginTitleSignup : t.signIn)}</div>`) &&
+      html.includes(esc(mode === 'signup' ? t.loginSubSignup : t.loginSub)))
+    check(`${lang}: ${mode} keeps the perks note and the Terms line`, html.includes(esc(t.perksNote(M.perksOf(t, fair)))) && html.includes(TERMS_LINE[lang]))
+    check(`${lang}: ${mode} has the quiet link for accounts that were made with an email`, count(html, esc(t.emailSignInLink)) === 1)
+    check(`${lang}: ${mode} shows nothing of the in-app view`, [t.inAppGoogle, t.openInBrowser, t.openManual, t.copyLink].every(x => !html.includes(esc(x))))
+    const noticed = loginOf(M, lang, { initialMode: mode, notice: { type: 'error', text: t.sessionExpired } })
+    check(`${lang}: ${mode} still shows a notice (session expired, an OAuth error) above the Google button`,
+      noticed.includes(`role="alert"`) && noticed.includes(esc(t.sessionExpired)) && googleBtn(noticed, t) === 1 &&
+      noticed.indexOf(esc(t.sessionExpired)) < noticed.indexOf(GOOGLE_LOGO))
+  }
+  check(`${lang}: the gate's reason box stays, above the Google button`, (() => {
+    const html = loginOf(M, lang, { gate: { reason: 'device', uses: 3 } })
+    return html.includes('role="status"') && googleBtn(html, t) === 1 && html.indexOf(esc(t.signinRequired(3))) < html.indexOf(GOOGLE_LOGO) && !html.includes('<form')
+  })())
+  // the email view (opened by the link; an email link that came back expired opens it at once): sign-in ONLY
+  for (const mode of ['signup', 'signin']) {
+    const html = loginOf(M, lang, { initialMode: mode, notice: { type: 'error', text: t.linkExpired, byEmail: true } })
+    check(`${lang}: the email view (${mode}) is a sign-in form: email, password, forgot password, back to Google`,
+      count(html, '<form') === 1 && html.includes('type="email"') && html.includes('type="password"') && html.includes(esc(t.forgotPw)) &&
+      html.includes(esc(t.backToGoogle)) && html.includes(`>${esc(t.emailSignInTitle)}</div>`) && html.includes(esc(t.emailSignInSub)) && html.includes(esc(t.emailBtn)))
+    check(`${lang}: the email view (${mode}) can create NO account: no sign-up button, no toggle, a current password only`,
+      [t.emailBtnSignup, t.noAccount, t.haveAccount, t.loginTitleSignup, t.orEmailSignup].every(x => !html.includes(esc(x))) &&
+      html.includes('autoComplete="current-password"') && !html.includes('new-password'))
+    check(`${lang}: the email view (${mode}) shows the notice it was opened with, and no Google button`,
+      html.includes(esc(t.linkExpired)) && googleBtn(html, t) === 0 && !html.includes(GOOGLE_LOGO))
+  }
+  const legacy = loginOf(M, lang, { freeMode: false })
+  check(`${lang}: token mode gets the same Google-only modal`, googleBtn(legacy, t) === 1 && !legacy.includes('<form') && legacy.includes(esc(t.emailSignInLink)))
+}
+
+section('13b. Google-only sign-up: the way out of an in-app browser')
+const ORIGIN = 'https://alimne.app'
+const UA = {
+  igAndroid: 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UQ1A.240205.004; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/126.0.6478.134 Mobile Safari/537.36 Instagram 340.0.0.22.109 Android',
+  igIphone: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 340.0.2.19.105',
+  desktop: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+}
+const jl = M.joinLink, bh = M.browserHandoff, wj = M.withoutJoin
+check('the link for the real browser is the site and ?join=1', jl(ORIGIN, '', null) === 'https://alimne.app/?join=1' && jl(ORIGIN, undefined, undefined) === 'https://alimne.app/?join=1')
+check('...plus the invite code of the address, or the one kept from it at load (the address wins)',
+  jl(ORIGIN, '?ref=ab12cd34', null) === 'https://alimne.app/?join=1&ref=AB12CD34' && jl(ORIGIN, '', 'AB12CD34') === 'https://alimne.app/?join=1&ref=AB12CD34' &&
+  jl(ORIGIN, '?ref=AAAA1111', 'BBBB2222') === 'https://alimne.app/?join=1&ref=AAAA1111')
+check('...and nothing else of the address: no token, no other query data, no hash',
+  jl(ORIGIN, '?utm_source=ig&fbclid=xyz&access_token=SECRET&code=abc&ref=AB12CD34&sub=success&join=1', null) === 'https://alimne.app/?join=1&ref=AB12CD34' &&
+  jl(ORIGIN, '?access_token=SECRET&refresh_token=R&type=recovery', null) === 'https://alimne.app/?join=1' && !jl(ORIGIN, '?x=1#access_token=SECRET', null).includes('SECRET'))
+check('an invite code that is not a plain code never travels', ['a b', '<script>', 'AB&x=1', 'x'.repeat(40), 'ab', '../..', 'A#B'].every(bad =>
+  jl(ORIGIN, '?ref=' + encodeURIComponent(bad), null) === 'https://alimne.app/?join=1' && jl(ORIGIN, '', bad) === 'https://alimne.app/?join=1') &&
+  jl(ORIGIN, '', 42) === 'https://alimne.app/?join=1')
+const out = jl(ORIGIN, '?ref=ab12cd34', null)
+check('Android: an intent:// address with scheme=https, for the default browser (no Chrome needed)',
+  bh(out, UA.igAndroid) === 'intent://alimne.app/?join=1&ref=AB12CD34#Intent;scheme=https;end' && !/package=|chrome/i.test(bh(out, UA.igAndroid)))
+check('iPhone / iPad: x-safari-https://', bh(out, UA.igIphone) === 'x-safari-https://alimne.app/?join=1&ref=AB12CD34' &&
+  bh(out, UA.igIphone.replace('iPhone;', 'iPad;')).startsWith('x-safari-https://alimne.app/'))
+check('no such address on other devices, or for a link that is not https: the modal then shows the way by hand',
+  bh(out, UA.desktop) === '' && bh(out, '') === '' && bh(out, undefined) === '' && bh('http://localhost:3000/?join=1', UA.igAndroid) === '' &&
+  bh('javascript:alert(1)', UA.igAndroid) === '' && bh('', UA.igIphone) === '' && bh(null, UA.igIphone) === '')
+check('on arrival ?join=1 comes off the address; the invite code, other query data and the hash stay',
+  wj({ pathname: '/', search: '?join=1', hash: '' }) === '/' && wj({ pathname: '/', search: '?join=1&ref=AB12CD34', hash: '' }) === '/?ref=AB12CD34' &&
+  wj({ pathname: '/', search: '?utm_source=ig&join=1', hash: '#access_token=abc&type=recovery' }) === '/?utm_source=ig#access_token=abc&type=recovery' &&
+  wj({ pathname: '/s/abc', search: '', hash: '#x' }) === '/s/abc#x')
+
+// the same module, loaded the way an in-app browser loads it (IN_APP is read once, at load)
+const realWarn = console.warn   // each load makes its own Supabase client, and supabase-js remarks on that: not our subject
+console.warn = (...a) => { if (!String(a[0]).includes('Multiple GoTrueClient instances')) realWarn(...a) }
+setNavLang('en-US', UA.igAndroid)
+const MI = await import(pathToFileURL(outFile).href + '?in-app')
+// ...and the way the real browser loads the link it was handed
+setNavLang('en-US')
+fakeWindow.location.search = '?join=1&ref=ab12cd34'
+const MJ = await import(pathToFileURL(outFile).href + '?join')
+fakeWindow.location.search = ''
+console.warn = realWarn
+check('an in-app browser is recognised, and ?join=1 is read at load', MI.IN_APP === true && MI.JOIN_IN_URL === false && MJ.JOIN_IN_URL === true && MJ.IN_APP === false)
+for (const lang of ['en', 'ar']) {
+  const t = T[lang]
+  check(`${lang}: the notice says Google sign-in is not allowed inside this app, and names no app and no browser`,
+    /not allowed inside this app|غير مسموح به داخل هذا التطبيق/.test(t.inAppGoogle) && /Google/.test(t.inAppGoogle) &&
+    [t.inAppGoogle, t.openManual].every(x => !/Instagram|Facebook|TikTok|Snapchat|LINE|Safari|Chrome/i.test(x)))
+  check(`${lang}: the way by hand names the menu, "Open in browser" and the link to copy`,
+    lang === 'en' ? /menu/.test(t.openManual) && /Open in browser/.test(t.openManual) && /copy the link/.test(t.openManual)
+      : /قائمة/.test(t.openManual) && t.openManual.includes(t.openInBrowser) && /انسخ الرابط/.test(t.openManual))
+  for (const mode of ['signup', 'signin']) {
+    const html = loginOf(MI, lang, { initialMode: mode })
+    const signup = mode === 'signup'
+    check(`${lang}: in-app ${mode} shows the notice and a primary "Open in browser" button`,
+      html.includes(esc(t.inAppGoogle)) && new RegExp(`<button type="button" class="submit-btn"[^>]*>(?:<svg.*?</svg>)? ?${esc(t.openInBrowser)}</button>`).test(html))
+    check(`${lang}: in-app ${mode} keeps "Copy link", and shows the way by hand only after a try that went nowhere`, html.includes(esc(t.copyLink)) && !html.includes(esc(t.openManual)))
+    check(`${lang}: in-app ${mode} has NO Google button (it cannot work there)`, googleBtn(html, t) === 0 && !html.includes(GOOGLE_LOGO))
+    check(`${lang}: in-app ${mode} has the email form under a divider that says what it is for`,
+      count(html, '<form') === 1 && html.includes('type="email"') && html.includes('type="password"') && html.includes(esc(signup ? t.orEmailSignup : t.orEmailSignin)) &&
+      html.indexOf(esc(t.openInBrowser)) < html.indexOf(esc(signup ? t.orEmailSignup : t.orEmailSignin)) && html.indexOf(esc(signup ? t.orEmailSignup : t.orEmailSignin)) < html.indexOf('<form'))
+    check(`${lang}: in-app ${mode} keeps the sign-up / sign-in toggle`, html.includes(esc(signup ? t.haveAccount : t.noAccount)) && !html.includes(esc(signup ? t.noAccount : t.haveAccount)))
+    check(`${lang}: in-app ${mode} submits as ${signup ? 'a new account (new password, no "forgot")' : 'a sign-in (current password, "forgot password")'}`, signup
+      ? html.includes(esc(t.emailBtnSignup)) && html.includes('autoComplete="new-password"') && !html.includes(esc(t.forgotPw))
+      : html.includes(esc(t.emailBtn)) && html.includes('autoComplete="current-password"') && html.includes(esc(t.forgotPw)) && !html.includes(esc(t.emailBtnSignup)))
+    check(`${lang}: in-app ${mode} never says "Continue with Google" under the title, and has no link to a view it does not need`,
+      !html.includes(esc(t.loginSubSignup)) && !html.includes(esc(t.loginSub)) && !html.includes(esc(t.emailSignInLink)) && !html.includes(esc(t.backToGoogle)))
+    check(`${lang}: in-app ${mode} keeps the title, the perks note and the Terms line`, html.includes(`>${esc(signup ? t.loginTitleSignup : t.signIn)}</div>`) &&
+      html.includes(esc(t.perksNote(M.perksOf(t, fair)))) && html.includes(TERMS_LINE[lang]))
+  }
+  check(`${lang}: in-app, the gate's reason box and a notice still show`, (() => {
+    const html = loginOf(MI, lang, { gate: { reason: 'device', uses: 3 }, notice: { type: 'error', text: t.sessionExpired } })
+    return html.includes(esc(t.signinRequired(3))) && html.includes('role="alert"') && html.includes(esc(t.sessionExpired))
+  })())
+  check(`${lang}: in-app, token mode keeps its own sign-up promise`, loginOf(MI, lang, { freeMode: false }).includes(LEGACY[lang].loginSubSignup) &&
+    !loginOf(MI, lang, { freeMode: false, initialMode: 'signin' }).includes(LEGACY[lang].loginSubSignup))
+}
+
+section('13c. Google-only sign-up: the Terms say how an account is made, and what it keeps')
+for (const lang of ['en', 'ar']) {
+  const terms = M.termsText(lang, true, 3)
+  const s2 = lang === 'en' ? '2. FREE USE, FAIR USE' : '٢. الاستخدام المجاني', s3 = lang === 'en' ? '3. YOUR FILES AND PRIVACY' : '٣. ملفاتك وخصوصيتك'
+  const s4 = lang === 'en' ? '4. AI-GENERATED CONTENT DISCLAIMER' : '٤. إخلاء مسؤولية'
+  const made = lang === 'en' ? 'Accounts are created with Google ("Continue with Google").' : 'يُنشأ الحساب عبر Google («المتابعة عبر Google»).'
+  check(`${lang}: section 2 says accounts are made with Google, and with an email and a password inside an in-app browser`,
+    terms.indexOf(made) > terms.indexOf(s2) && terms.indexOf(made) < terms.indexOf(s3) &&
+    (lang === 'en' ? /Inside an in-app browser .*where Google does not allow its sign-in, you can open Alimne in your browser, or create the account with an email address and a password\./.test(terms)
+      : /داخل متصفح أحد التطبيقات .*حيث لا يسمح Google بتسجيل الدخول، فيمكنك فتح علّمني في متصفحك أو إنشاء الحساب ببريد إلكتروني وكلمة مرور\./.test(terms)))
+  check(`${lang}: section 3 says what an account keeps (name, email, picture, Google's identifier; never the Google password)`,
+    terms.includes(M.TERMS_ACCOUNT[lang]) && terms.indexOf(M.TERMS_ACCOUNT[lang]) > terms.indexOf(s3) && terms.indexOf(M.TERMS_ACCOUNT[lang]) < terms.indexOf(M.TERMS_STASH[lang]) &&
+    terms.indexOf(M.TERMS_STASH[lang]) < terms.indexOf(s4) &&
+    (lang === 'en' ? /your name, your email address and your profile picture/.test(M.TERMS_ACCOUNT.en) && /We never see your Google password/.test(M.TERMS_ACCOUNT.en) &&
+        /never to Alimne's own server/.test(M.TERMS_ACCOUNT.en)
+      : /باسمك وبريدك الإلكتروني وصورة ملفك الشخصي/.test(M.TERMS_ACCOUNT.ar) && /لا نرى كلمة مرور Google/.test(M.TERMS_ACCOUNT.ar) && /لا إلى خادم علّمني/.test(M.TERMS_ACCOUNT.ar)))
+  check(`${lang}: the Terms modal renders both, and neither makes a storage, paywall or 'no account' claim`,
+    [made, M.TERMS_ACCOUNT[lang]].every(x => renderToStaticMarkup(h(M.TermsModal, { lang, freeMode: true, freeUses: 3, onClose: noopFn })).includes(esc(x)) &&
+      unqualified(x, lang).length === 0 && scan(x, lang).length === 0 && !/never stored|nothing stored|no data stored|no storage/i.test(x) && !/—/.test(x)))
+  check(`${lang}: with no free guide at all (ANON_FREE_USES=0) the Terms still say how an account is made`, M.termsText(lang, true, 0).includes(made))
+  check(`${lang}: token mode keeps its old Terms`, !M.termsText(lang, false, 3).includes(made) && !M.termsText(lang, false, 3).includes(M.TERMS_ACCOUNT[lang]))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)
