@@ -1798,6 +1798,756 @@ def admin_session():
     return "", 204
 
 
+# ── Admin dashboard: data helpers ──────────────────────────────────────────────
+# Alimne is free and the goal is sign-ups, so the dashboard leads with sign-ups,
+# then the funnel (visit → anonymous guide → sign-in gate → account → first guide)
+# and today's AI budget. The helpers below are PURE: plain lists/dicts in, plain
+# dicts out, no Flask and no Supabase, so they are unit-tested directly
+# (tests/test_admin_dashboard.py). _admin_load() does every database read;
+# admin_page() only renders. Every value they are handed may be junk or hostile.
+import datetime as _admin_dt     # module level on purpose: never a lazy import inside a request thread
+
+_ADMIN_USERS_MAX     = 2000   # newest accounts loaded (table + day counts); the total is an exact count
+_ADMIN_GATE_MAX      = 5000   # anonymous-device rows of the last 7 days
+_ADMIN_ACTIVITY_MAX  = 2000   # per-account fair-use counters (who made a guide since free mode)
+_ADMIN_LOAD_BUDGET_S = 12.0   # all the dashboard's reads share this; past it the rest say "could not load"
+_ADMIN_USER_COLS = ("id,email,name,created_at,generations_count,last_used_at,referred_by,"
+                    "referral_code,referral_paid,subscription_status,subscription_id,"
+                    "subscription_period_end,tokens_remaining")
+_ADMIN_DOW = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_ADMIN_MON = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+def _admin_now():
+    """The dashboard's clock: aware UTC 'now' (one place, so tests can pin it)."""
+    return _admin_dt.datetime.now(_admin_dt.timezone.utc)
+
+def _admin_utc(now):
+    """`now` as an aware UTC datetime (a naive one is taken as UTC)."""
+    if now.tzinfo is None:
+        return now.replace(tzinfo=_admin_dt.timezone.utc)
+    return now.astimezone(_admin_dt.timezone.utc)
+
+def _admin_ts(v):
+    """A Supabase timestamp (or a 'YYYY-MM-DD' day) → aware UTC datetime, or None.
+    Never raises, whatever it is given."""
+    try:
+        if isinstance(v, _admin_dt.datetime):
+            return _admin_utc(v)
+        if not isinstance(v, str) or len(v) > 40:
+            return None
+        d = _parse_ts(v)
+        return d.astimezone(_admin_dt.timezone.utc) if d else None
+    except (ValueError, OverflowError, OSError):
+        return None
+
+def _admin_int(v, default=0):
+    """A database number as an int; anything else (None, text, a mock) → default."""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, int):
+        return v
+    try:
+        if isinstance(v, float):
+            return int(v)
+        if isinstance(v, str):
+            return int(v.strip())
+    except (ValueError, OverflowError):
+        pass
+    return default
+
+def _admin_is_count(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+def _admin_rows(res):
+    """The row dicts of a Supabase response ([] for anything unexpected)."""
+    data = getattr(res, "data", None)
+    return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+
+def _admin_exact(res):
+    """The exact row count of a response made with count='exact', or None."""
+    c = getattr(res, "count", None)
+    return c if _admin_is_count(c) else None
+
+def _admin_day_label(d):
+    return f"{_ADMIN_DOW[d.weekday()]} {d.day} {_ADMIN_MON[d.month - 1]}"
+
+def _admin_window_start(now, days):
+    """Midnight UTC that opens the `days`-day window ending today (today included)."""
+    first = _admin_utc(now).date() - _admin_dt.timedelta(days=max(1, days) - 1)
+    return _admin_dt.datetime(first.year, first.month, first.day, tzinfo=_admin_dt.timezone.utc)
+
+def _admin_rate(num, den):
+    """num / den, or None when there is nothing to divide by."""
+    return (num / den) if den and den > 0 else None
+
+def _admin_pct(rate, cap=None):
+    """A rate as text: '-' for no data, one decimal under 10%, and '100%+' past
+    `cap` (a conversion between two separately counted things can pass 100%)."""
+    if rate is None:
+        return "-"
+    if cap is not None and rate > cap:
+        return f"{int(cap * 100 + 0.5)}%+"
+    p = max(0.0, rate) * 100
+    if 0 < p < 10:
+        t = f"{p:.1f}"
+        return (t[:-2] if t.endswith(".0") else t) + "%"
+    return f"{int(p + 0.5):,}%"
+
+def _admin_signup_stats(users, now, days=14, total=None):
+    """Sign-ups from users.created_at, by UTC day → {"today", "yesterday", "last7",
+    "total", "series": [{"day", "label", "count", "today"}, ...] oldest first}.
+    "last7" is today plus the six days before it (the last 7 bars of the series).
+    `total` is the exact database count when known (the row list may be capped)."""
+    today = _admin_utc(now).date()
+    one = _admin_dt.timedelta(days=1)
+    per_day, held = {}, 0
+    for u in users or ():
+        held += 1
+        ts = _admin_ts(u.get("created_at")) if isinstance(u, dict) else None
+        if ts is not None:
+            per_day[ts.date()] = per_day.get(ts.date(), 0) + 1
+    series = []
+    for i in range(days - 1, -1, -1):
+        d = today - one * i
+        series.append({"day": d.isoformat(), "label": _admin_day_label(d),
+                       "count": per_day.get(d, 0), "today": i == 0})
+    return {"today": per_day.get(today, 0), "yesterday": per_day.get(today - one, 0),
+            "last7": sum(per_day.get(today - one * i, 0) for i in range(7)),
+            "total": max(held, total) if _admin_is_count(total) else held,
+            "series": series}
+
+def _admin_counter_now(row, now, window_hours=24):
+    """(units used in the counter row's CURRENT window, seconds until it resets or
+    None). anon_consume only zeroes a counter on its next use, so a row whose
+    window is over still holds the old count: that is 0 now."""
+    if not isinstance(row, dict):
+        return 0, None
+    start = _admin_ts(row.get("window_start"))
+    if start is None:
+        return 0, None
+    left = (start + _admin_dt.timedelta(hours=window_hours) - now).total_seconds()
+    if left <= 0:
+        return 0, None
+    return max(0, _admin_int(row.get("count"))), int(left)
+
+def _admin_gate_devices(rows, limit, now, days=7):
+    """anon_usage rows 'gate:dev:<device>' → {"devices": anonymous devices that made
+    at least 1 guide in the window, "at_gate": those that used all `limit` free
+    guides, i.e. were shown the sign-in gate}. A row with count 0 was charged and
+    refunded (no guide), so it is not a device that made one."""
+    start = _admin_window_start(now, days)
+    limit = max(1, _admin_int(limit, 3))
+    devices = at_gate = 0
+    for r in rows or ():
+        if not isinstance(r, dict) or not str(r.get("key") or "").startswith("gate:dev:"):
+            continue
+        n, ts = _admin_int(r.get("count")), _admin_ts(r.get("last_at"))
+        if n < 1 or ts is None or ts < start:
+            continue
+        devices += 1
+        if n >= limit:
+            at_gate += 1
+    return {"devices": devices, "at_gate": at_gate}
+
+def _admin_user_activity(rows, now, window_hours=24):
+    """Per-account fair-use counters (anon_usage rows 'fair:user:<uid>') →
+    {uid: {"last_at": datetime or None, "recent": guides in the running 24 h window}}.
+    In free mode nothing increments users.generations_count (only the old
+    consume_token RPC did), so these counters are the one sign that an account
+    has made a guide since Alimne went free."""
+    now, out = _admin_utc(now), {}
+    for r in rows or ():
+        if not isinstance(r, dict):
+            continue
+        key = str(r.get("key") or "")
+        uid = key[len("fair:user:"):] if key.startswith("fair:user:") else ""
+        if uid:
+            out[uid] = {"last_at": _admin_ts(r.get("last_at")),
+                        "recent": _admin_counter_now(r, now, window_hours)[0]}
+    return out
+
+def _admin_made_guide(user, activity):
+    """True when this account has made at least one guide: the lifetime counter
+    (token era) or a fair-use counter of its own (free mode)."""
+    return (_admin_int(user.get("generations_count")) > 0
+            or str(user.get("id") or "") in (activity or {}))
+
+def _admin_visits(visit_rows, now, days=7):
+    """visit_stats rows ({"day": 'YYYY-MM-DD', "count": n}) → all-time, today, and
+    the `days`-day window ending today."""
+    today = _admin_utc(now).date()
+    first = _admin_window_start(now, days).date()
+    total = today_n = window = 0
+    for r in visit_rows or ():
+        if not isinstance(r, dict):
+            continue
+        c = max(0, _admin_int(r.get("count")))
+        ts = _admin_ts(r.get("day"))
+        total += c
+        if ts is None:
+            continue
+        if ts.date() == today:
+            today_n += c
+        if first <= ts.date() <= today:
+            window += c
+    return {"total": total, "today": today_n, "window": window}
+
+def _admin_funnel(visit_rows, gate_rows, users, now, gate_limit, activity=None, days=7,
+                  device_counts=None):
+    """The sign-up funnel of the last `days` UTC days (today included):
+    visits → anonymous devices that made a guide → devices that reached the sign-in
+    gate → new accounts → new accounts that made a guide. Each step carries its
+    conversion from the step before (None when that step is 0), and
+    "gate_signup_rate" = new accounts / devices at the gate (None: no data).
+    Devices and accounts are counted separately, so the rate is an estimate.
+    `device_counts` = exact (devices, at_gate) when the row sample was cut short."""
+    start = _admin_window_start(now, days)
+    visits = _admin_visits(visit_rows, now, days)["window"]
+    gate = _admin_gate_devices(gate_rows, gate_limit, now, days)
+    devices, at_gate = gate["devices"], gate["at_gate"]
+    if device_counts:
+        devices = max(devices, _admin_int(device_counts[0]))
+        at_gate = max(at_gate, _admin_int(device_counts[1]))
+    accounts = activated = 0
+    for u in users or ():
+        ts = _admin_ts(u.get("created_at")) if isinstance(u, dict) else None
+        if ts is None or ts < start:
+            continue
+        accounts += 1
+        if _admin_made_guide(u, activity):
+            activated += 1
+    values = [("visits", "Visits", visits), ("devices", "Anonymous devices", devices),
+              ("gate", "Reached the sign-in gate", at_gate), ("accounts", "New accounts", accounts),
+              ("activated", "Made a guide", activated)]
+    steps, prev = [], None
+    for key, label, value in values:
+        steps.append({"key": key, "label": label, "value": value,
+                      "rate": None if prev is None else _admin_rate(value, prev)})
+        prev = value
+    return {"days": days, "steps": steps, "gate_signup_rate": _admin_rate(accounts, at_gate),
+            "gate_live": devices > 0}
+
+def _admin_budget(rows, now, global_limit, anon_limit=None, window_hours=24):
+    """Today's AI budget from the 'fair:global' (and 'fair:global:anon') counter
+    rows → {"used", "limit", "pct", "warn" (over 80%), "resets_in_s", "window_hours",
+    "anon": the same for the anonymous slice, or None when there is no such cap}."""
+    now = _admin_utc(now)
+    by_key = {r["key"]: r for r in rows or () if isinstance(r, dict) and isinstance(r.get("key"), str)}
+    def meter(key, limit):
+        used, left = _admin_counter_now(by_key.get(key), now, window_hours)
+        limit = max(0, _admin_int(limit))
+        pct = _admin_rate(used, limit)
+        return {"used": used, "limit": limit, "pct": pct,
+                "warn": pct is not None and pct > 0.8, "resets_in_s": left}
+    out = meter("fair:global", global_limit)
+    out["anon"] = meter("fair:global:anon", anon_limit) if anon_limit is not None else None
+    out["window_hours"] = window_hours
+    return out
+
+def _admin_gen_gate(g):
+    """The live generation gate, read from whatever the module exposes (`g` is its
+    globals) → {"running", "slots", "waiting", "wait_max"}, or None."""
+    slots = g.get("_GEN_SLOTS")
+    free = getattr(g.get("_gen_sem"), "_value", None)
+    if not _admin_is_count(slots) or not _admin_is_count(free):
+        return None
+    waiting, wait_max = g.get("_gen_waiting"), g.get("_GEN_WAIT_MAX")
+    return {"running": max(0, min(slots, slots - free)), "slots": slots,
+            "waiting": len(waiting) if isinstance(waiting, (list, tuple)) else 0,
+            "wait_max": wait_max if _admin_is_count(wait_max) else None}
+
+def _admin_load(sb, now, gate_limit):
+    """Every database read of the dashboard, through the service-role client `sb`.
+    Read-only, column- and row-bounded, each in its own try/except (a failed block
+    is named in "errors" and the page renders the rest), and all of them share
+    _ADMIN_LOAD_BUDGET_S so a slow database cannot pin a web thread for long."""
+    out = {"users": [], "users_total": None, "activity_rows": [], "gate_rows": [], "gate_exact": None,
+           "fair_rows": [], "visit_rows": [], "gens": [], "gens_total": 0, "leads": [], "errors": {}}
+    if sb is None:
+        return out
+    t0 = time.monotonic()
+    since = _admin_window_start(now, 7).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def read(name, fn):
+        if time.monotonic() - t0 > _ADMIN_LOAD_BUDGET_S:
+            out["errors"][name] = "the database is slow"
+            return None
+        try:
+            return fn()
+        except Exception as exc:
+            _log.warning("admin dashboard: could not load %s: %s: %s", name, type(exc).__name__, exc)
+            out["errors"][name] = type(exc).__name__
+            return None
+
+    def users():
+        def run(cols):
+            return (sb.table("users").select(cols, count="exact")
+                      .order("created_at", desc=True).limit(_ADMIN_USERS_MAX).execute())
+        try:
+            return run(_ADMIN_USER_COLS)
+        except Exception as exc:
+            # Most likely a column of a later migration is missing: take what the table has.
+            _log.info("admin dashboard: users column list refused (%s), reading all columns", type(exc).__name__)
+            return run("*")
+    res = read("users", users)
+    if res is not None:
+        out["users"], out["users_total"] = _admin_rows(res), _admin_exact(res)
+
+    res = read("activity", lambda: sb.table("anon_usage").select("key,count,window_start,last_at")
+               .like("key", "fair:user:%").order("last_at", desc=True).limit(_ADMIN_ACTIVITY_MAX).execute())
+    if res is not None:
+        out["activity_rows"] = _admin_rows(res)
+
+    def gate():
+        res = (sb.table("anon_usage").select("key,count,last_at", count="exact")
+                 .like("key", "gate:dev:%").gte("last_at", since).gte("count", 1)
+                 .order("last_at", desc=True).limit(_ADMIN_GATE_MAX).execute())
+        rows, total = _admin_rows(res), _admin_exact(res)
+        exact = None
+        if total is not None and total > len(rows):
+            # The response was capped (PostgREST max-rows): count the gate devices exactly.
+            hit = (sb.table("anon_usage").select("key", count="exact")
+                     .like("key", "gate:dev:%").gte("last_at", since).gte("count", gate_limit)
+                     .limit(1).execute())
+            exact = (total, _admin_exact(hit) or 0)
+        return rows, exact
+    res = read("gate", gate)
+    if res is not None:
+        out["gate_rows"], out["gate_exact"] = res
+
+    res = read("budget", lambda: sb.table("anon_usage").select("key,count,window_start,last_at")
+               .like("key", "fair:global%").limit(10).execute())
+    if res is not None:
+        out["fair_rows"] = _admin_rows(res)
+
+    res = read("visits", lambda: sb.table("visit_stats").select("day,count")
+               .order("day", desc=True).limit(400).execute())
+    if res is not None:
+        out["visit_rows"] = _admin_rows(res)
+
+    res = read("generations", lambda: sb.table("usage_events")
+               .select("kind,source,country,city,created_at", count="exact")
+               .order("created_at", desc=True).limit(1000).execute())
+    if res is not None:
+        out["gens"] = _admin_rows(res)
+        exact = _admin_exact(res)
+        out["gens_total"] = exact if exact is not None else len(out["gens"])
+
+    res = read("leads", lambda: sb.table("leads").select("email,source,created_at")
+               .order("created_at", desc=True).limit(500).execute())
+    if res is not None:
+        out["leads"] = _admin_rows(res)
+    return out
+
+# ── Admin dashboard: rendering ─────────────────────────────────────────────────
+# Static CSS / JS (no data in them). Everything dynamic is escaped where it is
+# written: _he() for HTML text and attributes, _js() for onclick string arguments.
+_ADMIN_CSS = r"""
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:#050d1a;color:#e8f0ff;min-height:100vh}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:.6rem;flex-wrap:wrap;padding:1rem 2rem;
+          background:#0a1628;border-bottom:1px solid #1a3a6e;position:sticky;top:0;z-index:10}
+  .topbar h1{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}
+  .badge{background:#4f8ef7;color:#fff;padding:2px 10px;border-radius:20px;font-size:12px}
+  .badge.red{background:#dc2626}
+  .actions{display:flex;gap:.5rem;flex-wrap:wrap}
+  .btn{padding:6px 14px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:opacity .2s}
+  .btn:hover{opacity:.8}
+  .btn-red{background:#dc2626;color:#fff}
+  .btn-green{background:#16a34a;color:#fff}
+  .btn-gray{background:#1e3a5f;color:#cfe0ff}
+  .wrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{background:#0f2040;padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;
+     border-bottom:1px solid #1a3a6e;white-space:nowrap}
+  th.sort{cursor:pointer;user-select:none}
+  th.sort span{opacity:.35;font-size:10px}
+  th.c,td.c{text-align:center}
+  td{padding:9px 12px;border-bottom:1px solid #0d1e35;vertical-align:middle}
+  tr:hover td{background:#0a1e38}
+  .empty{padding:3rem;text-align:center;color:#4a5f80;font-size:0.9rem}
+  #toast{position:fixed;bottom:1.5rem;right:1.5rem;background:#16a34a;color:#fff;
+         padding:.6rem 1.2rem;border-radius:8px;font-size:13px;display:none;z-index:100}
+  .sec{margin:1.5rem 2rem}
+  .sec>h3{margin:0 0 .6rem;color:#e8f0ff;font-size:1rem;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}
+  .sec>h3 small{font-weight:400;color:#6b7fa8;font-size:.78rem}
+  .pill{padding:2px 10px;border-radius:20px;font-size:12px;font-weight:400;background:#0f2040;color:#8aa0c8}
+  .pill.blue{background:#4f8ef7;color:#fff}
+  .pill.green{background:#065f46;color:#6ee7b7}
+  .pill.amber{background:#78350f;color:#fcd34d}
+  .pill.violet{background:#4c1d95;color:#ddd6fe}
+  .pill.pink{background:#831843;color:#fbcfe8}
+  .cards{display:flex;gap:.75rem;flex-wrap:wrap;align-items:stretch}
+  .card{background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:140px}
+  .card .lbl{color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}
+  .card .num{font-size:1.7rem;font-weight:800;color:#e8f0ff;line-height:1.2}
+  .card .sub{color:#8aa0c8;font-size:11px;line-height:1.45}
+  .card.hero{background:linear-gradient(135deg,#0a2f3f,#07213a);border-color:#16556b}
+  .card.hero .lbl{color:#6ee7b7}
+  .card.sky .num{color:#7cc4ff}
+  .card.mint .num{color:#6ee7b7}
+  .card.cyan{background:linear-gradient(135deg,#04283a,#062033);border-color:#0e7490}
+  .card.cyan .lbl{color:#67e8f9}
+  .card.violet{background:linear-gradient(135deg,#1a1035,#0f0a28);border-color:#6d28d9}
+  .card.violet .lbl{color:#c4b5fd}
+  .card.lilac .num{color:#a78bfa}
+  .card.pink .num{color:#f472b6}
+  .note{color:#8aa0c8;font-size:12px;line-height:1.5;margin-top:.55rem;max-width:900px}
+  .note.err{color:#fca5a5}
+  .muted{color:#6b7fa8}
+  .kpis{display:grid;grid-template-columns:repeat(2,minmax(140px,1fr));gap:.75rem;flex:1 1 320px;max-width:460px}
+  .chart{flex:2 1 420px;max-width:720px;min-width:280px;display:flex;flex-direction:column}
+  .bars{display:flex;align-items:flex-end;gap:5px;flex:1 1 auto;min-height:118px;margin:.35rem 0}
+  .bar{flex:1 1 0;min-width:0;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center}
+  .bar .n{font-size:10px;color:#8aa0c8;line-height:1;margin-bottom:3px;min-height:10px}
+  .bar .fill{display:block;width:100%;max-width:34px;background:#4f8ef7;border-radius:4px 4px 0 0}
+  .bar .d{font-size:10px;color:#6b7fa8;line-height:1;margin-top:4px}
+  .bar.zero .fill{background:#1a3a6e}
+  .bar.today .fill{background:#6ee7b7}
+  .bar.today .n,.bar.today .d{color:#6ee7b7;font-weight:700}
+  .funnel{display:flex;gap:.4rem;flex-wrap:wrap;align-items:stretch}
+  .funnel .card{flex:1 1 170px;max-width:250px}
+  .funnel .arrow{align-self:center;color:#3b5b8c;font-size:1.1rem}
+  .conv{display:inline-block;margin-top:.4rem;padding:1px 8px;border-radius:20px;background:#0f2040;
+        color:#7cc4ff;font-size:11px;font-weight:600}
+  .stepno{display:inline-block;min-width:16px;height:16px;line-height:16px;text-align:center;border-radius:50%;
+          background:#1a3a6e;color:#cfe0ff;font-size:10px;margin-right:5px;letter-spacing:0}
+  .meter{height:12px;background:#0f2040;border:1px solid #1a3a6e;border-radius:8px;overflow:hidden;margin:.45rem 0 .35rem}
+  .meter .fill{display:block;height:100%;background:#4f8ef7}
+  .meter.warn .fill{background:#f59e0b}
+  .meter.full .fill{background:#dc2626}
+  .card.wide{flex:2 1 380px;max-width:640px}
+  .card.mid{flex:1 1 260px;max-width:400px}
+  .row{display:flex;align-items:baseline;justify-content:space-between;gap:.75rem;flex-wrap:wrap}
+  .row .num{display:inline-block}
+  .card .warntxt,.warntxt{color:#fcd34d;font-weight:600}
+  .card .num.warntxt{font-weight:800}
+  .tools{display:flex;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap;align-items:center}
+  .tools input[type=text]{background:#050d1a;border:1px solid #1a3a6e;color:#e8f0ff;padding:.45rem .7rem;
+        border-radius:8px;font-size:13px;min-width:220px}
+  .tools label{display:flex;gap:.4rem;align-items:center;color:#8aa0c8;font-size:13px;cursor:pointer}
+  .box{overflow-x:auto;border:1px solid #16233f;border-radius:10px}
+  td.clip{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mini{background:#7f1d1d;color:#fecaca;border:none;padding:3px 9px;border-radius:6px;cursor:pointer;font-size:12px}
+  .mini.blue{background:#1e3a5f;color:#cfe0ff}
+  @media (max-width:720px){
+    .sec{margin:1rem .75rem}
+    .topbar{padding:.75rem}
+    .funnel .arrow{display:none}
+    .card{flex:1 1 140px}
+    .kpis{max-width:none}
+  }
+"""
+
+_ADMIN_JS = r"""
+// Auth rides on the HttpOnly session cookie, which the browser attaches to these
+// same-origin requests by itself; the admin token never reaches this page. The
+// server requires the fixed X-Requested-With header on every cookie-authed POST.
+try { localStorage.removeItem("alimne_admin_token"); } catch (e) {}   // legacy copy
+const ADMIN_HEADERS = {"Content-Type":"application/json","X-Requested-With":"alimne-admin"};
+function toast(msg, color="#16a34a"){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.background = color; t.style.display = "block";
+  setTimeout(()=>t.style.display="none", 2500);
+}
+// POST an admin action. Resolves to the Response, or null when the session has
+// expired (cookie cleared, or the admin token was rotated) — then it sends you to sign in.
+async function adminPost(url, body){
+  const r = await fetch(url, {method:"POST", credentials:"same-origin", headers:ADMIN_HEADERS,
+                               body: JSON.stringify(body || {})});
+  if (r.status === 401) {
+    toast("Session expired — sign in again. · انتهت الجلسة — سجّل الدخول مرة أخرى.", "#dc2626");
+    setTimeout(()=>{ location.href = "/admin"; }, 1800);
+    return null;
+  }
+  return r;
+}
+async function blockIp(ip){
+  if(!confirm("Block " + ip + "?\nThis will 403 all their requests immediately.")) return;
+  const r = await adminPost("/admin/block", {ip});
+  if(r && r.ok){ toast("⛔ Blocked: " + ip, "#dc2626"); setTimeout(()=>location.reload(),1200); }
+}
+async function unblock(ip){
+  const r = await adminPost("/admin/unblock", {ip});
+  if(r && r.ok){ toast("✓ Unblocked: " + ip); setTimeout(()=>location.reload(),1200); }
+}
+async function clearLog(){
+  if(!confirm("Clear all visitor log entries?")) return;
+  const r = await adminPost("/admin/clear");
+  if(r && r.ok){ toast("🗑 Log cleared"); setTimeout(()=>location.reload(),1200); }
+}
+
+// ── Users: search / filter / sort / CSV / actions ────────────────────────────
+function subFilter(){
+  var q = (document.getElementById("subSearch").value || "").toLowerCase().trim();
+  var only = document.getElementById("payingOnly").checked;
+  var rows = document.querySelectorAll("#subBody tr.subrow");
+  var shown = 0;
+  rows.forEach(function(r){
+    var okQ = !q || r.dataset.email.indexOf(q) >= 0 || r.dataset.name.indexOf(q) >= 0 || (r.dataset.refby||"").indexOf(q) >= 0;
+    var okP = !only || r.dataset[ADMIN_CFG.payAttr] === "1";
+    var vis = okQ && okP;
+    r.style.display = vis ? "" : "none";
+    if (vis) shown++;
+  });
+  var el = document.getElementById("subShown");
+  if (el) el.textContent = shown + " shown";
+}
+var _subSort = {joined: -1};   // the server sends the newest account first
+function subSort(key, numeric){
+  // Numbers and dates start with the biggest / newest; text starts at A.
+  var first = (numeric || key === "joined" || key === "lastused") ? -1 : 1;
+  var dir = _subSort[key] ? -_subSort[key] : first; _subSort = {}; _subSort[key] = dir;
+  var body = document.getElementById("subBody");
+  var rows = Array.prototype.slice.call(body.querySelectorAll("tr.subrow"));
+  rows.sort(function(a,b){
+    var va = a.dataset[key] || "", vb = b.dataset[key] || "";
+    if (numeric) return ((parseFloat(va)||0) - (parseFloat(vb)||0)) * dir;
+    return (va < vb ? -1 : (va > vb ? 1 : 0)) * dir;
+  });
+  rows.forEach(function(r){ body.appendChild(r); });
+}
+function csvCell(c){
+  c = String(c == null ? "" : c);
+  if (/^[=+\-@\t\r]/.test(c)) c = "'" + c;   // a spreadsheet must never run a cell as a formula
+  return '"' + c.replace(/"/g,'""') + '"';
+}
+function subExportCSV(){
+  var rows = document.querySelectorAll("#subBody tr.subrow");
+  var out = [ADMIN_CFG.csvHead.map(csvCell).join(",")];
+  rows.forEach(function(r){
+    if (r.style.display === "none") return;
+    out.push(ADMIN_CFG.csvKeys.map(function(k){
+      // data-name is the lower-cased search key: export the name as it is shown (2nd cell)
+      return csvCell(k === "name" ? r.cells[1].textContent : r.dataset[k]);
+    }).join(","));
+  });
+  var blob = new Blob([out.join("\n")], {type:"text/csv"});
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "alimne-users.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  toast("⬇ Exported " + (out.length - 1) + " rows");
+}
+async function cancelSub(uid, email){
+  if (!confirm("Cancel subscription for " + email + "?\nStripe subscriptions cancel at period end (they keep access until then).")) return;
+  var r = await adminPost("/admin/user/cancel", {user_id: uid});
+  if (!r) return;
+  var d = await r.json().catch(function(){ return {}; });
+  if (r.ok) { toast(d.canceled_at_period_end ? "✓ Cancels at period end" : "✓ Set to free"); setTimeout(function(){ location.reload(); }, 900); }
+  else { toast("✗ " + (d.error || "failed"), "#dc2626"); }
+}
+async function signOut(){
+  // Server clears the HttpOnly cookie (page JS can't); then back to the sign-in gate.
+  try { await fetch("/admin/logout", {method:"POST", credentials:"same-origin", headers:ADMIN_HEADERS, body:"{}"}); } catch(e) {}
+  try { localStorage.removeItem("alimne_admin_token"); } catch(e) {}
+  location.href = "/admin";
+}
+subFilter();
+"""
+
+# Legacy (token) mode only: the "+ Tokens" action. Left out of the page in free mode.
+_ADMIN_JS_TOKENS = r"""
+async function grantTokens(uid, email){
+  var v = prompt("Grant tokens to " + email + "\n(use a negative number to deduct):", "30");
+  if (v === null) return;
+  var amount = parseInt(v, 10);
+  if (!amount) { toast("Enter a non-zero number", "#dc2626"); return; }
+  var r = await adminPost("/admin/user/grant", {user_id: uid, amount: amount});
+  if (!r) return;
+  var d = await r.json().catch(function(){ return {}; });
+  if (r.ok) { toast("✓ " + email + ": " + d.tokens_remaining + " tokens"); setTimeout(function(){ location.reload(); }, 900); }
+  else { toast("✗ " + (d.error || "failed"), "#dc2626"); }
+}
+"""
+
+def _admin_card(label, value, sub="", key="", cls="", extra=""):
+    """One stat card. label / value / sub are escaped here; `extra` is trusted
+    markup built by the caller (already escaped)."""
+    k = f' data-num="{_he(key)}"' if key else ""
+    return (f'<div class="card{" " + cls if cls else ""}"><div class="lbl">{_he(label)}</div>'
+            f'<div class="num"{k}>{_he(value)}</div>'
+            + (f'<div class="sub">{_he(sub)}</div>' if sub else "") + extra + "</div>")
+
+def _admin_err_note(errors, name, what):
+    """A small inline 'could not load' note for one block, or ''. Only the error's
+    type name is shown: the message itself stays in the server log."""
+    if name not in errors:
+        return ""
+    return (f'<p class="note err" data-err="{_he(name)}">Could not load {_he(what)} '
+            f'({_he(errors[name])}). The rest of the page is unaffected; details are in the server log.</p>')
+
+def _admin_n(n, errors=(), *blocks):
+    """A count as text ('1,234'), or '-' when a block it is made from could not
+    be loaded: an unknown number must never look like a real 0."""
+    return "-" if any(b in errors for b in blocks) else f"{n:,}"
+
+def _admin_date(v):
+    """'YYYY-MM-DD' (UTC) for a timestamp, or '' when it is not one."""
+    ts = _admin_ts(v)
+    return ts.strftime("%Y-%m-%d") if ts else ""
+
+def _admin_when(v):
+    """'YYYY-MM-DD HH:MM' (UTC) for a timestamp, or '—'."""
+    ts = _admin_ts(v)
+    return ts.strftime("%Y-%m-%d %H:%M") if ts else "—"
+
+def _admin_duration(seconds):
+    """'5 h 12 min' for a number of seconds."""
+    m = max(0, int(seconds)) // 60
+    return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min"
+
+def _admin_signups_html(stats, errors, lead_cards=""):
+    """Section 1: the sign-up headline cards and the 14-day bar chart (plain
+    HTML/CSS bars; the day and the count are in each bar's title)."""
+    series = stats["series"]
+    peak = max([p["count"] for p in series] + [1])
+    bars = ""
+    for p in series:
+        n = p["count"]
+        cls = "bar" + ("" if n else " zero") + (" today" if p["today"] else "")
+        title = f'{p["label"]}: {n:,} sign-up{"" if n == 1 else "s"}'
+        bars += (f'<div class="{cls}" data-day="{_he(p["day"])}" title="{_he(title)}">'
+                 f'<span class="n">{n if n else ""}</span>'
+                 f'<span class="fill" style="height:{max(2, int(n * 80 / peak + 0.5))}px"></span>'
+                 f'<span class="d">{_he(p["day"][8:].lstrip("0"))}</span></div>')
+    span = f'{series[0]["label"]} to {series[-1]["label"]}' if series else ""
+    def n(key):
+        return _admin_n(stats[key], errors, "users")
+    cards = (lead_cards
+             + _admin_card("Sign-ups today", n("today"), "since 00:00 UTC", "signups-today", "hero")
+             + _admin_card("Yesterday", n("yesterday"), "the full UTC day", "signups-yesterday", "sky")
+             + _admin_card("Last 7 days", n("last7"), "today + the 6 days before", "signups-7d", "sky")
+             + _admin_card("Total accounts", n("total"), "all time", "signups-total"))
+    return f"""
+<section class="sec" id="sec-signups">
+  <h3>🚀 Sign-ups <small>days are UTC days</small></h3>
+  {_admin_err_note(errors, "users", "the accounts")}
+  <div class="cards">
+    <div class="kpis">{cards}</div>
+    <div class="card chart">
+      <div class="lbl">Sign-ups per day · last {len(series)} days (UTC)</div>
+      <div class="bars">{bars}</div>
+      <div class="sub">{_he(span)} · today is the green bar · hover a bar for the day and the count</div>
+    </div>
+  </div>
+</section>"""
+
+_ADMIN_STEP_SUBS = {
+    "visits":    "page loads (home page + shared guides)",
+    "devices":   "made at least 1 guide without an account",
+    "gate":      "devices that used all {limit} free guides",
+    "accounts":  "signed up",
+    "activated": "new accounts that made at least 1 guide",
+}
+_ADMIN_STEP_OF = {"devices": "of visits", "gate": "of those devices",
+                  "accounts": "of gate devices", "activated": "of new accounts"}
+# the database blocks each step is made from (see "errors" in _admin_load)
+_ADMIN_STEP_BLOCKS = {"visits": ("visits",), "devices": ("gate",), "gate": ("gate",),
+                      "accounts": ("users",), "activated": ("users", "activity")}
+
+def _admin_funnel_html(funnel, gate_limit, errors, totals_cards):
+    """Section 2: the 7-day funnel, the gate → sign-up rate with its caveat, and
+    the all-time cards under it. A step whose data could not be loaded shows '-'."""
+    steps, steps_html = funnel["steps"], ""
+    lost = [any(b in errors for b in _ADMIN_STEP_BLOCKS[s["key"]]) for s in steps]
+    for i, s in enumerate(steps):
+        conv = ""
+        if i:
+            # conversion from the step before; "-" alone when there is nothing to divide by
+            rate = None if (lost[i] or lost[i - 1]) else s["rate"]
+            of = f' {_ADMIN_STEP_OF[s["key"]]}' if rate is not None else ""
+            conv = (f'<div class="conv" data-conv="{_he(s["key"])}">'
+                    f'{_he(_admin_pct(rate, cap=1.0) + of)}</div>')
+            steps_html += '<span class="arrow">→</span>'
+        steps_html += (f'<div class="card{" hero" if s["key"] == "accounts" else ""}">'
+                       f'<div class="lbl"><span class="stepno">{i + 1}</span>{_he(s["label"])}</div>'
+                       f'<div class="num" data-num="funnel-{_he(s["key"])}">{"-" if lost[i] else format(s["value"], ",")}</div>'
+                       f'<div class="sub">{_he(_ADMIN_STEP_SUBS[s["key"]].format(limit=gate_limit))}</div>'
+                       f'{conv}</div>')
+    gate_note = _admin_err_note(errors, "gate", "the anonymous-device counters, so the two device steps and "
+                                                "the gate → sign-up rate show no data")
+    if not gate_note and not funnel["gate_live"]:
+        gate_note = (f'<p class="note" data-note="gate-not-live">No anonymous device has been counted in the last '
+                     f'{funnel["days"]} days: sign-in gate data starts when the {gate_limit}-guide gate goes live.</p>')
+    rate = None if (lost[2] or lost[3]) else funnel["gate_signup_rate"]
+    rate_card = _admin_card("Gate → sign-up", _admin_pct(rate, cap=1.0),
+                            f'{_admin_n(steps[3]["value"], errors, "users")} new accounts ÷ '
+                            f'{_admin_n(steps[2]["value"], errors, "gate")} devices at the gate',
+                            "gate-signup-rate", "hero")
+    return f"""
+<section class="sec" id="sec-funnel">
+  <h3>🔻 Funnel <small>last {funnel["days"]} days (UTC days, today included)</small></h3>
+  {_admin_err_note(errors, "visits", "the visit counts")}
+  <div class="funnel">{steps_html}</div>
+  {gate_note}
+  <div class="cards" style="margin-top:.75rem">
+    {rate_card}
+    {totals_cards}
+  </div>
+  <p class="note">Gate → sign-up is an estimate: devices and accounts are counted separately (one person can use
+  several devices, and people also sign up without ever reaching the gate), so it is capped at 100% on screen.</p>
+</section>"""
+
+def _admin_budget_html(budget, gen_gate, errors, free):
+    """Section 3: today's AI budget (the fair:global counter against
+    FAIR_GLOBAL_DAILY), the anonymous slice, and the live generation gate."""
+    lost = "budget" in errors
+    def meter(m, name, label, about):
+        pct = None if lost else m["pct"]
+        full = pct is not None and pct >= 1
+        warn = m["warn"] and not lost
+        width = 0 if pct is None else max(0.0, min(100.0, pct * 100))
+        cls = "meter" + (" warn" if warn else "") + (" full" if full else "")
+        state = ""
+        if full:
+            state = '<div class="sub warntxt">Used up: new guides are refused until the window resets.</div>'
+        elif warn:
+            state = '<div class="sub warntxt">Over 80% of the limit.</div>'
+        if lost:
+            resets = "not loaded"
+        elif m["resets_in_s"] is not None:
+            resets = f'window resets in {_admin_duration(m["resets_in_s"])}'
+        else:
+            resets = "no guide counted in the current window"
+        key = "budget" if name == "global" else "budget-anon"
+        return (f'<div class="lbl">{_he(label)}</div>'
+                f'<div class="row"><div><span class="num" data-num="{key}-used">{_admin_n(m["used"], errors, "budget")}</span> '
+                f'<span class="sub">of {m["limit"]:,}</span></div>'
+                f'<div class="num{" warntxt" if warn else ""}" data-num="{key}-pct">{_he(_admin_pct(pct))}</div></div>'
+                f'<div class="{cls}" data-meter="{name}"><span class="fill" style="width:{width:.1f}%"></span></div>'
+                f'<div class="sub">{_he(resets)} · {_he(about)}</div>{state}')
+    wh = budget["window_hours"]
+    main = meter(budget, "global", f"Guides in the current {wh} h window", "the limit is FAIR_GLOBAL_DAILY")
+    anon = ""
+    if budget["anon"] is not None:
+        anon = ('<div class="card mid">'
+                + meter(budget["anon"], "anon", "Anonymous share of it", "visitors without an account")
+                + "</div>")
+    live = ""
+    if gen_gate is not None:
+        busy = gen_gate["running"] >= gen_gate["slots"] > 0
+        wait_max = f' (room for {gen_gate["wait_max"]})' if gen_gate["wait_max"] is not None else ""
+        live = (f'<div class="card mid"><div class="lbl">Generating right now</div>'
+                f'<div class="row"><div><span class="num{" warntxt" if busy else ""}" data-num="gen-running">'
+                f'{gen_gate["running"]} / {gen_gate["slots"]}</span> <span class="sub">slots running</span></div>'
+                f'<div><span class="num" data-num="gen-waiting">{gen_gate["waiting"]}</span> '
+                f'<span class="sub">waiting{_he(wait_max)}</span></div></div>'
+                f'<div class="sub">Live, this server only. When every slot is busy a new request waits, then gets "busy".</div></div>')
+    mode_note = "" if free else ('<p class="note">Token mode is on (ALIMNE_FREE_MODE=0): the fair-use counters and '
+                                 'the generation queue are switched off, so these meters do not move.</p>')
+    return f"""
+<section class="sec" id="sec-budget">
+  <h3>🔋 Today's AI budget + capacity <small>a {wh} h window that starts with its first guide</small></h3>
+  {_admin_err_note(errors, "budget", "the budget counters")}
+  <div class="cards">
+    <div class="card wide">{main}</div>
+    {anon}
+    {live}
+  </div>
+  {mode_note}
+</section>"""
+
+
 @app.route("/admin")
 def admin_page():
     if request.query_string:
@@ -1884,308 +2634,282 @@ def admin_page():
           <table style="border-collapse:collapse;font-size:13px"><tbody>{blocked_rows}</tbody></table>
         </div>"""
 
-    # ── Subscribers (from the Supabase `users` table) ────────────────────────────
-    subs_rows = ""
-    subs_total = 0
-    subs_active = 0
-    new_this_week = 0
-    used_count = 0
-    total_gens = 0
-    subs_error = ""
+    # ── Data: every Supabase read is in _admin_load (bounded, each in its own try) ──
+    now    = _admin_now()
+    g      = globals()
+    free   = bool(FREE_MODE)
+    # Knobs of the sign-in gate / fair use, read defensively: the gate ships separately.
+    gate_limit = max(1, _admin_int(g.get("ANON_FREE_USES", 3), 3))
+    sb_note = ""
     try:
-        _sb = _get_sb()
-        if _sb is None:
-            subs_error = "Supabase is not configured on this server (dev mode)."
-        else:
-            _res = _sb.table("users").select("*").limit(2000).execute()
-            _users = _res.data or []
-            _users.sort(key=lambda u: str(u.get("created_at") or ""), reverse=True)
-            subs_total = len(_users)
-            # Users created in the last 7 days (ISO date-prefix compare — TZ-safe enough).
-            _week_ago = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
-            new_this_week = sum(1 for u in _users if str(u.get("created_at") or "")[:10] >= _week_ago)
-            # Usage: a user who consumed ≥1 token has actually processed a file.
-            used_count = sum(1 for u in _users if int(u.get("generations_count") or 0) > 0)
-            total_gens = sum(int(u.get("generations_count") or 0) for u in _users)
-            # Referral tallies: how many people each user invited, and how many paid.
-            _invited, _invited_paid = {}, {}
-            _id_to_email = {}
-            for u in _users:
-                _id_to_email[str(u.get("id") or "")] = u.get("email") or ""
-                rb = u.get("referred_by")
-                if rb:
-                    _invited[rb] = _invited.get(rb, 0) + 1
-                    if u.get("referral_paid"):
-                        _invited_paid[rb] = _invited_paid.get(rb, 0) + 1
-            for u in _users:
-                uid_u  = str(u.get("id") or "")
-                status = str(u.get("subscription_status") or "free").lower()
-                active = status == "active"
-                if active:
-                    subs_active += 1
-                email  = u.get("email") or "—"
-                name   = u.get("name") or "—"
-                try:
-                    toks_i = int(u.get("tokens_remaining", 0) or 0)
-                except (TypeError, ValueError):
-                    toks_i = 0
-                renews = str(u.get("subscription_period_end") or "")[:10] or "—"
-                joined = str(u.get("created_at") or "")[:10] or "—"
-                code   = u.get("referral_code") or "—"
-                inv    = _invited.get(uid_u, 0)
-                inv_p  = _invited_paid.get(uid_u, 0)
-                refby  = _id_to_email.get(str(u.get("referred_by") or ""), "") or "—"
-                gens   = int(u.get("generations_count") or 0)
-                last_used = str(u.get("last_used_at") or "")[:10] or "—"
-                if active:
-                    badge = '<span style="background:#065f46;color:#6ee7b7;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:600">● active</span>'
-                elif status == "canceling":
-                    badge = '<span style="background:#78350f;color:#fcd34d;padding:2px 9px;border-radius:5px;font-size:11px">● canceling</span>'
-                else:
-                    badge = f'<span style="background:#16233f;color:#8aa0c8;padding:2px 9px;border-radius:5px;font-size:11px">{_he(status)}</span>'
-                ref_html = f'<code style="color:#7cc4ff">{_he(code)}</code>'
-                if inv:
-                    ref_html += f' · <span style="color:#6ee7b7">{inv} invited</span>'
-                    if inv_p:
-                        ref_html += f' <span style="color:#8aa0c8">({inv_p} paid)</span>'
-                actions = (f'<button onclick="grantTokens(\'{_js(uid_u)}\',\'{_js(str(email))}\')" '
-                           'style="background:#1e3a5f;color:#cfe0ff;border:none;padding:3px 9px;border-radius:6px;cursor:pointer;font-size:12px">＋ Tokens</button>')
-                if active or status == "canceling" or u.get("subscription_id"):
-                    actions += (f' <button onclick="cancelSub(\'{_js(uid_u)}\',\'{_js(str(email))}\')" '
-                                'style="background:#7f1d1d;color:#fecaca;border:none;padding:3px 9px;border-radius:6px;cursor:pointer;font-size:12px">Cancel</button>')
-                subs_rows += f"""
-                  <tr class="subrow" data-email="{_he(str(email).lower())}" data-name="{_he(str(name).lower())}" data-active="{1 if active else 0}" data-status="{_he(status)}" data-tokens="{toks_i}" data-used="{gens}" data-lastused="{_he(last_used)}" data-refby="{_he(str(refby).lower())}" data-renews="{_he(renews)}" data-joined="{_he(joined)}">
-                    <td><b>{_he(email)}</b></td>
-                    <td style="color:#b9c9e6">{_he(name)}</td>
-                    <td>{badge}</td>
-                    <td style="text-align:center;font-weight:600">{toks_i}</td>
-                    <td style="text-align:center"><b style="color:{'#6ee7b7' if gens else '#4a5f80'}">{gens}</b>{f'<div style="color:#6b7fa8;font-size:11px">last {_he(last_used)}</div>' if last_used != '—' else ''}</td>
-                    <td style="font-size:12px">{ref_html}</td>
-                    <td style="color:#8aa0c8;font-size:12px">{_he(refby)}</td>
-                    <td style="color:#8aa0c8;white-space:nowrap">{_he(renews)}</td>
-                    <td style="color:#8aa0c8;white-space:nowrap">{_he(joined)}</td>
-                    <td style="white-space:nowrap">{actions}</td>
-                  </tr>"""
-    except Exception as _e:
-        subs_error = str(_e)
+        sb = _get_sb()
+        if sb is None:
+            sb_note = ('<p class="note" style="margin:0">Supabase is not configured on this server (dev mode): '
+                       'the numbers below are empty.</p>')
+    except Exception as exc:
+        _log.warning("admin dashboard: Supabase client unavailable: %s: %s", type(exc).__name__, exc)
+        sb = None
+        sb_note = ('<p class="note err" style="margin:0">Could not load anything from the database: its client '
+                   'did not start (details are in the server log).</p>')
+    data   = _admin_load(sb, now, gate_limit)
+    errors = data["errors"]
+    today  = _admin_utc(now).date()
 
-    # ── Leads (emails captured at the paywall) ───────────────────────────────────
-    leads_rows = ""
-    leads_count = 0
+    users = data["users"]
+    _epoch = _admin_dt.datetime(1970, 1, 1, tzinfo=_admin_dt.timezone.utc)
+    users.sort(key=lambda u: _admin_ts(u.get("created_at")) or _epoch, reverse=True)   # newest first
+    window_h = max(1, _admin_int(g.get("_FAIR_WINDOW_HOURS", 24), 24))   # the fair-use counters' window
+    activity = _admin_user_activity(data["activity_rows"], now, window_h)
+    stats    = _admin_signup_stats(users, now, total=data["users_total"])
+    funnel   = _admin_funnel(data["visit_rows"], data["gate_rows"], users, now, gate_limit,
+                             activity=activity, device_counts=data["gate_exact"])
+    visits   = _admin_visits(data["visit_rows"], now)
     try:
-        _sbl = _get_sb()
-        if _sbl is not None:
-            _lr = _sbl.table("leads").select("email,source,created_at") \
-                      .order("created_at", desc=True).limit(500).execute()
-            _leads = _lr.data or []
-            leads_count = len(_leads)
-            for L in _leads:
-                when = str(L.get("created_at") or "")[:16].replace("T", " ")
-                leads_rows += f"""
-                  <tr>
-                    <td><b>{_he(L.get('email') or '')}</b></td>
-                    <td style="color:#8aa0c8;font-size:12px">{_he(L.get('source') or '—')}</td>
-                    <td style="color:#8aa0c8;white-space:nowrap">{_he(when)}</td>
-                  </tr>"""
+        anon_limit = g["_fair_anon_limit"]() if callable(g.get("_fair_anon_limit")) else None
     except Exception:
-        pass  # leads table may not exist yet (migration 005) — degrade quietly
+        anon_limit = None
+    budget   = _admin_budget(data["fair_rows"], now, g.get("FAIR_GLOBAL_DAILY", 2000), anon_limit, window_h)
+    gen_gate = _admin_gen_gate(g)
+
+    # ── Users (the Supabase `users` table) ────────────────────────────────────────
+    subs_rows = ""
+    subs_active = subs_legacy = used_count = 0
+    # Referral tallies: how many people each user invited, and how many paid.
+    _invited, _invited_paid, _id_to_email = {}, {}, {}
+    for u in users:
+        _id_to_email[str(u.get("id") or "")] = u.get("email") or ""
+        rb = str(u.get("referred_by") or "")
+        if rb:
+            _invited[rb] = _invited.get(rb, 0) + 1
+            if u.get("referral_paid"):
+                _invited_paid[rb] = _invited_paid.get(rb, 0) + 1
+    for u in users:
+        uid_u  = str(u.get("id") or "")
+        status = str(u.get("subscription_status") or "free").lower()
+        active = status == "active"
+        legacy_sub = active or status == "canceling"
+        subs_active += 1 if active else 0
+        subs_legacy += 1 if legacy_sub else 0
+        email  = str(u.get("email") or "—")
+        name   = str(u.get("name") or "—")
+        toks_i = _admin_int(u.get("tokens_remaining"))
+        renews = _admin_date(u.get("subscription_period_end"))
+        joined = _admin_date(u.get("created_at"))
+        code   = str(u.get("referral_code") or "")
+        inv    = _invited.get(uid_u, 0)
+        inv_p  = _invited_paid.get(uid_u, 0)
+        refby  = str(_id_to_email.get(str(u.get("referred_by") or ""), "") or "")
+        # Guides made: the lifetime counter only moved in token mode (consume_token).
+        # Since free mode an account's own fair-use counter says it is active, and
+        # how many guides it made in the running fair-use window (24 h).
+        gens   = max(0, _admin_int(u.get("generations_count")))
+        act    = activity.get(uid_u)
+        recent = act["recent"] if act else 0
+        made   = max(gens, recent, 1 if act else 0)
+        if made:
+            used_count += 1
+        seen = [t for t in (_admin_ts(u.get("last_used_at")), act["last_at"] if act else None) if t]
+        last_used = max(seen).strftime("%Y-%m-%d") if seen else ""
+        made_html = f'<b style="color:{"#6ee7b7" if made else "#4a5f80"}">{made:,}{"+" if act else ""}</b>'
+        if recent:
+            made_html += f'<div class="muted" style="font-size:11px">{recent:,} in last {window_h} h</div>'
+        code_title = f' title="Referral code: {_he(code)}"' if code else ""
+        inv_html = f'<b style="color:#6ee7b7">{inv:,}</b>' if inv else '<span class="muted">0</span>'
+        if inv_p and not free:
+            inv_html += f' <span class="muted">({inv_p:,} paid)</span>'
+        cancel_btn = (f'<button class="mini" onclick="cancelSub(\'{_js(uid_u)}\',\'{_js(email)}\')">Cancel</button>')
+        if free:
+            # Free mode: no plan for anyone, except a badge for the people who still pay.
+            plan_txt = "legacy subscriber" if legacy_sub else ""
+            plan_html = ""
+            if legacy_sub:
+                when = f'{"renews" if active else "ends"} {renews}' if renews else ("active" if active else "canceling")
+                plan_html = (f'<span class="pill {"green" if active else "amber"}">legacy subscriber</span> '
+                             f'<span class="muted" style="font-size:12px;white-space:nowrap">{_he(when)}</span>'
+                             + (f' {cancel_btn}' if active else ""))
+            tail = tok_attr = ""
+        else:
+            plan_txt = status
+            if active:
+                plan_html = '<span style="background:#065f46;color:#6ee7b7;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:600">● active</span>'
+            elif status == "canceling":
+                plan_html = '<span style="background:#78350f;color:#fcd34d;padding:2px 9px;border-radius:5px;font-size:11px">● canceling</span>'
+            else:
+                plan_html = f'<span style="background:#16233f;color:#8aa0c8;padding:2px 9px;border-radius:5px;font-size:11px">{_he(status)}</span>'
+            if renews:
+                plan_html += f' <span class="muted" style="font-size:12px;white-space:nowrap">{_he(renews)}</span>'
+            actions = (f'<button onclick="grantTokens(\'{_js(uid_u)}\',\'{_js(email)}\')" '
+                       'style="background:#1e3a5f;color:#cfe0ff;border:none;padding:3px 9px;border-radius:6px;cursor:pointer;font-size:12px">＋ Tokens</button>')
+            if active or status == "canceling" or u.get("subscription_id"):
+                actions += (f' <button onclick="cancelSub(\'{_js(uid_u)}\',\'{_js(email)}\')" '
+                            'style="background:#7f1d1d;color:#fecaca;border:none;padding:3px 9px;border-radius:6px;cursor:pointer;font-size:12px">Cancel</button>')
+            tail = (f'<td style="text-align:center;font-weight:600">{toks_i}</td>'
+                    f'<td style="white-space:nowrap">{actions}</td>')
+            tok_attr = f' data-tokens="{toks_i}"'
+        subs_rows += f"""
+          <tr class="subrow" data-email="{_he(email.lower())}" data-name="{_he(name.lower())}" data-joined="{_he(joined)}" data-used="{made}" data-recent="{recent}" data-lastused="{_he(last_used)}" data-refby="{_he(refby.lower())}" data-invites="{inv}" data-plan="{_he(plan_txt)}" data-renews="{_he(renews)}" data-legacy="{1 if legacy_sub else 0}" data-active="{1 if active else 0}"{tok_attr}>
+            <td class="clip"><b>{_he(email)}</b></td>
+            <td class="clip" style="color:#b9c9e6">{_he(name)}</td>
+            <td style="color:#8aa0c8;white-space:nowrap">{_he(joined or "—")}</td>
+            <td class="c">{made_html}</td>
+            <td style="color:#8aa0c8;white-space:nowrap">{_he(last_used or "—")}</td>
+            <td style="color:#8aa0c8;font-size:12px">{_he(refby or "—")}</td>
+            <td class="c"{code_title}>{inv_html}</td>
+            <td>{plan_html}</td>{tail}
+          </tr>"""
+
+    def _sth(label, key, numeric=False):
+        return (f'<th class="sort{" c" if numeric else ""}" onclick="subSort(\'{key}\',{1 if numeric else 0})">'
+                f'{label} <span>⇅</span></th>')
+    head = (_sth("Email", "email") + _sth("Name", "name") + _sth("Joined", "joined")
+            + _sth("Guides made", "used", True) + _sth("Last used", "lastused")
+            + _sth("Invited by", "refby") + _sth("Invites", "invites", True) + _sth("Plan", "plan"))
+    csv_head = ["Email", "Name", "Joined", "Guides made", f"Guides in last {window_h} h", "Last used",
+                "Invited by", "Invites", "Plan", "Renews / ends"]
+    csv_keys = ["email", "name", "joined", "used", "recent", "lastused", "refby", "invites", "plan", "renews"]
+    if not free:
+        head += _sth("Tokens", "tokens", True) + "<th>Actions</th>"
+        csv_head.append("Tokens")
+        csv_keys.append("tokens")
+    empty_row = (f'<tr><td colspan="{8 if free else 10}" style="padding:2rem;text-align:center;color:#4a5f80">'
+                 + ("Not loaded." if "users" in errors else "No users yet.") + "</td></tr>")
+    shown_note = ""
+    if stats["total"] > len(users) and users:
+        shown_note = (f'<p class="note">Showing the newest {len(users):,} of {stats["total"]:,} accounts. '
+                      f'The day counts above are made from these rows.</p>')
+    made_note = ""
+    if free:
+        made_note = ('<p class="note">Guides made is the lifetime counter on the account, and only the old token '
+                     'system adds to it: free mode keeps no per-account total. A "+" means the account has made '
+                     f'guides since Alimne went free; "in last {window_h} h" is its running fair-use window.</p>')
+    users_pills = f'<span class="pill blue">{_admin_n(stats["total"], errors, "users")} users</span>'
+    if free and subs_legacy:
+        users_pills += f'<span class="pill green">{subs_legacy:,} legacy subscribers</span>'
+    if not free:
+        users_pills += f'<span class="pill green">{subs_active:,} active</span>'
+    users_section = f"""
+<section class="sec" id="sec-users">
+  <h3>👥 Users {users_pills}</h3>
+  {_admin_err_note(errors, "users", "the accounts")}
+  {_admin_err_note(errors, "activity", "the per-account activity since free mode, so 'Guides made' and 'Last used' only show the older counters")}
+  <div class="tools">
+    <input id="subSearch" type="text" placeholder="🔎 Search email or name…" oninput="subFilter()">
+    <label><input type="checkbox" id="payingOnly" onchange="subFilter()"> {"Legacy subscribers only" if free else "Paying only"}</label>
+    <button class="btn btn-gray" onclick="subExportCSV()">⬇ Export CSV</button>
+    <span id="subShown" style="color:#4a5f80;font-size:12px"></span>
+  </div>
+  <div class="box">
+    <table id="subTable">
+      <thead><tr>{head}</tr></thead>
+      <tbody id="subBody">{subs_rows or empty_row}</tbody>
+    </table>
+  </div>
+  {shown_note}
+  {made_note}
+</section>"""
 
     # ── Generations (durable usage events — counts anon + demo, survives restarts) ─
     gens_rows = ""
-    gens_total = gens_today = gens_anon = gens_user = gens_demo = 0
-    try:
-        _sbg = _get_sb()
-        if _sbg is not None:
-            _today = time.strftime("%Y-%m-%d", time.gmtime())
-            _gr = _sbg.table("usage_events").select("kind,source,country,city,created_at", count="exact") \
-                      .order("created_at", desc=True).limit(1000).execute()
-            _gens = _gr.data or []
-            gens_total = _gr.count if getattr(_gr, "count", None) is not None else len(_gens)
-            for G in _gens:
-                k = G.get("kind") or ""
-                if k == "anon":   gens_anon += 1
-                elif k == "demo": gens_demo += 1
-                else:             gens_user += 1
-                if str(G.get("created_at") or "")[:10] == _today:
-                    gens_today += 1
-            for G in _gens[:200]:
-                when   = str(G.get("created_at") or "")[:16].replace("T", " ")
-                k      = G.get("kind") or ""
-                loc    = ", ".join([x for x in [G.get("city"), G.get("country")] if x]) or "—"
-                kcolor = {"user": "#6ee7b7", "anon": "#7cc4ff", "demo": "#a78bfa"}.get(k, "#8aa0c8")
-                gens_rows += f"""
-                  <tr>
-                    <td style="color:#8aa0c8;white-space:nowrap">{_he(when)}</td>
-                    <td><span style="color:{kcolor};font-weight:700">{_he(k or '—')}</span></td>
-                    <td style="color:#8aa0c8;font-size:12px">{_he(G.get('source') or '—')}</td>
-                    <td>{_he(loc)}</td>
-                  </tr>"""
-    except Exception:
-        pass  # usage_events table may not exist yet (migration 008) — degrade quietly
-
-    # ── Durable visits (per-day page-view counts — survive restarts, uncapped) ────
-    visits_total = visits_today = visits_week = 0
-    visits_durable = False
-    try:
-        _sbv = _get_sb()
-        if _sbv is not None:
-            _vr = _sbv.table("visit_stats").select("day,count").order("day", desc=True).limit(400).execute()
-            _vd = _vr.data or []
-            visits_durable = True
-            _today = time.strftime("%Y-%m-%d", time.gmtime())
-            _wk    = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 7 * 86400))
-            for row in _vd:
-                c = int(row.get("count") or 0)
-                d = str(row.get("day") or "")
-                visits_total += c
-                if d == _today: visits_today += c
-                if d >= _wk:    visits_week  += c
-    except Exception:
-        pass  # visit_stats table may not exist yet (migration 011) — degrade quietly
-
-    monthly_price = _monthly_price_usd()  # live Stripe price (cached ~1h), USD/month
-    mrr = subs_active * monthly_price
-    arr = mrr * 12
-
-    subs_th = ("padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;"
-               "background:#0f2040;border-bottom:1px solid #1a3a6e;white-space:nowrap")
-    def _sth(label, idx, center=False):
-        c = ";text-align:center" if center else ""
-        return (f'<th onclick="subSort({idx})" style="{subs_th};cursor:pointer;user-select:none{c}">'
-                f'{label} <span style="opacity:.35;font-size:10px">⇅</span></th>')
-    subs_section = f"""
-    <div style="margin:1.5rem 2rem">
-      <h3 style="margin:0 0 .6rem;color:#e8f0ff;font-size:1rem;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
-        👥 Subscribers
-        <span style="background:#4f8ef7;color:#fff;padding:2px 10px;border-radius:20px;font-size:12px">{subs_total} users</span>
-        <span style="background:#065f46;color:#6ee7b7;padding:2px 10px;border-radius:20px;font-size:12px">{subs_active} active</span>
-      </h3>
-      {f'<p style="color:#f87171;font-size:.85rem;margin-bottom:.5rem">Could not load subscribers: {_he(subs_error)}</p>' if subs_error else ''}
-      <div style="display:flex;gap:.75rem;margin-bottom:.85rem;flex-wrap:wrap">
-        <div style="background:linear-gradient(135deg,#0a2f3f,#07213a);border:1px solid #16556b;border-radius:12px;padding:.75rem 1.1rem;min-width:190px">
-          <div style="color:#6ee7b7;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">MRR (est.)</div>
-          <div style="font-size:1.7rem;font-weight:800;color:#e8f0ff;line-height:1.2">${mrr:,.2f}</div>
-          <div style="color:#8aa0c8;font-size:11px">{subs_active} active × ${monthly_price:.2f}/mo · ARR ${arr:,.0f}</div>
-        </div>
-        <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:130px">
-          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Active</div>
-          <div style="font-size:1.7rem;font-weight:800;color:#6ee7b7;line-height:1.2">{subs_active}</div>
-          <div style="color:#8aa0c8;font-size:11px">of {subs_total} users</div>
-        </div>
-        <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:130px">
-          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">New this week</div>
-          <div style="font-size:1.7rem;font-weight:800;color:#7cc4ff;line-height:1.2">{new_this_week}</div>
-          <div style="color:#8aa0c8;font-size:11px">joined in last 7 days</div>
-        </div>
-        <div style="background:linear-gradient(135deg,#04283a,#062033);border:1px solid #0e7490;border-radius:12px;padding:.75rem 1.1rem;min-width:200px">
-          <div style="color:#67e8f9;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Visits (all-time)</div>
-          <div style="font-size:1.7rem;font-weight:800;color:#e8f0ff;line-height:1.2">{visits_total:,}</div>
-          <div style="color:#8aa0c8;font-size:11px">{'' if visits_durable else 'run migration 011 · '}{visits_today} today · {visits_week} this week</div>
-        </div>
-        <div style="background:linear-gradient(135deg,#1a1035,#0f0a28);border:1px solid #6d28d9;border-radius:12px;padding:.75rem 1.1rem;min-width:230px">
-          <div style="color:#c4b5fd;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Generations (all)</div>
-          <div style="font-size:1.7rem;font-weight:800;color:#e8f0ff;line-height:1.2">{gens_total:,}</div>
-          <div style="color:#8aa0c8;font-size:11px">{gens_today} today · {gens_anon} anon · {gens_demo} demo · {gens_user} signed-in</div>
-        </div>
-        <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:150px">
-          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Signed-in activation</div>
-          <div style="font-size:1.7rem;font-weight:800;color:#a78bfa;line-height:1.2">{used_count}</div>
-          <div style="color:#8aa0c8;font-size:11px">of {subs_total} accounts · {total_gens:,} gens</div>
-        </div>
-        <div style="background:#0a1628;border:1px solid #1a3a6e;border-radius:12px;padding:.75rem 1.1rem;min-width:130px">
-          <div style="color:#8aa0c8;font-size:11px;font-weight:700;letter-spacing:.6px;text-transform:uppercase">Leads</div>
-          <div style="font-size:1.7rem;font-weight:800;color:#f472b6;line-height:1.2">{leads_count}</div>
-          <div style="color:#8aa0c8;font-size:11px">emails captured</div>
-        </div>
-      </div>
-      <div style="display:flex;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap;align-items:center">
-        <input id="subSearch" placeholder="🔎 Search email or name…" oninput="subFilter()"
-               style="background:#050d1a;border:1px solid #1a3a6e;color:#e8f0ff;padding:.45rem .7rem;border-radius:8px;font-size:13px;min-width:220px">
-        <label style="display:flex;gap:.4rem;align-items:center;color:#8aa0c8;font-size:13px;cursor:pointer">
-          <input type="checkbox" id="payingOnly" onchange="subFilter()"> Paying only</label>
-        <button class="btn btn-gray" onclick="subExportCSV()">⬇ Export CSV</button>
-        <span id="subShown" style="color:#4a5f80;font-size:12px"></span>
-      </div>
-      <div style="overflow-x:auto;border:1px solid #16233f;border-radius:10px">
-        <table id="subTable" style="width:100%;border-collapse:collapse;font-size:13px">
-          <thead><tr>
-            {_sth("Email", 0)}{_sth("Name", 1)}{_sth("Status", 2)}{_sth("Tokens", 3, True)}{_sth("Used", 4, True)}
-            <th style="{subs_th}">Referral</th>{_sth("Referred by", 6)}{_sth("Renews", 7)}{_sth("Joined", 8)}
-            <th style="{subs_th}">Actions</th>
-          </tr></thead>
-          <tbody id="subBody">{subs_rows if subs_rows else '<tr><td colspan="10" style="padding:2rem;text-align:center;color:#4a5f80">No users yet.</td></tr>'}</tbody>
-        </table>
-      </div>
-    </div>"""
-
+    gens_total = data["gens_total"]
+    gens_today = gens_anon = gens_user = gens_demo = 0
+    for G in data["gens"]:
+        k = G.get("kind") or ""
+        if k == "anon":   gens_anon += 1
+        elif k == "demo": gens_demo += 1
+        else:             gens_user += 1
+        ts = _admin_ts(G.get("created_at"))
+        if ts is not None and ts.date() == today:
+            gens_today += 1
+    for G in data["gens"][:200]:
+        k      = str(G.get("kind") or "")
+        loc    = ", ".join([str(x) for x in [G.get("city"), G.get("country")] if x]) or "—"
+        kcolor = {"user": "#6ee7b7", "anon": "#7cc4ff", "demo": "#a78bfa"}.get(k, "#8aa0c8")
+        gens_rows += f"""
+          <tr>
+            <td style="color:#8aa0c8;white-space:nowrap">{_he(_admin_when(G.get("created_at")))}</td>
+            <td><span style="color:{kcolor};font-weight:700">{_he(k or '—')}</span></td>
+            <td style="color:#8aa0c8;font-size:12px">{_he(G.get('source') or '—')}</td>
+            <td>{_he(loc)}</td>
+          </tr>"""
     gens_section = ""
-    if gens_rows:
+    if gens_rows or "generations" in errors:
+        gens_table = ""
+        if gens_rows:
+            gens_table = f"""<div class="box"><table>
+    <thead><tr><th>Time (UTC)</th><th>Who</th><th>Source</th><th>Location</th></tr></thead>
+    <tbody>{gens_rows}</tbody>
+  </table></div>"""
         gens_section = f"""
-    <div style="margin:1.5rem 2rem">
-      <h3 style="margin:0 0 .6rem;color:#e8f0ff;font-size:1rem;display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
-        ⚡ Recent generations
-        <span style="background:#4c1d95;color:#ddd6fe;padding:2px 10px;border-radius:20px;font-size:12px">{gens_total:,} total</span>
-        <span style="background:#0a1628;color:#8aa0c8;padding:2px 10px;border-radius:20px;font-size:12px">{gens_today} today</span>
-      </h3>
-      <div style="overflow-x:auto;border:1px solid #16233f;border-radius:10px">
-        <table style="width:100%;border-collapse:collapse;font-size:13px">
-          <thead><tr>
-            <th style="{subs_th}">Time (UTC)</th><th style="{subs_th}">Who</th><th style="{subs_th}">Source</th><th style="{subs_th}">Location</th>
-          </tr></thead>
-          <tbody>{gens_rows}</tbody>
-        </table>
-      </div>
-    </div>"""
+<section class="sec" id="sec-gens">
+  <h3>⚡ Recent generations <span class="pill violet">{gens_total:,} total</span><span class="pill">{gens_today:,} today</span></h3>
+  {_admin_err_note(errors, "generations", "the generation log")}
+  {gens_table}
+</section>"""
 
+    # ── Leads (emails captured at the old paywall) ───────────────────────────────
+    leads_rows = ""
+    leads_count = len(data["leads"])
+    for L in data["leads"]:
+        leads_rows += f"""
+          <tr>
+            <td><b>{_he(L.get('email') or '')}</b></td>
+            <td style="color:#8aa0c8;font-size:12px">{_he(L.get('source') or '—')}</td>
+            <td style="color:#8aa0c8;white-space:nowrap">{_he(_admin_when(L.get("created_at")))}</td>
+          </tr>"""
+    leads_title = "Leads (old paywall emails)" if free else "Leads"
     leads_section = ""
     if leads_count:
         leads_section = f"""
-    <div style="margin:1.5rem 2rem">
-      <h3 style="margin:0 0 .6rem;color:#e8f0ff;font-size:1rem;display:flex;align-items:center;gap:.5rem">
-        ✉️ Leads
-        <span style="background:#831843;color:#fbcfe8;padding:2px 10px;border-radius:20px;font-size:12px">{leads_count} emails</span>
-      </h3>
-      <div style="overflow-x:auto;border:1px solid #16233f;border-radius:10px">
-        <table style="width:100%;border-collapse:collapse;font-size:13px">
-          <thead><tr>
-            <th style="{subs_th}">Email</th><th style="{subs_th}">Source</th><th style="{subs_th}">Captured (UTC)</th>
-          </tr></thead>
-          <tbody>{leads_rows}</tbody>
-        </table>
-      </div>
-    </div>"""
+<section class="sec" id="sec-leads">
+  <h3>✉️ {leads_title} <span class="pill pink">{leads_count:,} emails</span></h3>
+  <div class="box"><table>
+    <thead><tr><th>Email</th><th>Source</th><th>Captured (UTC)</th></tr></thead>
+    <tbody>{leads_rows}</tbody>
+  </table></div>
+</section>"""
+    elif free or "leads" in errors:
+        # Nothing to list: one short line instead of an empty table.
+        leads_section = f"""
+<section class="sec" id="sec-leads">
+  <p class="note" style="margin:0">✉️ {leads_title}: {"none" if "leads" not in errors else "not loaded"}.</p>
+  {_admin_err_note(errors, "leads", "the leads")}
+</section>"""
 
+    # ── Top of the page: sign-ups, funnel (+ the all-time cards), AI budget ───────
+    lead_cards = ""
+    if not free:
+        # Token mode keeps its revenue cards. (Free mode never asks Stripe for the price.)
+        monthly_price = _monthly_price_usd()  # live Stripe price (cached ~1h), USD/month
+        mrr = subs_active * monthly_price
+        lead_cards = (_admin_card("MRR (est.)", f"${mrr:,.2f}",
+                                  f"{subs_active} active × ${monthly_price:.2f}/mo · ARR ${mrr * 12:,.0f}", "mrr", "hero")
+                      + _admin_card("Active", f"{subs_active:,}", f"of {stats['total']:,} users", "active-subs", "mint"))
+    totals_cards = (
+        _admin_card("Visits (all-time)", _admin_n(visits["total"], errors, "visits"),
+                    "not loaded" if "visits" in errors else
+                    f"{visits['today']:,} today · {visits['window']:,} in the last 7 days", "visits-total", "cyan")
+        + _admin_card("Generations (all)", _admin_n(gens_total, errors, "generations"),
+                      "not loaded" if "generations" in errors else
+                      f"{gens_today:,} today · {gens_anon:,} anon · {gens_demo:,} demo · {gens_user:,} signed-in",
+                      "gens-total", "violet")
+        + _admin_card("Accounts that made a guide", _admin_n(used_count, errors, "users", "activity"),
+                      "not loaded" if ("users" in errors or "activity" in errors) else
+                      f"of {len(users):,} accounts, all time", "accounts-active", "lilac"))
+    if not free:
+        totals_cards += _admin_card("Leads", f"{leads_count:,}", "emails captured", "leads-total", "pink")
+
+    cfg = json.dumps({"payAttr": "legacy" if free else "active", "csvHead": csv_head, "csvKeys": csv_keys})
+    cfg = cfg.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    visits_badge = f"{visits['total']:,}" if (sb is not None and "visits" not in errors) else str(len(vis_copy))
     return f"""<!DOCTYPE html>
-<html><head><meta charset="UTF-8">
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Admin — Alimne</title>
-<style>
-  *{{box-sizing:border-box;margin:0;padding:0}}
-  body{{font-family:'Segoe UI',system-ui,sans-serif;background:#050d1a;color:#e8f0ff;min-height:100vh}}
-  .topbar{{display:flex;align-items:center;justify-content:space-between;padding:1rem 2rem;
-           background:#0a1628;border-bottom:1px solid #1a3a6e;position:sticky;top:0;z-index:10}}
-  .topbar h1{{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:.6rem}}
-  .badge{{background:#4f8ef7;color:#fff;padding:2px 10px;border-radius:20px;font-size:12px}}
-  .badge.red{{background:#dc2626}}
-  .actions{{display:flex;gap:.5rem}}
-  .btn{{padding:6px 14px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:opacity .2s}}
-  .btn:hover{{opacity:.8}}
-  .btn-red{{background:#dc2626;color:#fff}}
-  .btn-green{{background:#16a34a;color:#fff}}
-  .btn-gray{{background:#1e3a5f;color:#8aa0c8}}
-  .wrap{{overflow-x:auto}}
-  table{{width:100%;border-collapse:collapse;font-size:13px}}
-  th{{background:#0f2040;padding:10px 12px;text-align:left;font-weight:600;color:#8aa0c8;
-      border-bottom:1px solid #1a3a6e;white-space:nowrap}}
-  td{{padding:9px 12px;border-bottom:1px solid #0d1e35;vertical-align:middle}}
-  tr:hover td{{background:#0a1e38}}
-  .empty{{padding:3rem;text-align:center;color:#4a5f80;font-size:0.9rem}}
-  #toast{{position:fixed;bottom:1.5rem;right:1.5rem;background:#16a34a;color:#fff;
-          padding:.6rem 1.2rem;border-radius:8px;font-size:13px;display:none;z-index:100}}
-</style></head>
+<style>{_ADMIN_CSS}</style></head>
 <body>
 <div class="topbar">
   <h1>📊 Alimne — Admin
-    <span class="badge">{(f"{visits_total:,}" if visits_durable else len(vis_copy))} visits</span>
+    <span class="badge">{visits_badge} visits</span>
     {f'<span class="badge red">⛔ {len(blocked_copy)} blocked</span>' if blocked_copy else ''}
   </h1>
   <div class="actions">
@@ -2194,10 +2918,15 @@ def admin_page():
     <button class="btn btn-gray" onclick="signOut()" title="Sign out of the admin dashboard on every device · تسجيل الخروج من لوحة الإدارة على جميع الأجهزة">⎋ Sign out</button>
   </div>
 </div>
-{subs_section}
+{f'<div class="sec" style="margin-bottom:0">{sb_note}</div>' if sb_note else ''}
+{_admin_signups_html(stats, errors, lead_cards)}
+{_admin_funnel_html(funnel, gate_limit, errors, totals_cards)}
+{_admin_budget_html(budget, gen_gate, errors, free)}
+{users_section}
 {gens_section}
 {leads_section}
 {blocked_section}
+<section id="sec-visitors">
 <h3 style="margin:1.5rem 2rem .5rem;color:#8aa0c8;font-size:.95rem">🌐 Recent visitors <span style="font-weight:400;color:#4a5f80;font-size:.8rem">(last 1000, in-memory — resets on restart; totals above are durable)</span></h3>
 <div class="wrap">
 <table>
@@ -2210,117 +2939,10 @@ def admin_page():
   </tbody>
 </table>
 </div>
+</section>
 <div id="toast"></div>
-<script>
-// Auth rides on the HttpOnly session cookie, which the browser attaches to these
-// same-origin requests by itself; the admin token never reaches this page. The
-// server requires the fixed X-Requested-With header on every cookie-authed POST.
-try {{ localStorage.removeItem("alimne_admin_token"); }} catch (e) {{}}   // legacy copy
-const ADMIN_HEADERS = {{"Content-Type":"application/json","X-Requested-With":"alimne-admin"}};
-function toast(msg, color="#16a34a"){{
-  const t = document.getElementById("toast");
-  t.textContent = msg; t.style.background = color; t.style.display = "block";
-  setTimeout(()=>t.style.display="none", 2500);
-}}
-// POST an admin action. Resolves to the Response, or null when the session has
-// expired (cookie cleared, or the admin token was rotated) — then it sends you to sign in.
-async function adminPost(url, body){{
-  const r = await fetch(url, {{method:"POST", credentials:"same-origin", headers:ADMIN_HEADERS,
-                               body: JSON.stringify(body || {{}})}});
-  if (r.status === 401) {{
-    toast("Session expired — sign in again. · انتهت الجلسة — سجّل الدخول مرة أخرى.", "#dc2626");
-    setTimeout(()=>{{ location.href = "/admin"; }}, 1800);
-    return null;
-  }}
-  return r;
-}}
-async function blockIp(ip){{
-  if(!confirm("Block " + ip + "?\\nThis will 403 all their requests immediately.")) return;
-  const r = await adminPost("/admin/block", {{ip}});
-  if(r && r.ok){{ toast("⛔ Blocked: " + ip, "#dc2626"); setTimeout(()=>location.reload(),1200); }}
-}}
-async function unblock(ip){{
-  const r = await adminPost("/admin/unblock", {{ip}});
-  if(r && r.ok){{ toast("✓ Unblocked: " + ip); setTimeout(()=>location.reload(),1200); }}
-}}
-async function clearLog(){{
-  if(!confirm("Clear all visitor log entries?")) return;
-  const r = await adminPost("/admin/clear");
-  if(r && r.ok){{ toast("🗑 Log cleared"); setTimeout(()=>location.reload(),1200); }}
-}}
-
-// ── Subscribers: search / paying-only filter / sort / CSV / actions ──────────
-function subFilter(){{
-  var q = (document.getElementById("subSearch").value || "").toLowerCase().trim();
-  var payingOnly = document.getElementById("payingOnly").checked;
-  var rows = document.querySelectorAll("#subBody tr.subrow");
-  var shown = 0;
-  rows.forEach(function(r){{
-    var okQ = !q || r.dataset.email.indexOf(q) >= 0 || r.dataset.name.indexOf(q) >= 0 || (r.dataset.refby||"").indexOf(q) >= 0;
-    var okP = !payingOnly || r.dataset.active === "1";
-    var vis = okQ && okP;
-    r.style.display = vis ? "" : "none";
-    if (vis) shown++;
-  }});
-  var el = document.getElementById("subShown");
-  if (el) el.textContent = shown + " shown";
-}}
-var _subSort = {{}};
-var _SUBCOLS = {{0:["email",0], 1:["name",0], 2:["status",0], 3:["tokens",1], 4:["used",1], 6:["refby",0], 7:["renews",0], 8:["joined",0]}};
-function subSort(idx){{
-  var spec = _SUBCOLS[idx]; if(!spec) return;
-  var key = spec[0], numeric = spec[1];
-  var dir = _subSort[idx] === 1 ? -1 : 1; _subSort = {{}}; _subSort[idx] = dir;
-  var body = document.getElementById("subBody");
-  var rows = Array.prototype.slice.call(body.querySelectorAll("tr.subrow"));
-  rows.sort(function(a,b){{
-    var va = a.dataset[key] || "", vb = b.dataset[key] || "";
-    if (numeric) return ((parseFloat(va)||0) - (parseFloat(vb)||0)) * dir;
-    return (va < vb ? -1 : (va > vb ? 1 : 0)) * dir;
-  }});
-  rows.forEach(function(r){{ body.appendChild(r); }});
-}}
-function subExportCSV(){{
-  var rows = document.querySelectorAll("#subBody tr.subrow");
-  var out = [["Email","Name","Status","Tokens","Used","Last used","Referred by","Renews","Joined"]];
-  rows.forEach(function(r){{
-    if (r.style.display === "none") return;
-    out.push([r.dataset.email, r.dataset.name, r.dataset.status, r.dataset.tokens, r.dataset.used||"0", r.dataset.lastused||"", r.dataset.refby||"", r.dataset.renews||"", r.dataset.joined||""]);
-  }});
-  var csv = out.map(function(row){{ return row.map(function(c){{ return '"' + String(c).replace(/"/g,'""') + '"'; }}).join(","); }}).join("\\n");
-  var blob = new Blob([csv], {{type:"text/csv"}});
-  var a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = "alimne-subscribers.csv";
-  document.body.appendChild(a); a.click(); a.remove();
-  toast("⬇ Exported " + (out.length - 1) + " rows");
-}}
-async function grantTokens(uid, email){{
-  var v = prompt("Grant tokens to " + email + "\\n(use a negative number to deduct):", "30");
-  if (v === null) return;
-  var amount = parseInt(v, 10);
-  if (!amount) {{ toast("Enter a non-zero number", "#dc2626"); return; }}
-  var r = await adminPost("/admin/user/grant", {{user_id: uid, amount: amount}});
-  if (!r) return;
-  var d = await r.json().catch(function(){{ return {{}}; }});
-  if (r.ok) {{ toast("✓ " + email + ": " + d.tokens_remaining + " tokens"); setTimeout(function(){{ location.reload(); }}, 900); }}
-  else {{ toast("✗ " + (d.error || "failed"), "#dc2626"); }}
-}}
-async function cancelSub(uid, email){{
-  if (!confirm("Cancel subscription for " + email + "?\\nStripe subscriptions cancel at period end (they keep access until then).")) return;
-  var r = await adminPost("/admin/user/cancel", {{user_id: uid}});
-  if (!r) return;
-  var d = await r.json().catch(function(){{ return {{}}; }});
-  if (r.ok) {{ toast(d.canceled_at_period_end ? "✓ Cancels at period end" : "✓ Set to free"); setTimeout(function(){{ location.reload(); }}, 900); }}
-  else {{ toast("✗ " + (d.error || "failed"), "#dc2626"); }}
-}}
-async function signOut(){{
-  // Server clears the HttpOnly cookie (page JS can't); then back to the sign-in gate.
-  try {{ await fetch("/admin/logout", {{method:"POST", credentials:"same-origin", headers:ADMIN_HEADERS, body:"{{}}"}}); }} catch(e) {{}}
-  try {{ localStorage.removeItem("alimne_admin_token"); }} catch(e) {{}}
-  location.href = "/admin";
-}}
-subFilter();
-</script>
+<script>var ADMIN_CFG = {cfg};</script>
+<script>{_ADMIN_JS}{"" if free else _ADMIN_JS_TOKENS}</script>
 </body></html>"""
 
 _SAFE_NAME = re.compile(r'[^\w\-. ]')
