@@ -299,11 +299,24 @@ Generate, exactly as before. On the next page load the items are back in the lis
 generate, with the notice "You're signed in. Your file is ready - tap Generate." (they also come
 back if the visitor cancels at Google and returns without an account). The copy:
 
-- is capped at 3 files and about 60 MB in all;
+- is capped at 3 files and about 60 MB in all. The list itself takes 3 files of up to 50 MB each,
+  so a big file can be left out of the copy: it is counted, and the notice then ends "One file
+  could not be kept - please choose it again." (it never calls a missing file ready);
 - belongs to the tab that made it (a random claim in sessionStorage): no other tab can bring it
   back, including one opened later by someone else at the same computer;
-- is deleted in the same step that reads it, deleted on sign-out, and never used once it is more
+- is deleted as soon as it has been read back, deleted on sign-out, and never used once it is more
   than 30 minutes old (the next page load in that browser deletes it);
+- is read in two steps, on purpose: first the copy is read and each file is copied into the page's
+  memory, then the copy is deleted. In Safari and in every iOS browser a file read back from
+  IndexedDB is only a pointer to the bytes stored with it, and it stops being readable the moment
+  the stored copy is deleted: deleting in the same step left a file that showed as "Queued" and
+  failed to upload on every try. A file whose bytes cannot be read is left out and reported in the
+  notice like a file that did not fit;
+- is dropped when the page never left (the visitor pressed Stop while Google was loading) and the
+  visitor then went on in it: a guide started or an item removed by their own tap drops it at
+  once; a guide that finishes, or the next file of a running batch, drops it once the page has
+  clearly stayed (20 seconds). Otherwise a reload within the 30 minutes would bring a finished or
+  removed file back as "Queued";
 - is skipped silently where IndexedDB or sessionStorage is missing or blocked (some private modes):
   the page then behaves as it did before, and the file has to be chosen again.
 
@@ -433,9 +446,16 @@ rows, on purpose: **do not delete `gate:` rows.** A deleted `gate:dev:` row hand
 free guides back. (The `fair:dev:` rows left over from before the gate are unused and are cleaned
 up by the same query.)
 
+It also leaves the **`fair:user:` rows** alone, on purpose: `/admin` reads them. In free mode
+nothing else records that an account made a guide, so the card "Accounts that made a guide ... all
+time", the "+" beside "Guides made" and the "Last used" column are all made from those rows. There
+is one small row per account that ever made a guide. Delete them and the dashboard's all-time
+figure silently drops to the accounts of the last day.
+
 ```sql
 delete from public.anon_usage
 where key like 'fair:%' and key not in ('fair:global', 'fair:global:anon')
+  and key not like 'fair:user:%'
   and last_at < now() - interval '30 days';
 ```
 
@@ -546,6 +566,12 @@ Do these before announcing, in this order.
       prompt, "Continue with Google", and finish signing in. Back on Alimne the file is in the
       list again with "You're signed in. Your file is ready - tap Generate." (If the browser blocks
       IndexedDB the file is not kept and has to be chosen again: the old behaviour, not an error.)
+- [ ] **The same round trip on a real iPhone (Safari), before announcing, and then tap Generate.**
+      The guide must be made. Safari handles a file kept in IndexedDB differently from Chrome
+      (section 3), the offline tests only model that, and no test machine here has Safari. If the
+      file comes back as "Queued" but Generate fails with a connection error, the copy is not
+      working on iOS: tell the developer before launch (the visitor's way out is to choose the
+      file again).
 - [ ] (Optional, it makes 3 real guides.) The server's own gate, without the client: run this 4
       times from a terminal, with a few hundred words of text in place of the dots. The first 3
       stream a guide, the 4th answers HTTP 401 with `"code":"signin_required","reason":"device"`
@@ -607,11 +633,24 @@ Do these before announcing, in this order.
   shows the `device` text ("You've used your 3 free guides") for a network or pool refusal too.
 - **The file kept for Google sign-in has limits.** It works only where IndexedDB and
   sessionStorage do (not in some private modes: the file is then simply not kept, as before), for
-  at most 3 files and about 60 MB, in the same tab, for 30 minutes. An email confirmation link
+  at most 3 files and about 60 MB, in the same tab, for 30 minutes. A file that did not fit, or
+  whose bytes could not be read back, is not restored: the notice says how many must be chosen
+  again. An email confirmation link
   opens a new tab: the file stays in the first tab, which becomes signed in too. If a visitor
   closes the tab while on Google's page, the copy stays in their own browser (it cannot be
   opened by another tab and is sent nowhere) until Alimne is next opened there, when a copy
   older than 30 minutes is deleted.
+- **The Safari / iOS path of that copy is tested by a model, not on a device.** The restore copies
+  each file into memory before the stored copy is deleted, which is what WebKit needs, but it was
+  not run on an iPhone here. Do the iPhone step of the launch checklist (section 8).
+- **A restored file is held in memory.** Up to about 60 MB for the three files together, until they
+  are generated or removed. On an old phone with little memory a very large file may fail to come
+  back; it is then reported as one to choose again.
+- **A guide that was still running when the visitor tapped "Continue with Google" can come back
+  twice.** If it finishes in the few seconds before the page leaves (or within 20 seconds on a
+  page that never left), the copy still holds its file: back on the page the finished guide is
+  there, and the same file is "Queued" as well. It is one extra row, not a charge: nothing is made
+  unless the visitor taps Generate.
 - **The gate fails open.** If the database cannot answer, anonymous visitors are let through
   (and the log says `failing open`). Section 3 explains why, and what to watch.
 - **Everyone starts at 3 on the day the gate ships.** The gate uses new counter keys, so guides
@@ -633,6 +672,13 @@ Do these before announcing, in this order.
   per-IP limit and full-house check bound how often it runs, but one slow YouTube answer can
   still hold a web thread for a while.
 - **Old `fair:` rows are never purged automatically.** Use the housekeeping query in section 6
-  now and then. A full database makes the counters fail open, which the `failing open` log line
-  makes visible.
+  now and then (it keeps the `fair:user:` rows, which `/admin` needs). A full database makes the
+  counters fail open, which the `failing open` log line makes visible.
+- **`/admin` cannot tell that a legacy subscription is set to cancel.** Cancel asks Stripe to end it
+  at the end of the paid period; until then Stripe, and so the Users table, keep it "active" with
+  the same date. The table therefore says "active · period ends <date>" (never "renews") and a note
+  under it says so. To see that a cancel went through, look at the subscription in Stripe.
+- **"No guide by an anonymous device was counted in the last 7 days" on `/admin` is not a fault
+  report.** It only says the 7-day window is empty: right after a deploy, in a quiet week, or
+  while the counters fail open (then the log says `failing open`). The gate is live in all three.
 - **A global counter is a fixed 24 h window**, so the budget can reset at an odd hour (section 3).
