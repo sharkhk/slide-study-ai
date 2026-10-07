@@ -267,6 +267,37 @@ def test_privacy_discloses_usage_counters_and_free_payments(client):
     assert "usage counters" in html.split("<h2>6. Third-party services</h2>")[1]
 
 
+def test_privacy_discloses_the_browser_copy_kept_for_google_sign_in(client):
+    """Google sign-in leaves the page, so a file, link or pasted text that was waiting is kept in the
+    visitor's OWN browser (IndexedDB) until they are back. That is a copy on their device, so the
+    policy says so: where it is, that it is not sent to us early, and when it is deleted."""
+    html = _page(client, "/privacy")
+    flat = _flat(html)
+    assert "<strong>Signing in:</strong>" in html
+    for must in ("is waiting when you leave the page to sign in with Google",
+                 "your browser keeps it on your own device",
+                 "it is not sent to us until you press Generate",
+                 "deleted as soon as it is restored, or when you sign out",
+                 "a copy older than 30 minutes is never used and is deleted the next time you open Alimne in that browser"):
+        assert must in flat, must
+    # it sits with the study content (section 1), before the account section
+    assert flat.index("<strong>Signing in:</strong>") < flat.index("<h2>2. Account &amp; fair-use information</h2>")
+    assert flat.index("<strong>Signing in:</strong>") > flat.index("<h2>1. Study content you submit</h2>")
+    # the Arabic summary says the same in one sentence
+    assert "يبقى ما كان ينتظر" in html and "في متصفحك فقط" in html and "ولا يُرسَل إلينا قبل أن تضغط «توليد»" in html
+    assert not BANNED.search(html) and not NO_ACCOUNT_UNQUALIFIED.findall(html)
+
+
+@pytest.mark.parametrize("value", ["0", "off"])
+def test_token_mode_privacy_page_has_no_browser_copy_line(client, monkeypatch, value):
+    # The copy is only made in free mode (the token client keeps its old behaviour), so the token-mode
+    # page must not describe it.
+    monkeypatch.setenv("ALIMNE_FREE_MODE", value)
+    monkeypatch.setattr(appmod, "FREE_MODE", appmod._env_switch("ALIMNE_FREE_MODE"))
+    html = _page(client, "/privacy")
+    assert "Signing in:" not in html and "sign in with Google" not in html and "يبقى ما كان ينتظر" not in html
+
+
 def test_privacy_has_an_arabic_summary_that_keeps_the_promises(client):
     html = _page(client, "/privacy")
     assert 'lang="ar" dir="rtl"' in html

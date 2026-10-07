@@ -817,7 +817,8 @@ const csvCell = v => {
 // exactly as before. The copy
 //   * is capped (STASH_MAX_FILES files, about STASH_MAX_BYTES in all);
 //   * belongs to the tab that made it (a random claim in sessionStorage, which survives the round trip in the
-//     same tab and nothing else): another tab, or another person at the same computer later, cannot take it;
+//     same tab and nothing else): no other tab can take it, including one opened later by someone else at the
+//     same computer;
 //   * is deleted in the very transaction that reads it back, deleted on sign-out, and never used once it is
 //     older than STASH_MAX_AGE_MS (any later page load in this browser sweeps it).
 // Every touch of IndexedDB and of the browser's storage is wrapped and time-limited: where they are missing,
@@ -3060,11 +3061,12 @@ export default function App() {
     // What this page load brought back, for the sign-in the page loaded with only (the return from Google).
     // A sign-in made later in the page has nothing new to announce: it reads as before.
     const pending = stashRestore.current
+    const atLoad = atLoadSignIn.current
     stashRestore.current = null
-    const back = (pending && atLoadSignIn.current) ? await pending : null
+    const back = (pending && atLoad) ? await pending : null
     // Signed in without the page ever leaving (email and password, or back from a Google page that was never
     // completed): whatever was kept for a round trip is still in memory here, so the copy has no use left
-    if (!atLoadSignIn.current) dropStash()
+    if (!atLoad) dropStash()
     if (!back && !note && !gateAsked.current) return
     if (note && !gateAsked.current) {
       const yt = keptLink(note.yt), url = keptLink(note.url)

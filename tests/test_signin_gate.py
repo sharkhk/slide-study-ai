@@ -23,12 +23,14 @@ What this file pins, SERVER side:
  12. the knobs parse safely
  13. the refusal says WHY (`reason`: device / network / pool), each with its own true
      text: a visitor who made no guides is never told "you've used your 3 free guides"
+ 14. the client (App_dev.jsx) words the three reasons exactly as the server does
 
 EVERYTHING IS OFFLINE: Supabase is an in-memory fake with a clock, Groq / yt-dlp are faked.
 """
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -916,6 +918,73 @@ def test_config_anon_remaining_stays_the_device_counter(client, auth_on, sb, llm
     d = client.get("/api/config", headers={"X-Device-Id": DEV}).get_json()
     assert d["anon_remaining"] == 3 and d["anon_free_limit"] == 3 and d["signin_after"] == 3
     assert "reason" not in d
+
+
+# ── 14. the client says the same three things ────────────────────────────────────
+APP_JSX = os.path.join(ROOT, "frontend", "src", "App_dev.jsx")
+
+
+def _same_spelling(text):
+    """One spelling for comparing the server's sentence with the client's. The two files differ only
+    in typography: the dash (" - " / " — ") and where the Arabic tanwin sits around the alef."""
+    return text.replace("ً", "").replace("—", "-")
+
+
+def _client_line(lang, key):
+    """The source line of T.<lang>.<key> in the React client."""
+    with open(APP_JSX, encoding="utf-8") as fh:
+        src = fh.read()
+    start = src.index("\nconst T = {")
+    pack = src[start: src.index("\n}\n", start)]
+    en, ar = pack.index("\n  en: {"), pack.index("\n  ar: {")
+    block = pack[en:ar] if lang == "en" else pack[ar:]
+    lines = [l for l in block.splitlines() if l.startswith(f"    {key}:")]
+    assert len(lines) == 1, (lang, key, len(lines))
+    return _same_spelling(lines[0])
+
+
+def _server_text(ar, reason, n=3):
+    old = appmod.ANON_FREE_USES
+    appmod.ANON_FREE_USES = n
+    try:
+        with appmod.app.test_request_context("/"):
+            return _same_spelling(appmod._fair_refusal("signin_required", ar, reason)[0].get_json()["error"])
+    finally:
+        appmod.ANON_FREE_USES = old
+
+
+@pytest.mark.parametrize("lang", ["en", "ar"])
+def test_the_client_words_the_network_and_pool_reasons_exactly_as_the_server(lang):
+    for reason, key in (("network", "signinNetwork"), ("pool", "signinPool")):
+        server = _server_text(lang == "ar", reason)
+        line = _client_line(lang, key)
+        quote = '"' if lang == "en" else "'"
+        assert line == f"    {key}: {quote}{server}{quote},", (lang, reason, line)
+
+
+@pytest.mark.parametrize("lang", ["en", "ar"])
+def test_the_client_words_the_device_reason_as_the_server_does(lang):
+    """The device text carries the number, so the client has a template: every fixed part of it is the
+    server's, for the plural, the singular, the Arabic dual and "no free guide at all"."""
+    ar = lang == "ar"
+    quote = "'" if ar else '"'
+    line = _client_line(lang, "signinRequired")
+    assert f"n === 0 ? {quote}{_server_text(ar, 'device', 0)}{quote} : `" in line
+    cta = _same_spelling(AR_CTA if ar else CTA)
+    assert line.endswith(f". {cta}`,"), line[-90:]
+    if ar:
+        for n, piece in ((1, "دليلك المجاني"), (2, "دليلَيك المجانيَّين"), (3, "أدلتك المجانية الثلاثة"), (12, "أدلتك المجانية الـ12")):
+            assert _server_text(True, "device", n) == f"لقد استخدمت {piece}. {cta}", n
+        for piece in ("`لقد استخدمت ${", "'دليلك المجاني'", "'دليلَيك المجانيَّين'", "`أدلتك المجانية ${AR_THE_COUNT[n] || `الـ${n}`}`"):
+            assert piece in line, piece
+        # the count words (3 to 10) are the server's own table
+        with open(APP_JSX, encoding="utf-8") as fh:
+            table = re.search(r"^const AR_THE_COUNT = \{([^}]*)\}", fh.read(), re.M).group(1)
+        assert {int(k): v for k, v in re.findall(r"(\d+): '([^']+)'", table)} == appmod._AR_THE_COUNT
+    else:
+        for n, piece in ((1, "free guide"), (3, "3 free guides"), (12, "12 free guides")):
+            assert _server_text(False, "device", n) == f"You've used your {piece}. {cta}", n
+        assert "`You've used your ${n === 1 ? 'free guide' : `${n} free guides`}. " in line
 
 
 # ── 11. ALIMNE_FREE_MODE=0 is exactly the old token system ───────────────────────

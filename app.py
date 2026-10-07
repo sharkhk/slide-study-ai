@@ -6840,6 +6840,20 @@ customer reference and your subscription status.</p>"""
         payments = """<p>Subscriptions are processed by <strong>Stripe, Inc.</strong> We never receive or store your full card
 number \u2014 Stripe handles payment details directly. We store only a Stripe customer reference and your
 subscription status.</p>"""
+    # Free mode only: the client keeps what was waiting across the full-page Google sign-in, in the
+    # visitor's own browser (IndexedDB). It is a copy on their device, so the policy says so. The token
+    # client makes no such copy, and its page stays as it was.
+    if free:
+        signin_copy = """
+<li><strong>Signing in:</strong> if a file, link or pasted text is waiting when you leave the page to sign in
+with Google, your browser keeps it on your own device (it is not sent to us until you press Generate) so that it is
+still there when you return. That copy is deleted as soon as it is restored, or when you sign out; a copy older
+than 30 minutes is never used and is deleted the next time you open Alimne in that browser.</li>"""
+        signin_copy_ar = (" وإذا غادرتَ الصفحة لتسجيل الدخول عبر Google،"
+                          " يبقى ما كان ينتظر (ملف أو رابط أو نص) محفوظًا في متصفحك فقط إلى أن تعود،"
+                          " ولا يُرسَل إلينا قبل أن تضغط «توليد».")
+    else:
+        signin_copy = signin_copy_ar = ""
     body = """
 <h1>Privacy Policy</h1>
 <div class="updated">Last updated: 7 October 2026</div>
@@ -6856,7 +6870,7 @@ This policy explains what we handle and why.</p>
 ولا تُكتب على القرص ولا يطّلع عليها أي شخص، وتُحذف <strong>تلقائيًا خلال 15 دقيقة</strong> أو فورًا عند طلبك.
 لا نبيع بياناتك ولا نعرض إعلانات. الأدلة المشتركة: إذا اخترتَ «مشاركة» يُخزَّن الدليل الناتج (وليس ملفك الأصلي)
 ليبقى رابطه العام يعمل. ولتطبيق حدود الاستخدام العادل نحتفظ بعدّاد (رقم وتواريخ فقط، دون أي محتوى دراسي) مرتبط بمعرّف
-عشوائي لجهازك أو بعنوان IP أو بحسابك. النص الإنجليزي هو المرجع.</div>
+عشوائي لجهازك أو بعنوان IP أو بحسابك.""" + signin_copy_ar + """ النص الإنجليزي هو المرجع.</div>
 
 <h2>1. Study content you submit</h2>
 <ul>
@@ -6866,7 +6880,7 @@ They are never persisted to disk, logged in full, or reviewed by a person.</li>
 <li>To generate a guide, the extracted text is sent to our AI provider (Groq) for processing. It is used
 only to produce your result and is not used to train models by us.</li>
 <li><strong>Shared guides:</strong> if you press "Share" on a guide, that generated guide (not your original
-file) is stored so its public link keeps working until it is removed.</li>
+file) is stored so its public link keeps working until it is removed.</li>""" + signin_copy + """
 </ul>
 
 <h2>2. Account &amp; fair-use information</h2>
