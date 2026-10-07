@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo, Fragment } from 'react'
 import { createClient } from '@supabase/supabase-js'
 import {
   Sun, Moon, Upload, FileText, Download,
@@ -102,6 +102,7 @@ const T = {
     noAccount: 'New here? Create a free account',
     haveAccount: 'Already have an account? Sign in',
     wrongPassword: 'Incorrect email or password. If you signed up with Google, sign in with Google instead.',
+    wrongPasswordInApp: 'Incorrect email or password. If you signed up with Google, open Alimne in your browser and sign in with Google.',
     accountExists: 'An account already exists for this email. Sign in instead.',
     signInFreeCta: 'Sign in free',
     emailInvalid: 'Please enter a valid email address.',
@@ -188,7 +189,7 @@ const T = {
     guideExpired: 'This guide expired on the server.',
     guideExpiredLong: 'This guide expired on the server (guides are kept for 15 minutes). Restore or regenerate it to keep studying.',
     loadFailed: "Couldn't load this guide — check your connection.",
-    inAppBanner: 'Downloads may not work inside Instagram/TikTok — open alimne.app in Safari/Chrome (⋯ → Open in browser).',
+    inAppBanner: 'Downloads may not work inside this app. Open alimne.app in your browser (menu ⋯ or ⋮ → Open in browser).',
     items: (n) => `${n} item${n !== 1 ? 's' : ''}`,
     readyCount: (n) => `${n} ready`,
     starting: 'Starting…',
@@ -349,6 +350,7 @@ const T = {
     noAccount: 'جديد هنا؟ أنشئ حساباً مجانياً',
     haveAccount: 'لديك حساب بالفعل؟ سجّل الدخول',
     wrongPassword: 'البريد أو كلمة المرور غير صحيحة. إن كنت سجّلت عبر Google فسجّل الدخول عبر Google.',
+    wrongPasswordInApp: 'البريد أو كلمة المرور غير صحيحة. إن كنت سجّلت عبر Google فافتح علّمني في متصفحك وسجّل الدخول عبر Google.',
     accountExists: 'يوجد حساب بهذا البريد بالفعل. سجّل الدخول بدلاً من ذلك.',
     signInFreeCta: 'سجّل الدخول مجاناً',
     emailInvalid: 'يرجى إدخال بريد إلكتروني صحيح.',
@@ -429,7 +431,7 @@ const T = {
     guideExpired: 'انتهت صلاحية هذا الدليل على الخادم.',
     guideExpiredLong: 'انتهت صلاحية هذا الدليل على الخادم (تُحفظ الأدلة 15 دقيقة). استعِده أو أعد إنشاءه لمتابعة المذاكرة.',
     loadFailed: 'تعذّر تحميل الدليل — تحقّق من اتصالك.',
-    inAppBanner: 'قد لا يعمل التحميل داخل Instagram/TikTok — افتح alimne.app في Safari أو Chrome (⋯ ← فتح في المتصفح).',
+    inAppBanner: 'قد لا يعمل التحميل داخل هذا التطبيق. افتح alimne.app في متصفحك (القائمة ⋯ أو ⋮ ← فتح في المتصفح).',
     items: (n) => n === 1 ? 'عنصر واحد' : n === 2 ? 'عنصران' : n <= 10 ? `${n} عناصر` : `${n} عنصراً`,
     readyCount: (n) => `${n} جاهز`,
     starting: 'جارٍ البدء…',
@@ -715,7 +717,22 @@ const sb = (() => { try { return createClient(SB_URL, SB_ANON) } catch (e) { con
 // Instagram / Facebook / TikTok / Snapchat / LINE / Android WebViews: Google OAuth
 // is blocked and <a download> is usually ignored.
 const IN_APP = (() => { try { return /Instagram|FBAN|FBAV|FB_IAB|TikTok|musical_ly|Snapchat|Line\/|; wv\)/i.test(navigator.userAgent || '') } catch { return false } })()
-// Google refuses to sign anyone in inside those, so the sign-in modal offers "Open in browser" there. The link the
+// Where Google refuses to sign anyone in (it answers 403 disallowed_useragent to a browser embedded in another
+// app, which it tells by the user agent). That is every in-app browser above, and more: IN_APP knows iPhone apps
+// by name only, and the sign-in modal is the one way to an account, so it must not offer a Google button that
+// cannot work. So also: other apps' own browsers known by name, and any iPhone / iPad page whose user agent has
+// no "Safari/" in it. The browsers people use there say it (Safari, Chrome, Firefox, Edge, the Google app...) and
+// an app's own web view does not. A page opened from the Home Screen does not either, but it is not embedded in
+// another app (`standalone`), so it keeps the Google button.
+// The sign-in modal decides by GOOGLE_BLOCKED. Downloads keep deciding by IN_APP, which is as it was.
+const EMBEDDED_RE = /Instagram|FBAN|FBAV|FB_IAB|TikTok|musical_ly|trill_|BytedanceWebview|Snapchat|Line\/|; wv\)|LinkedInApp|Twitter|MicroMessenger|Barcelona|KAKAOTALK|NAVER\(inapp|Pinterest/i
+function googleBlockedIn(ua, standalone = false) {
+  const s = String(ua || '')
+  if (EMBEDDED_RE.test(s)) return true
+  return /iPhone|iPad|iPod/i.test(s) && !/Safari\//i.test(s) && !standalone
+}
+const GOOGLE_BLOCKED = IN_APP || (() => { try { return googleBlockedIn(navigator.userAgent, navigator.standalone === true) } catch { return false } })()
+// There the sign-in modal offers "Open in browser". The link the
 // real browser is given: the site and ?join=1, plus the invite code this visitor arrived with (the one in the
 // address, else the one kept from it at load). Nothing else of the current address goes along: no hash (sign-in
 // tokens travel there) and no other query data.
@@ -729,10 +746,16 @@ function joinLink(origin, search, keptRef) {
 // The address that asks the phone to open `link` in its real browser, or '' when there is none to ask with.
 // Android: an intent with scheme=https, which goes to the default browser, whichever it is. iPhone / iPad:
 // x-safari-https, which opens Safari from iOS 17 on and does nothing before that. Only an https link has one.
+// On Android the address is given only inside the apps named in HANDOFF_APPS_RE (the in-app browsers this was
+// written for). Any other Android web view is an unknown app: a plain android.webkit.WebView does not know
+// intent: and loads it as a page, which is its error page ("Webpage not available") in place of Alimne. No
+// address there, so the modal goes straight to the way by hand. An iPhone web view that does not know
+// x-safari-https stays on the page, so every one of them is asked.
+const HANDOFF_APPS_RE = /Instagram|FBAN|FBAV|FB_IAB|TikTok|musical_ly|trill_|BytedanceWebview|Snapchat|Line\//i
 function browserHandoff(link, ua) {
   const m = /^https:\/\/(.+)$/.exec(String(link || ''))
   if (!m) return ''
-  if (/Android/i.test(ua || '')) return `intent://${m[1]}#Intent;scheme=https;end`
+  if (/Android/i.test(ua || '')) return HANDOFF_APPS_RE.test(ua) ? `intent://${m[1]}#Intent;scheme=https;end` : ''
   if (/iPhone|iPad|iPod/i.test(ua || '')) return `x-safari-https://${m[1]}`
   return ''
 }
@@ -742,6 +765,24 @@ function withoutJoin(loc) {
   q.delete('join')
   const qs = q.toString()
   return loc.pathname + (qs ? `?${qs}` : '') + loc.hash
+}
+// What a page that arrived with ?join=1 does about it: null = nothing to answer now (no ?join=1, the session
+// restore has not answered yet, or this page load answered already); true = open the sign-up modal; false = do
+// not. It opens once per page load, with nobody signed in, and never over a link that came back with a sign-in
+// error or for a password reset: those open their own dialog.
+function joinAnswer({ join, authLoading, asked, session, authEnabled, urlErr, recovery }) {
+  if (!join || authLoading || asked) return null
+  return !session && !!authEnabled && !urlErr && !recovery
+}
+// A sign-in that came back with an error in the address (AUTH_URL_ERR): which text explains it, and on which view
+// the modal opens. Only an EMAIL link (confirmation, password reset) that expired or was used already opens the
+// email sign-in view: Supabase marks it otp_expired / "Email link is invalid or has expired". Everything else is
+// a Google sign-in that did not complete (bad_oauth_state "OAuth callback with invalid state" when the visitor
+// took long at Google, access_denied when they cancelled...): that visitor has no password, so the modal stays
+// on the Google button.
+function authUrlNotice(e) {
+  const emailLink = e?.code === 'otp_expired' || /email link/i.test(e?.desc || '')
+  return { key: emailLink ? 'linkExpired' : 'authLinkError', byEmail: emailLink }
 }
 const NAV_AR = (() => { try { return String(navigator.language || '').toLowerCase().startsWith('ar') } catch { return false } })()
 const MAX_UPLOAD = 50 * 1024 * 1024
@@ -2009,6 +2050,7 @@ This service relies on:
 • Groq API — for AI text generation and audio transcription (subject to Groq's own terms at groq.com).
 • Stripe — for payment processing (subject to Stripe's terms at stripe.com).
 • Supabase — for authentication and usage counters (subject to Supabase's terms at supabase.com).
+• Google: for sign-in with your Google account (subject to Google's terms at policies.google.com).
 • YouTube — for video caption and audio extraction (subject to YouTube's Terms of Service).
 
 8. LIMITATION OF LIABILITY
@@ -2088,6 +2130,7 @@ const TERMS_AR_TAIL = `٣. ملفاتك وخصوصيتك
 • Groq API — لتوليد النصوص والنسخ الصوتي بالذكاء الاصطناعي (خاضع لشروط Groq على groq.com).
 • Stripe — لمعالجة المدفوعات (خاضع لشروط Stripe على stripe.com).
 • Supabase — للمصادقة وعدّادات الاستخدام (خاضع لشروط Supabase على supabase.com).
+• Google: لتسجيل الدخول بحسابك في Google (خاضع لشروط Google على policies.google.com).
 • YouTube — لاستخراج التسميات التوضيحية والصوت (خاضع لشروط خدمة YouTube).
 
 ٨. تحديد المسؤولية
@@ -2205,10 +2248,12 @@ function TermsModal({ lang, onClose, freeMode = true, freeUses = FREE_USES_DEFAU
 // Accounts are made with Google: one "Continue with Google" button, in sign-up and in sign-in mode alike.
 // A quiet link under it opens an email SIGN-IN-ONLY view, for the accounts that have a password: no account
 // can be created there (`notice.byEmail` opens it at once, for an email link that came back expired).
-// Inside an in-app browser (IN_APP) Google refuses to sign anyone in, so there the modal shows a notice,
-// "Open in browser" (the way to Google) and the email form with its sign-up / sign-in toggle: the one place
-// where an account can still be made with an email and a password.
+// Inside another app's browser (GOOGLE_BLOCKED) Google refuses to sign anyone in, so there the modal shows a
+// notice, "Open in browser" (the way to Google) and the email form with its sign-up / sign-in toggle: the one
+// place where this client still makes an account with an email and a password.
 // Inline role=alert messages (not toasts), confirm-email panel with resend, forgot password.
+// Keyboard and screen reader: the dialog is named by its title, which takes the focus when it opens; Tab stays
+// inside it, and the focus follows the visitor between the Google view and the email view (see showEmail).
 // `gate` (free mode): the sign-in gate opened this modal, so it says why, for as long
 // as the modal is open: { reason, uses, text } = the cause ('device' | 'network' | 'pool'), the allowance
 // (0 included) and, for a cause this client does not know, the server's own sentence.
@@ -2228,27 +2273,59 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
   const [needConfirm, setNeedConfirm] = useState(false)     // email_not_confirmed → offer resend
   const [sentTo, setSentTo]     = useState('')              // sign-up sent → "check your inbox"
   const [copied, setCopied]     = useState(false)
-  const [stayed, setStayed]     = useState(false)           // "Open in browser" was tapped and the page is still in front
+  // "Open in browser" was tapped and the page is still in front: the way by hand shows. It shows from the start on a
+  // page that another app's browser opened with ?join=1: the hand-off was tried and came back into the same app.
+  const [stayed, setStayed]     = useState(GOOGLE_BLOCKED && JOIN_IN_URL)
   const timers = useRef([])
   const wentAway = useRef(false)                            // the page was hidden since "Open in browser" was tapped
+  const boxRef = useRef(null)                               // the dialog
+  const titleRef = useRef(null)                             // its title
+  const emailRef = useRef(null)                             // the email field
+  const emailLinkRef = useRef(null)                         // the quiet link to the email view
+  const switchedAt = useRef(0)                              // when the visitor last went between the Google view and the email view
   useEffect(() => () => timers.current.forEach(clearTimeout), [])
   useEffect(() => {
-    if (!IN_APP) return
+    if (!GOOGLE_BLOCKED) return
     const away = () => { if (document.visibilityState === 'hidden') wentAway.current = true }
     document.addEventListener('visibilitychange', away)
     return () => document.removeEventListener('visibilitychange', away)
   }, [])
   useEscapeKey(onClose)
   const isSignup = mode === 'signup'
-  // An account is made with an email and a password inside an in-app browser only: anywhere else the form signs in.
-  const creating = IN_APP && isSignup
-  const emailOnly = !IN_APP && byEmail
-  // The line under the title. In an in-app browser the notice says how it goes there, so only token mode's
+  // This client makes an account with an email and a password inside another app's browser only: anywhere else the form signs in.
+  const creating = GOOGLE_BLOCKED && isSignup
+  const emailOnly = !GOOGLE_BLOCKED && byEmail
+  // The dialog takes the focus when it opens: a keyboard or a screen reader starts inside it, not on the page behind.
+  // It goes to the title, not to a button (an Enter must not start a sign-in nobody asked for) and not to the box
+  // itself (the page's focus ring style would square its corners).
+  useEffect(() => { titleRef.current?.focus?.() }, [])
+  // Between the Google view and the email view the control that was used goes away, and the focus would fall back
+  // to the page behind. It goes to the email field, or back to the link that leads there (never to the Google button).
+  useEffect(() => {
+    if (!switchedAt.current) return
+    const to = emailOnly ? emailRef : emailLinkRef
+    to.current?.focus?.()
+  }, [emailOnly])
+  const showEmail = (on) => { switchedAt.current = Date.now(); setByEmail(on); setMsg(null); setNeedConfirm(false) }
+  // A second tap or Enter meant for the link just used must not act on what took its place (the other link, the
+  // submit button, the Google button): for a moment after the switch the views take no click and no submit.
+  const holdStray = (e) => { if (Date.now() - switchedAt.current < 400) { e.preventDefault(); e.stopPropagation() } }
+  // Tab stays inside the dialog: from its last control on to its first, and back.
+  const keepTabInside = (e) => {
+    if (e.key !== 'Tab' || !boxRef.current) return
+    const stops = [...boxRef.current.querySelectorAll('button:not([disabled]), input:not([disabled]), a[href]')]
+    if (!stops.length) return
+    const first = stops[0], last = stops[stops.length - 1], at = document.activeElement
+    if (e.shiftKey ? at === first : at === last) { e.preventDefault(); (e.shiftKey ? last : first).focus() }
+  }
+  // The line under the title. In another app's browser the notice says how it goes there, so only token mode's
   // own sign-up promise (LEGACY) is shown.
   const sub = emailOnly ? t.emailSignInSub
-    : !IN_APP ? (isSignup ? t.loginSubSignup : t.loginSub)
+    : !GOOGLE_BLOCKED ? (isSignup ? t.loginSubSignup : t.loginSub)
     : (isSignup && !freeMode) ? t.loginSubSignup : null
   const later = (fn, ms) => { const id = setTimeout(fn, ms); timers.current.push(id); return id }
+  // A wrong password: "sign in with Google instead" is no help where the notice says Google is not allowed
+  const errText = (err) => { const text = authErrText(t, err); return GOOGLE_BLOCKED && text === t.wrongPassword ? t.wrongPasswordInApp : text }
 
   // Runs an auth call with a 20s guard so a hung request never leaves the button spinning.
   const guarded = async (fn) => {
@@ -2256,7 +2333,7 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
     setBusy(true)
     const tm = later(() => { setBusy(false); setMsg({ type: 'error', text: t.authTimeout }) }, 20000)
     try { await fn() }
-    catch (err) { setMsg({ type: 'error', text: authErrText(t, err) }) }
+    catch (err) { setMsg({ type: 'error', text: errText(err) }) }
     finally { clearTimeout(tm); setBusy(false) }
   }
 
@@ -2356,7 +2433,7 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
   const emailForm = (
     <form onSubmit={emailAuth} noValidate>
       <input
-        type="email" value={email} onChange={e => setEmail(e.target.value)}
+        ref={emailRef} type="email" value={email} onChange={e => setEmail(e.target.value)}
         placeholder={t.emailPh} autoComplete="username" inputMode="email" style={inputStyle}
       />
       <input
@@ -2388,7 +2465,8 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
   )
   return (
     <div className="modal-overlay" onClick={onClose} style={{alignItems:'center'}}>
-      <div className="modal-box" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}
+      <div className="modal-box" role="dialog" aria-modal="true" aria-labelledby="login-title" ref={boxRef}
+        onClick={e => e.stopPropagation()} onKeyDown={keepTabInside}
         style={{maxWidth:380, width:'92vw', direction: isAr ? 'rtl' : 'ltr', padding:'2rem', textAlign:'center', position:'relative', overflowY:'auto'}}>
         <button className="modal-close" onClick={onClose} aria-label={t.close}
           style={{position:'absolute', top:10, insetInlineEnd:10}}><X size={16} /></button>
@@ -2401,7 +2479,7 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
           }}>
             <AlimneGlyph size={26} />
           </div>
-          <div style={{fontWeight:700, fontSize:'1.15rem', color:'var(--text-primary)', marginBottom:'0.4rem'}}>
+          <div id="login-title" tabIndex={-1} ref={titleRef} style={{fontWeight:700, fontSize:'1.15rem', color:'var(--text-primary)', marginBottom:'0.4rem', outline:'none'}}>
             {sentTo ? t.checkInboxTitle : emailOnly ? t.emailSignInTitle : isSignup ? t.loginTitleSignup : t.signIn}
           </div>
           {/* Why this modal opened: the free guides are used and a free account is needed to make more */}
@@ -2444,71 +2522,74 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
           </div>
         ) : (
           <>
-            {IN_APP ? (
-              <>
-                <div role="note" style={{padding:'0.7rem 0.8rem', borderRadius:10, marginBottom:'1rem',
-                  background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.3)',
-                  fontSize:'0.78rem', lineHeight:1.5, color:'var(--text-secondary)', textAlign: isAr ? 'right' : 'left'}}>
-                  {t.inAppGoogle}
-                  <button type="button" className="submit-btn" onClick={openInBrowser}
-                    style={{marginTop:'0.65rem', width:'100%', justifyContent:'center', padding:'0.7rem 1.25rem', fontSize:'0.9rem'}}>
-                    <ExternalLink size={15} /> {t.openInBrowser}
+            {/* One of three views. Each has its own key, so no control of one is ever reused as a control of another
+                (unkeyed, "Back to Google sign-in" and "Continue with Google" were the same button, focus and all). */}
+            <div style={{display:'flex', flexDirection:'column'}} onClickCapture={holdStray} onSubmitCapture={holdStray}>
+              {GOOGLE_BLOCKED ? (
+                <Fragment key="in-app">
+                  <div role="note" style={{padding:'0.7rem 0.8rem', borderRadius:10, marginBottom:'1rem',
+                    background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.3)',
+                    fontSize:'0.78rem', lineHeight:1.5, color:'var(--text-secondary)', textAlign: isAr ? 'right' : 'left'}}>
+                    {t.inAppGoogle}
+                    <button type="button" className="submit-btn" onClick={openInBrowser}
+                      style={{marginTop:'0.65rem', width:'100%', justifyContent:'center', padding:'0.7rem 1.25rem', fontSize:'0.9rem'}}>
+                      <ExternalLink size={15} /> {t.openInBrowser}
+                    </button>
+                    {/* The way by hand. The live region is always there and only its text comes later, so a screen reader says it. */}
+                    <div role="status" style={stayed ? {marginTop:'0.6rem', fontWeight:600, color:'var(--text-primary)'} : undefined}>{stayed ? t.openManual : ''}</div>
+                    <button type="button" className="ctrl-btn" onClick={copyLink}
+                      style={{marginTop:'0.55rem', width:'100%', justifyContent:'center'}}>
+                      {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? t.referCopied : t.copyLink}
+                    </button>
+                  </div>
+                  <div style={{display:'flex', alignItems:'center', gap:'0.75rem', margin:'0 0 1rem', color:'var(--text-secondary)', fontSize:'0.75rem'}}>
+                    {rule}{isSignup ? t.orEmailSignup : t.orEmailSignin}{rule}
+                  </div>
+                  {emailForm}
+                  <button
+                    type="button"
+                    onClick={() => { setMode(isSignup ? 'signin' : 'signup'); setMsg(null); setNeedConfirm(false) }}
+                    style={{...linkBtn, marginBottom:'1rem'}}
+                  >
+                    {isSignup ? t.haveAccount : t.noAccount}
                   </button>
-                  {stayed && (
-                    <div role="status" style={{marginTop:'0.6rem', fontWeight:600, color:'var(--text-primary)'}}>{t.openManual}</div>
-                  )}
-                  <button type="button" className="ctrl-btn" onClick={copyLink}
-                    style={{marginTop:'0.55rem', width:'100%', justifyContent:'center'}}>
-                    {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? t.referCopied : t.copyLink}
+                </Fragment>
+              ) : emailOnly ? (
+                <Fragment key="email">
+                  {emailForm}
+                  <button type="button" style={linkBtn} onClick={() => showEmail(false)}>
+                    {t.backToGoogle}
                   </button>
-                </div>
-                <div style={{display:'flex', alignItems:'center', gap:'0.75rem', margin:'0 0 1rem', color:'var(--text-muted)', fontSize:'0.75rem'}}>
-                  {rule}{isSignup ? t.orEmailSignup : t.orEmailSignin}{rule}
-                </div>
-                {emailForm}
-                <button
-                  type="button"
-                  onClick={() => { setMode(isSignup ? 'signin' : 'signup'); setMsg(null); setNeedConfirm(false) }}
-                  style={{...linkBtn, marginBottom:'1rem'}}
-                >
-                  {isSignup ? t.haveAccount : t.noAccount}
-                </button>
-              </>
-            ) : emailOnly ? (
-              <>
-                {emailForm}
-                <button type="button" style={linkBtn} onClick={() => { setByEmail(false); setMsg(null); setNeedConfirm(false) }}>
-                  {t.backToGoogle}
-                </button>
-              </>
-            ) : (
-              <>
-                {alertBox}
-                <button
-                  type="button"
-                  className="submit-btn"
-                  disabled={gBusy}
-                  style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', gap:'0.65rem', opacity: gBusy ? 0.7 : 1}}
-                  onClick={google}
-                >
-                  {gBusy ? <Loader2 size={18} className="spin" /> : (
-                    /* Google logo */
-                    <svg width="18" height="18" viewBox="0 0 48 48" style={{flexShrink:0}}>
-                      <path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 2.9l5.7-5.7C34.5 6.6 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.9z"/>
-                      <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 8 2.9l5.7-5.7C34.5 6.6 29.6 4 24 4 16.3 4 9.7 8.4 6.3 14.7z"/>
-                      <path fill="#4CAF50" d="M24 44c5.4 0 10.3-2 14-5.3l-6.5-5.5C29.6 35 26.9 36 24 36c-5.3 0-9.7-3.3-11.3-8H6.3C9.7 35.6 16.3 40 24 44z"/>
-                      <path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.3 4.1-4.3 5.5l6.5 5.5C37.2 35.8 44 30.6 44 24c0-1.3-.1-2.6-.4-3.9z"/>
-                    </svg>
-                  )}
-                  {t.loginBtn}
-                </button>
-                {/* The accounts that were made with an email and a password still sign in: a quiet way to their form */}
-                <button type="button" onClick={() => { setByEmail(true); setMsg(null) }}
-                  style={{...linkBtn, marginTop:'0.85rem', fontSize:'0.76rem', color:'var(--text-muted)', textDecoration:'underline'}}>
-                  {t.emailSignInLink}
-                </button>
-              </>
-            )}
+                </Fragment>
+              ) : (
+                <Fragment key="google">
+                  {alertBox}
+                  <button
+                    type="button"
+                    className="submit-btn"
+                    disabled={gBusy}
+                    style={{width:'100%', justifyContent:'center', padding:'0.75rem 1.25rem', fontSize:'0.9rem', gap:'0.65rem', opacity: gBusy ? 0.7 : 1}}
+                    onClick={google}
+                  >
+                    {gBusy ? <Loader2 size={18} className="spin" /> : (
+                      /* Google logo */
+                      <svg width="18" height="18" viewBox="0 0 48 48" style={{flexShrink:0}}>
+                        <path fill="#FFC107" d="M43.6 20.1H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 2.9l5.7-5.7C34.5 6.6 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.6-.4-3.9z"/>
+                        <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.8 1.1 8 2.9l5.7-5.7C34.5 6.6 29.6 4 24 4 16.3 4 9.7 8.4 6.3 14.7z"/>
+                        <path fill="#4CAF50" d="M24 44c5.4 0 10.3-2 14-5.3l-6.5-5.5C29.6 35 26.9 36 24 36c-5.3 0-9.7-3.3-11.3-8H6.3C9.7 35.6 16.3 40 24 44z"/>
+                        <path fill="#1976D2" d="M43.6 20.1H42V20H24v8h11.3c-.8 2.2-2.3 4.1-4.3 5.5l6.5 5.5C37.2 35.8 44 30.6 44 24c0-1.3-.1-2.6-.4-3.9z"/>
+                      </svg>
+                    )}
+                    {t.loginBtn}
+                  </button>
+                  {/* The accounts that were made with an email and a password still sign in: a quiet way to their form */}
+                  <button type="button" ref={emailLinkRef} onClick={() => showEmail(true)}
+                    style={{...linkBtn, marginTop:'0.6rem', padding:'0.5rem 0.25rem', fontSize:'0.76rem', color:'var(--text-secondary)', textDecoration:'underline'}}>
+                    {t.emailSignInLink}
+                  </button>
+                </Fragment>
+              )}
+            </div>
             <div style={{marginTop:'1rem', fontSize:'0.73rem', color:'var(--text-muted)'}}>
               {isAr
                 ? 'بالمتابعة، أنت توافق على شروطنا وأحكامنا'
@@ -2995,9 +3076,9 @@ export default function App() {
   useEffect(() => {
     const e = AUTH_URL_ERR
     if (!e) return
-    const expired = e.code === 'otp_expired' || /expired|invalid/i.test(e.desc || '')
-    // an expired link is an email link (confirmation / reset): the modal opens on the email sign-in view
-    openLogin('signin', { type: 'error', text: expired ? t.linkExpired : t.authLinkError, byEmail: expired })
+    // an email link that expired opens the email sign-in view; a Google sign-in that failed stays on the Google button
+    const { key, byEmail } = authUrlNotice(e)
+    openLogin('signin', { type: 'error', text: t[key], byEmail })
     try {
       const q = new URLSearchParams(window.location.search)
       ;['error', 'error_code', 'error_description'].forEach(k => q.delete(k))
@@ -3016,9 +3097,10 @@ export default function App() {
     try { window.history.replaceState(window.history.state, '', withoutJoin(window.location)) } catch { /* ignore */ }
   }, [])
   useEffect(() => {
-    if (!JOIN_IN_URL || authLoading || joinAsked.current) return
+    const open = joinAnswer({ join: JOIN_IN_URL, authLoading, asked: joinAsked.current, session, authEnabled, urlErr: AUTH_URL_ERR, recovery: RECOVERY_IN_URL })
+    if (open === null) return
     joinAsked.current = true
-    if (!session && authEnabled && !AUTH_URL_ERR && !RECOVERY_IN_URL) openLogin('signup')
+    if (open) openLogin('signup')
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading])
 
