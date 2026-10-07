@@ -15,9 +15,9 @@ need no account" (section 3, "The sign-in gate").
 
 **How an account is made (owner's rule, 2026-10-07): with Google only.** In a normal browser the
 sign-in dialog is one button, "Continue with Google". The one exception is an in-app browser (a
-link opened inside Instagram, TikTok and the like), where Google refuses to sign anyone in: there
-the dialog offers "Open in browser" and, as a fallback, sign-up with an email and a password
-(section 3, "How an account is made").
+link opened inside Instagram, TikTok, LinkedIn or any other app's own browser), where Google
+refuses to sign anyone in: there the dialog offers "Open in browser" and, as a fallback, sign-up
+with an email and a password (section 3, "How an account is made").
 
 The gate counts **browsers, not people** (the device is an id the page keeps in the browser), so
 it is a strong nudge, not a wall: section 3, "What the gate can and cannot stop", says exactly
@@ -308,27 +308,55 @@ In free mode `/api/stripe/checkout` answers `410 free_now` and creates no Stripe
   quiet link, "Signed up with email? Sign in with email". It opens a sign-in-only view: email,
   password, "Forgot password?", the resend-confirmation button when Supabase says the address is
   not confirmed yet, and "Back to Google sign-in". No account can be created from that view: in a
-  normal browser the client cannot reach `supabase.auth.signUp` at all. An email link that comes
-  back expired opens the dialog on this view. The set-a-new-password dialog is unchanged.
-- **An in-app browser** (`IN_APP`: Instagram, Facebook, TikTok, Snapchat, LINE and Android
-  WebViews, read from the user agent). Google does not allow its sign-in there, so there is no
-  Google button. The dialog shows a notice ("Google sign-in is not allowed inside this app. Open
-  Alimne in your browser to continue with Google."), a primary "Open in browser" button, "Copy
-  link", and under the divider "or sign up with email here" the email form with its sign-up /
-  sign-in toggle, exactly as it worked before (sign-up, "Check your inbox", resend, forgot
-  password). This is the only place where an email account can still be made.
+  normal browser the client cannot reach `supabase.auth.signUp` at all. The set-a-new-password
+  dialog is unchanged.
+- **A sign-in that comes back with an error.** Only an email link (confirmation, password reset)
+  that expired or was used already opens the dialog on the email view, with "That link has
+  expired or was already used...": Supabase marks it `otp_expired` ("Email link is invalid or has
+  expired"). Every other error is a Google sign-in that did not complete, for example
+  `bad_oauth_state` ("OAuth callback with invalid state") when a visitor takes several minutes at
+  Google. That visitor has no password, so the dialog opens on the Google button with "Sign-in
+  didn't complete - please try again." above it.
+- **Keyboard and screen readers.** The dialog is named by its title, takes the focus when it
+  opens, and keeps Tab inside it. Going to the email view puts the focus in the email field; going
+  back puts it on the quiet link, never on the Google button. For a moment after such a switch the
+  dialog takes no click, so a double tap or a second Enter cannot act on what took the place of
+  the link just used.
+- **An in-app browser** (`GOOGLE_BLOCKED` in `App_dev.jsx`, read from the user agent). Google
+  does not allow its sign-in inside another app's own browser, so there is no Google button there.
+  The dialog shows a notice ("Google sign-in is not allowed inside this app. Open Alimne in your
+  browser to continue with Google."), a primary "Open in browser" button, "Copy link", and under
+  the divider "or sign up with email here" the email form with its sign-up / sign-in toggle,
+  exactly as it worked before (sign-up, "Check your inbox", resend, forgot password). This is the
+  only place where the client offers email sign-up. That rule is enforced by the shipped client
+  only: Supabase's own email sign-up has to stay switched on for this fallback, so it can still
+  be called from outside the page (section 8, "Keep email confirmation ON").
+- **Which browsers count as in-app.** Everything `IN_APP` knows (Instagram, Facebook, TikTok,
+  Snapchat, LINE and every Android WebView), a few more apps by name (LinkedIn, X, WeChat,
+  Threads, KakaoTalk, Naver, Pinterest), and any iPhone or iPad page whose user agent has no
+  `Safari/` in it. The browsers people use on an iPhone say `Safari/` (Safari, Chrome, Firefox,
+  Edge, the Google app); an app's own web view does not. A page opened from the Home Screen does
+  not either, but it is not inside another app, so it keeps the Google button. `IN_APP` itself is
+  unchanged and still decides the download paths and the downloads banner, nothing else.
 - **"Open in browser"** hands the phone the address `https://alimne.app/?join=1` (plus
   `&ref=<code>` when the visitor arrived by an invite link) and nothing else of the current
   address: no hash, no other query data. On Android it is an `intent://` address with
-  `scheme=https`, which goes to the phone's default browser (no Chrome needed). On iPhone and iPad
-  it is `x-safari-https://`, which opens Safari from iOS 17 on and does nothing on older versions.
-  The page cannot be told whether the phone followed, so it looks: if it is still in front about
-  2 seconds after the tap it shows the way by hand ("In this app's menu choose Open in browser, or
-  copy the link"). One try per tap, no fallback address, and nothing navigates by itself.
+  `scheme=https`, which goes to the phone's default browser (no Chrome needed). It is tried only
+  inside the apps it was written for (Instagram, Facebook, TikTok, Snapchat, LINE:
+  `HANDOFF_APPS_RE`). In any other Android app nothing is tried and the way by hand shows at once,
+  because a plain Android WebView does not know `intent:` and shows its own error page in place of
+  Alimne. On iPhone and iPad it is `x-safari-https://`, which opens Safari from iOS 17 on and does
+  nothing on older versions; a web view that does not know it stays on the page, so it is tried in
+  every app. The page cannot be told whether the phone followed, so it looks: if it is still in
+  front about 2 seconds after the tap it shows the way by hand ("In this app's menu choose Open in
+  browser, or copy the link"). One try per tap, no fallback address, and nothing navigates by
+  itself.
 - **On arrival, `?join=1`** is taken off the address at once and, when nobody is signed in, the
   sign-up dialog opens. It does not open over a link that came back with a sign-in error or for a
   password reset, and it does not touch the return from Google (that comes back to the bare site
-  address), the confirmation links or the invite code (`?ref=` is read exactly as before).
+  address), the confirmation links or the invite code (`?ref=` is read exactly as before). If the
+  page with `?join=1` is itself inside an app (the hand-off came back into the same app, or the
+  copied link was opened there), the dialog shows the way by hand from the start.
 - **What does not travel with the visitor.** The real browser is another browser: a file that was
   waiting in the in-app one stays there and has to be chosen again, and the gate sees a new device
   (3 free guides again, inside the per-IP cap: section 10).
@@ -457,7 +485,7 @@ straight away (after the restart the variable change causes).
 | Render > Metrics | CPU, memory, restarts, 5xx rate, response time | CPU above about 80% for minutes; memory above about 400 of 512 MB; any restart or out-of-memory kill |
 | Render > Logs | Search for these exact phrases. `failing open` (a counter could not be read: the caps are not applying), `fair-use refusal code=` (one line for every `signin_required` / `fair_use_*` / `busy_today` refusal the **server** gave, with the code; a `signin_required` line ends with `reason=device`, `reason=network` or `reason=pool`), `generation busy` (one line for every `busy`, whether it came before the stream as a 503 or inside it), `passed 80% of its daily limit` and `is used up` (a global pool: the cue to look at the Groq bill), `time budget` (the database was slow), `client left after the AI work started` (units kept), and Groq 429s | Any `failing open` line at launch; many `generation busy` lines in one hour; the `80%` line before evening |
 | Groq console | Requests and tokens per day, 429s, spend against your limit | Spend trending past the limit you set; many 429s (raise the Groq tier or lower concurrency) |
-| Supabase > Auth | Signups per day, provider mix (Google vs email), email errors and rate-limit errors in Auth logs. Email sign-ups now come from in-app browsers only (section 3, "How an account is made") | Signups fail or confirmation emails do not arrive (section 8, custom SMTP). A large share of email sign-ups: many visitors arrive inside Instagram or TikTok and do not get out to the browser, so test "Open in browser" on a phone (section 8) |
+| Supabase > Auth | Signups per day, provider mix (Google vs email), email errors and rate-limit errors in Auth logs, and the error codes failed Google sign-ins come back with (`bad_oauth_state` is the one to expect when a visitor took minutes at Google). The client offers email sign-up inside in-app browsers only (section 3, "How an account is made"), so email sign-ups should be the smaller share | Signups fail or confirmation emails do not arrive (section 8, custom SMTP). A large share of email sign-ups has two possible causes: many visitors arrive inside Instagram or TikTok and do not get out to the browser (test "Open in browser" on a phone, section 8), or accounts are being made by a script that calls Supabase directly (look at the addresses and at how many were ever confirmed; section 8, "Keep email confirmation ON") |
 | Supabase > SQL | The queries below | `fair:global` near its limit before evening; one device or IP far above the rest |
 | `/admin` (existing dashboard) | Usage events and visit stats, if migrations 008 and 011 are applied | Guides per day versus visits (conversion) |
 | The funnel | **`/admin`**: the sign-up funnel there (visits, anonymous guides, devices at the sign-in gate, new accounts) and sign-ups per day. On a build of `/admin` without the funnel section, read Visits, Generations (anon versus signed-in) and "New this week", and run the last query below for the devices at the gate. **Do not count `signin_required` log lines for this.** The client opens the sign-in dialog without sending a request when a device has no guides left (section 3, "What the shipped client does with it"), so most visitors who meet the gate never produce a log line. | Many devices at the gate and few new accounts: the sign-in prompt is not converting, or sign-up itself is broken (confirmation emails, Google OAuth: section 8) |
@@ -517,7 +545,7 @@ if you ever set `ALIMNE_FREE_MODE=0`).
 | The sign-in refusal (`_signin_required_text` in `app.py`) | Three texts, one per `reason` (section 3, "The three sign-in texts"), English and Arabic, all ending "Create a free account to keep going - it's still free." The `device` one carries the real number (singular and zero forms included). |
 | The sign-in dialog and the held item (`signinRequired`, `signinNetwork`, `signinPool` in `frontend/src/App_dev.jsx`) | The same three texts, picked by the server's `reason`. `tests/test_signin_gate.py` (section 14) fails if client and server stop saying the same thing. |
 | The short privacy line under the upload box (`privacy` in `App_dev.jsx`), the in-app Terms bullet (`TERMS_STASH`) and `/privacy` ("Signing in") | What the browser keeps for the Google sign-in round trip: in the visitor's own browser only, not uploaded before Generate, deleted when it is restored or on sign-out, never used after 30 minutes. Free mode only; token mode keeps its old line. If the client's behaviour changes (`signinStash` in `App_dev.jsx`), change all three. |
-| The sign-in dialog (`LoginModal`; `loginTitleSignup`, `loginSubSignup`, `loginSub`, `emailSignIn*`, `backToGoogle`, `inAppGoogle`, `openInBrowser`, `openManual`, `orEmailSignup`, `orEmailSignin` in `App_dev.jsx`) | Accounts are made with Google ("Continue with Google. No password, no card."); email is for accounts that already have a password and, inside an in-app browser, for a new one. The in-app notice names no app and no browser. Never "one tap" or "instant". |
+| The sign-in dialog (`LoginModal`; `loginTitleSignup`, `loginSubSignup`, `loginSub`, `emailSignIn*`, `backToGoogle`, `inAppGoogle`, `openInBrowser`, `openManual`, `orEmailSignup`, `orEmailSignin`, `wrongPasswordInApp` in `App_dev.jsx`) and the downloads banner on the same page (`inAppBanner`) | Accounts are made with Google ("Continue with Google. No password, no card."); email is for accounts that already have a password and, inside an in-app browser, for a new one. The in-app notice and the banner say "inside this app" and "your browser": they name no app and no browser, because the page does not know which one it is in. Never "one tap" or "instant". |
 | How an account is made and what it keeps: `/terms` ("Creating an account"), `/privacy` ("Your account", "Email accounts", and the Arabic summary), the in-app Terms (the "Accounts are created with Google" bullet and `TERMS_ACCOUNT`) | With Google; inside an in-app browser also with an email and a password. Google gives the site a name, an email address, a profile picture and an identifier for the Google account, never the Google password; an email account's password goes to Supabase, never to Alimne's own server. This must stay true to what the server stores (`_identity_from_payload` in `app.py`: email, name, picture) and to the dialog. If the dialog changes, change all three. |
 | In-app Terms (`TERMS_*` in `frontend/src/App_dev.jsx`) | The same promises as `/terms` and `/privacy`, in English and Arabic, including the opt-in sharing and the usage counters. `tests/test_free_mode_client.py` checks both languages say the same things and scans the Arabic copy for token, plan, price and "unlimited" claims. |
 | `/s/<slug>` shared guide and its 404 | "Make your own study guide - free" growth call to action with UTM tags, English and Arabic. |
@@ -526,7 +554,8 @@ if you ever set `ALIMNE_FREE_MODE=0`).
 | `tests/test_copy_truth.py` | Fails on stale plan claims (free trial, 3 tokens, Pro price, 30 guides), on "unlimited", on an unqualified "no sign-up / no account needed" claim on the server-rendered pages, on storage claims, on a changed privacy promise, and on the old `og.png` coming back. |
 | `tests/test_signin_gate.py` | The gate itself: 3 guides then 401, the lifetime window, the counters and their order, the per-IP cap (10), refunds, fail open, the demo, `/api/config`, the `reason` and its three texts, client and server wording in step, token mode untouched, the knobs. |
 | `tests/test_free_mode_client.py` and `frontend/scripts/verify-free-mode.mjs` | The client: the counter, no request at 0 left, the reasons, `ANON_FREE_USES=0`, and the sign-in round trip (the node script drives the real helper against an in-memory IndexedDB). |
-| `tests/test_google_only_signup.py` and section 13 of `verify-free-mode.mjs` | Google-only sign-up: no email form by default in a normal browser, sign-up reachable only inside an in-app browser, the in-app view (notice, "Open in browser", email sign-up), the addresses it uses, `?join=1`, both languages, and the words on `/terms`, `/privacy` and in the in-app Terms. The node script renders the real dialog twice, as a normal browser and as an in-app one. |
+| `tests/test_google_only_signup.py` and section 13 of `verify-free-mode.mjs` | Google-only sign-up: no email form by default in a normal browser, sign-up reachable only inside an in-app browser, the in-app view (notice, "Open in browser", email sign-up), the addresses it uses, `?join=1`, both languages, and the words on `/terms`, `/privacy` and in the in-app Terms. The node script renders the real dialog as a normal browser, as Instagram, as an iPhone app it does not know by name and as a Home Screen page, and runs the three decisions as plain functions: where Google is blocked (a table of user agents), what `?join=1` does, and which error a sign-in came back with. |
+| `frontend/scripts/verify-login-flows.mjs` (the last test of `tests/test_google_only_signup.py` runs it) | The same dialog in a real headless browser, offline, against the bundle in `dist/`: it opens on `?join=1` and the mark leaves the address, a failed Google return keeps the Google button, where the keyboard focus goes, a double tap, which Supabase call a normal browser and an in-app one can make (sign-in only, or sign-up too), and what "Open in browser" asks the phone for. It needs a local Chrome or Edge (it starts no server and answers every request itself); where there is none the test is skipped, so run it on a machine that has one before a release. It drives a desktop browser with a phone's user agent: it shows what the page does, not what a phone or an app does with the address (section 8). |
 
 Rule: if you change the limits or the counters, update `/privacy` (it describes the counters)
 and run `python -m pytest -q`.
@@ -565,9 +594,13 @@ Do these before announcing, in this order.
       Resend) on a verified `alimne.app` sender (SPF and DKIM), raise the Auth email rate limit,
       and send yourself a test sign-up from a Gmail and a university address. Make the
       confirm-email template read well in English and Arabic.
-- [ ] Decide on email confirmation: keeping it ON makes fake accounts (and so 40/day quota
-      farming) harder; turning it OFF removes a step for students. It only matters for accounts
-      made inside in-app browsers now. Start with it ON and revisit with real data.
+- [ ] **Keep email confirmation ON.** "Email sign-up only inside an in-app browser" is a rule of
+      the page, enforced by the shipped client only. Supabase's email sign-up must stay switched
+      on for that fallback, and its endpoint answers anyone who has the project address and the
+      public key, both of which are in the bundle (a desktop browser with an Instagram user agent
+      gets the form too). Email confirmation is the only check on accounts made that way, and each
+      account may make 40 guides a day (`FAIR_USER_DAILY`). Turning it OFF would save in-app
+      visitors one step and remove that check, so do not treat it as a small in-app detail.
 - [ ] Auth > URL configuration: Site URL `https://alimne.app`, redirect URL allow-list includes it.
 
 **Google sign-in (OAuth)**
@@ -581,6 +614,11 @@ Do these before announcing, in this order.
       (`https://<project-ref>.supabase.co/auth/v1/callback`); the client id and secret are
       entered under Supabase > Auth > Providers > Google.
 - [ ] Sign in with a brand-new Google account and confirm you land on `https://alimne.app`.
+- [ ] Wait on Google's account screen for more than five minutes, then finish. If Supabase
+      refuses the late return (`bad_oauth_state`), Alimne must open the sign-in dialog with
+      "Sign-in didn't complete - please try again." above the Google button, not the email form.
+      The error text is Supabase's and was not checked against the live project here: if the
+      dialog shows the email form instead, tell the developer the `error_code` in the address.
 - [ ] Sign in with Google using the address of one of the existing email accounts and confirm it
       is the same account (the same invite code in the invite card). Supabase joins a Google
       sign-in to a confirmed account with the same address by default; this checks it does here.
@@ -632,8 +670,17 @@ Do these before announcing, in this order.
       screen, the address bar shows no `?join=1`, and "Continue with Google" signs you in. Back in
       the app, make an account with an email and a password as well. Repeat in TikTok. Where the
       tap does nothing (iPhones before iOS 17, apps that block it), the line "Nothing opened? ..."
-      appears after about 2 seconds: that is the designed fallback. If an Android app shows its
-      own error page for the tap instead, tell the developer which app (section 10).
+      appears after about 2 seconds: that is the designed fallback. If one of those Android apps
+      shows its own error page for the tap instead, tell the developer which app (section 10).
+- [ ] **The same dialog in the other apps the link is shared in** (LinkedIn, X, a university
+      app), on an iPhone and on an Android phone. Two results are right. Either the app opens the
+      link in its own browser and you see the same notice and no Google button; or it hands the
+      link to Safari or Chrome (also as a Safari or Chrome view inside the app) and you see the
+      Google button, which then works. On Android, in an app other than Instagram, Facebook,
+      TikTok, Snapchat and LINE, "Open in browser" shows "Nothing opened? ..." at once without
+      trying: that is by design. The fault to report is a Google button that Google then refuses
+      ("403 disallowed_useragent"): that app presents itself as a normal browser, so tell the
+      developer which app, and its user agent if you can read it (section 10).
 - [ ] **The same round trip on a real iPhone (Safari), before announcing, and then tap Generate.**
       The guide must be made. Safari handles a file kept in IndexedDB differently from Chrome
       (section 3), the offline tests only model that, and no test machine here has Safari. If the
@@ -699,32 +746,49 @@ Do these before announcing, in this order.
   the log announces ("is used up").
 - **An older cached client does not know `reason`.** Until a browser loads the new bundle it
   shows the `device` text ("You've used your 3 free guides") for a network or pool refusal too.
-- **An email account can only be created inside an in-app browser.** That is the owner's rule
+- **The client offers email sign-up only inside an in-app browser.** That is the owner's rule
   (accounts are made with Google). A visitor on a normal browser who has no Google account, or
-  will not use it, cannot make an account: they keep their free guides without one and nothing
-  more. The link "Signed up with email? Sign in with email" signs existing accounts in; it creates
-  none.
+  will not use it, is offered no way to make an account: they keep their free guides without one
+  and nothing more. The link "Signed up with email? Sign in with email" signs existing accounts
+  in; it creates none. The rule is enforced by the shipped client only. It is not a wall:
+  Supabase's email sign-up stays switched on for the in-app fallback, so a script can still make
+  email accounts there, and email confirmation is what holds that back (section 8).
+- **An in-app browser that presents itself as a normal browser is not recognised.** The page can
+  only read the user agent. An app whose own browser sends a user agent like Safari's or Chrome's
+  gets the Google button. Google's refusal goes by the user agent too (it is called
+  "disallowed_useragent"), so that visitor is usually signed in; where Google refuses anyway, the
+  visitor has no notice and no email sign-up in that app and has to open the link in the real
+  browser themselves. The reverse is rarer: an iPhone
+  browser that does not say `Safari/` would be shown the in-app view (it can still sign up by
+  email, or copy the link). The user agents in the tests are written from the published formats,
+  not captured on devices, and iPad apps that ask for the desktop site are not recognised.
 - **"Open in browser" depends on the app the page is opened in, and was not run on a phone
   here.** The addresses are the documented ones (an `intent://` address with `scheme=https` on
-  Android, `x-safari-https://` on iPhone and iPad), and the offline tests check what is built, not
-  what a phone does with it. Known edges: on iOS before 17 the address does nothing (the page then
-  shows the way by hand); an app may ask "Leave this app?" first, or block the address (the same
-  fallback); and an Android app that neither opens nor blocks an address it does not know can
-  show its own error page for it ("Back" returns to Alimne, reloaded). Do the in-app step of the
-  launch checklist (section 8) in the apps your traffic comes from.
+  Android, `x-safari-https://` on iPhone and iPad), and the tests check what the page asks for,
+  not what a phone does with it. Known edges: on iOS before 17 the address does nothing (the page
+  then shows the way by hand); an app may ask "Leave this app?" first, or block the address (the
+  same fallback). On Android the address is tried only in Instagram, Facebook, TikTok, Snapchat
+  and LINE: if one of those neither opens nor blocks it, the app shows its own error page for it
+  ("Back" returns to Alimne, reloaded, and a file that was waiting is gone). In every other
+  Android app the button goes straight to the way by hand, so a visitor there always has to use
+  the app's menu or "Copy link". An iPhone app that shows an error screen of its own for an
+  address it does not know would do so here too. Do the in-app steps of the launch checklist
+  (section 8) in the apps your traffic comes from.
 - **Leaving an in-app browser starts fresh in the real one.** It is another browser with its own
   storage: a file that was waiting has to be chosen again there, and the gate sees a new device,
   so 3 more guides need no account there (bounded per network by `FAIR_ANON_IP_DAILY`, like any
   change of browser: the first item of this list).
 - **An account made by email inside an in-app browser is confirmed in the real browser.** The
-  confirmation link in the email opens in the phone's browser, which is then signed in. Back in
-  the in-app browser the visitor signs in with the same email and password.
+  confirmation link in the email opens in the phone's browser, which is then signed in. The
+  in-app page is not: it stays on "Check your inbox" until the visitor taps "Back to sign in" and
+  signs in there with the same email and password. A file that was waiting stays in that in-app
+  page meanwhile, as long as the app keeps the page open.
 - **The file kept for Google sign-in has limits.** It works only where IndexedDB and
   sessionStorage do (not in some private modes: the file is then simply not kept, as before), for
   at most 3 files and about 60 MB, in the same tab, for 30 minutes. A file that did not fit, or
   whose bytes could not be read back, is not restored: the notice says how many must be chosen
-  again. An email confirmation link
-  opens a new tab: the file stays in the first tab, which becomes signed in too. If a visitor
+  again. The copy is made for the Google round trip only: an email sign-up does not leave the
+  page, so nothing is copied for it (the item above). If a visitor
   closes the tab while on Google's page, the copy stays in their own browser (it cannot be
   opened by another tab and is sent nowhere) until Alimne is next opened there, when a copy
   older than 30 minutes is deleted.
