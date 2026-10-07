@@ -34,6 +34,22 @@ with 401 {"code": "signin_required", "free_uses": n}. The client must:
   * never say "no sign-up needed" / "no account needed" without the qualifier that
     it is true for the first N guides only - in English and in Arabic.
 
+After the review of the gate (2026-10-07) the client must also:
+
+  * show WHY the server asked for a sign-in. The 401 carries `reason`: "device" (this
+    browser's own guides are used), "network" (the anonymous allowance of the network
+    is used up for today) or "pool" (guides without an account are used up for today).
+    Each has its own true text, the same three the server sends, in both languages,
+    all ending with the same call to action. Only the device's own counter may block a
+    generation locally: the client cannot know the network's or the pool's;
+  * follow ANON_FREE_USES=0 (an account from the first guide): never fall back to 3,
+    never say "3 guides need no account";
+  * keep what was waiting (a chosen file, pasted text, a link) across the full-page
+    Google sign-in: in IndexedDB, in this browser only, capped, tied to the tab,
+    restored once as ready-to-generate items, and never left behind (deleted on
+    restore, on sign-out and once older than 30 minutes). The OAuth call itself is
+    unchanged, and the privacy wording says what really happens.
+
 There is no JS test runner. These are static checks of the source and of the
 bundle in dist/, plus (when node and frontend/node_modules exist) the behavioural
 checks of frontend/scripts/verify-free-mode.mjs, which bundles App_dev.jsx and
@@ -248,7 +264,13 @@ def test_served_bundle_is_the_free_client():
                    # the sign-in gate
                    "signin_required", "signin_after", "anon_remaining", "free_uses", "alimne_gate_v1",
                    "guides need no account.", "Create a free account to keep going", "free guides left",
-                   "أنشئ حساباً مجانياً للمتابعة"):
+                   "أنشئ حساباً مجانياً للمتابعة",
+                   # why the sign-in is asked (the three reasons), and ANON_FREE_USES=0
+                   "are used up on your network", "Today's free guides without an account are used up.",
+                   "المتاحة على شبكتك دون حساب", "A free account is needed to make guides", "يلزم حساب مجاني لإنشاء الأدلة",
+                   # the sign-in round trip: what was waiting is kept in this browser only
+                   "alimne_signin_stash", "alimne_stash_tab", "indexedDB", "Your file is ready", "ملفك جاهز",
+                   "your own browser only", "متصفحك فقط"):
         assert marker in js, f"{name} is missing {marker!r} - rebuild: cd frontend && npm run build"
     for stale in ("No sign-up needed", "no sign-up needed", "Try free, no sign-up", "no account needed ·",
                   "لا حاجة إلى حساب", "مجاني · بدون تسجيل", "come back tomorrow"):
@@ -264,7 +286,8 @@ def test_served_bundle_is_the_free_client():
 
 
 # ── 6. the sign-in gate: N guides without an account, then a free account ─────
-GATE_KEYS = ["anonLeft", "anonNone", "signinRequired", "signInToContinue", "gateCleared", "generateNow", "dropFreeUser"]
+GATE_KEYS = ["anonLeft", "anonNone", "signinRequired", "signInToContinue", "gateCleared", "generateNow", "dropFreeUser",
+             "signinNetwork", "signinPool", "stashReady"]
 
 
 @pytest.mark.parametrize("key", GATE_KEYS)
@@ -298,6 +321,9 @@ def test_gate_numbers_come_from_config_with_default_three():
         assert field in body, f"gateFromConfig must read {field} from /api/config"
     assert "FREE_USES_DEFAULT" in body
     assert "gateFromConfig(cfg)" in src, "/api/config must feed the gate"
+    # 0 is a real answer (ANON_FREE_USES=0: an account from the very first guide), never "missing"
+    assert "countInt(cfg?.signin_after) ?? countInt(cfg?.anon_free_limit) ?? FREE_USES_DEFAULT" in body, \
+        "the allowance must be read so that 0 stays 0 (posInt turned it into the default 3)"
     assert re.search(r"useState\(\(\) => gateFromConfig\(null\)\)", src), "before /api/config answers the gate is 3 of 3"
 
 
@@ -305,6 +331,8 @@ def test_signin_required_is_mapped_stops_the_batch_and_offers_sign_in():
     src = _src()
     body = _block(src, r"^function friendlyErr\(", r"^\}\n")
     assert "'signin_required'" in body and "t.signinRequired(" in body and "free_uses" in body
+    assert "signinText(t, data?.reason, data?.free_uses, data?.error)" in body, \
+        "the 401 is worded from the server's reason, with the server's number and (for an unknown reason) its sentence"
     assert body.index("'signin_required'") < body.index("status === 0"), "the gate text must win over the generic texts"
     assert re.search(r"const GATE_CODES = new Set\(\['signin_required', 'fair_use_device'\]\)", src)
     assert re.search(r"const STOP_CODES = new Set\(\[[^\]]*'signin_required'", src), "a sign-in refusal stops the batch"
@@ -354,6 +382,7 @@ def test_the_401_holds_the_item_without_losing_its_source_and_sign_in_clears_it(
     hold = _block(src, r"const holdForSignIn = ", r"\n  \}\n")
     assert "status: 'queued'" in hold and "errCode: 'signin_required'" in hold and "error: null" in hold, "a held item is not an error"
     assert "remaining: 0" in hold and "openGate(" in hold
+    assert "holdsDeviceCount(data)" in hold, "only the device's own refusal may empty the local counter"
     for lost in ("file:", "source:", "name:"):
         assert lost not in hold, f"holding an item for sign-in must not touch its {lost[:-1]}"
     after = _block(src, r"const afterSignIn = ", r"\n  \}\n")
@@ -455,7 +484,8 @@ def test_token_mode_never_runs_the_gate():
     # token mode keeps reading its own preview counter exactly as before
     assert "if (cfg.anon_free_limit !== undefined)\n          setAnonInfo({ limit: cfg.anon_free_limit, remaining: cfg.anon_remaining ?? cfg.anon_free_limit })" in src
     assert "if (freeRef.current) loadConfig(2)" in _block(src, r"const signOut = async ", r"\n  // Explicit sign-out")
-    assert re.search(r"const gateText = freeMode && posInt\(gateUses\) \? ", src), "the modal notice is a free-mode thing"
+    assert "const gateText = freeMode && gate ? signinText(t, gate.reason, gate.uses, gate.text) : null" in src, \
+        "the modal notice is a free-mode thing"
     assert re.search(r"const dropLine\s+= freeMode && session \? t\.dropFreeUser : say\(t\.dropFree, anonGate\.limit\)", src)
     # the token-mode strings are plain '' there, so the hero / dropzone lines stay hidden as before
     assert "const say = (v, ...args) => typeof v === 'function' ? v(...args) : v" in src
@@ -472,6 +502,170 @@ def test_index_metadata_makes_no_unqualified_no_sign_up_claim(rel):
         assert not CLAIM_EN.search(text) or qualified.search(text), f"{rel}: unqualified claim in metadata: {text!r}"
         assert not CLAIM_AR.search(text), f"{rel}: unqualified claim in metadata: {text!r}"
         assert "unlimited" not in text.lower()
+
+
+# ── 6b. why the sign-in is asked: device / network / pool ─────────────────────
+def test_reason_texts_exist_in_both_languages_with_one_call_to_action():
+    src = _src()
+    en, ar = _pack(src, "T", "en"), _pack(src, "T", "ar")
+    cta_en, cta_ar = "Create a free account to keep going — it's still free.", "أنشئ حساباً مجانياً للمتابعة — ما زال الاستخدام مجانياً."
+    for must in ("signinNetwork: \"Today's free guides without an account are used up on your network. " + cta_en + '",',
+                 "signinPool: \"Today's free guides without an account are used up. " + cta_en + '",'):
+        assert must in en, f"T.en lost {must!r}"
+    for must in ("signinNetwork: 'استُنفدت اليوم الأدلة المجانية المتاحة على شبكتك دون حساب. " + cta_ar + "',",
+                 "signinPool: 'استُنفدت اليوم الأدلة المجانية المتاحة دون حساب. " + cta_ar + "',"):
+        assert must in ar, f"T.ar lost {must!r}"
+    # the device text ends with the very same sentence, in both packs
+    assert en.count(cta_en) == 3 and ar.count(cta_ar) == 3
+    for lang, pack in (("en", en), ("ar", ar)):
+        for key in ("signinNetwork", "signinPool"):
+            line = next(l for l in pack.splitlines() if l.startswith(f"    {key}:"))
+            assert "${n}" not in line and not re.search(r"You've used|استخدمت", line), \
+                f"T.{lang}.{key} must not say the visitor used their own guides: it is about the network / the pool"
+
+
+def test_the_client_never_blocks_locally_for_a_reason_it_cannot_know():
+    src = _src()
+    known = _block(src, r"^const holdsDeviceCount = ", r"\n\n")
+    assert "'device'" in known and "fair_use_device" in known
+    hold = _block(src, r"const holdForSignIn = ", r"\n  \}\n")
+    # a network / pool refusal keeps the device counter as it is, so the next try is SENT (the server decides)
+    assert re.search(r"holdsDeviceCount\(data\) \? \{ limit, remaining: 0 \} : \{ limit, remaining: Math\.min\(g\.remaining, limit\) \}", hold)
+    assert "gateReason" in hold, "the held item remembers why, so its sign-in button shows the same true text"
+    gate = _block(src, r"const gateBlocks = ", r"\n  \}\n")
+    assert "gateRef.current.remaining" in gate and "reason" not in gate, "the pre-flight check reads the device counter only"
+    # a browser that keeps no device id has no counter of its own: its number is the network's, so the server decides
+    assert "getDeviceId()" in gate
+    assert re.search(r"const ownReason = \(\) => getDeviceId\(\) \? 'device' : 'network'", src)
+    # /api/config still feeds the device counter and nothing else
+    assert "reason" not in _block(src, r"^const gateFromConfig = ", r"^\}\n")
+
+
+def test_zero_free_uses_is_never_replaced_by_the_default():
+    src = _src()
+    hold = _block(src, r"const holdForSignIn = ", r"\n  \}\n")
+    assert "countInt(data?.free_uses)" in hold and "posInt(data?.free_uses)" not in hold
+    terms = _block(src, r"^const termsText = ", r"^\}\n")
+    assert "countInt(n) ?? FREE_USES_DEFAULT" in terms and "posInt(n)" not in terms
+    assert "countInt(n) ?? FREE_USES_DEFAULT" in _block(src, r"^const signinText = ", r"^\}\n")
+    en, ar = _pack(src, "T", "en"), _pack(src, "T", "ar")
+    for must in ("n === 0 ? 'Free. No card. A free account is needed to make guides.'", "n === 0 ? 'Free · a free account is needed to make guides'",
+                 "n === 0 ? \"Create a free account to make study guides — it's free.\""):
+        assert must in en, f"T.en has no copy for ANON_FREE_USES=0: {must!r}"
+    for must in ("n === 0 ? 'مجاني. بدون بطاقة. يلزم حساب مجاني لإنشاء الأدلة.'", "n === 0 ? 'مجاني · يلزم حساب مجاني لإنشاء الأدلة'",
+                 "n === 0 ? 'أنشئ حساباً مجانياً لإنشاء أدلة الدراسة — الاستخدام مجاني.'"):
+        assert must in ar, f"T.ar has no copy for ANON_FREE_USES=0: {must!r}"
+    assert "TERMS_EN_RULE_0" in terms and "TERMS_AR_RULE_0" in terms
+    assert re.search(r"^const TERMS_EN_RULE_0 = '• A free account is required to make study guides; creating one costs nothing\.", src, re.M)
+    assert re.search(r"^const TERMS_AR_RULE_0 = '• يلزم حساب مجاني لإنشاء أدلة الدراسة، وإنشاء الحساب لا يكلّف شيئاً\.", src, re.M)
+
+
+# ── 6c. the sign-in round trip: what was waiting stays in this browser ────────
+def _stash_helper(src):
+    return _block(src, r"^// ── Sign-in round trip", r"^// ── Toast notifications")
+
+
+def test_the_stash_helper_is_present_capped_and_wrapped():
+    src = _src()
+    helper = _stash_helper(src)
+    for const in ("const STASH_DB = 'alimne_signin_stash'", "const STASH_TAB_KEY = 'alimne_stash_tab'",
+                  "const STASH_MAX_AGE_MS = 30 * 60 * 1000", "const STASH_MAX_BYTES = 60 * 1024 * 1024", "const STASH_MAX_FILES = 3"):
+        assert const in helper, f"missing {const}"
+    for fn in ("function stashPlan(", "function stashItems(", "function stashDb(", "const signinStash = {"):
+        assert fn in helper, f"missing {fn}"
+    obj = _block(helper, r"^const signinStash = \{", r"^\}\n")
+    for method in ("save: async ", "take: async ", "clear: async ", "claimed: ", "idle: "):
+        assert method in obj, f"signinStash has no {method.strip()}"
+    # IndexedDB can be missing, blocked, hang or refuse a File: every touch of it sits in try/catch with a time limit
+    db = _block(helper, r"^function stashDb\(", r"^\}\n")
+    assert db.count("try {") >= 3 and db.count("catch") >= 3 and "setTimeout(" in db and "onerror" in db and "onblocked" in db
+    assert "typeof indexedDB" in db
+    # ...and nothing outside the helper talks to it
+    assert "indexedDB" not in src.replace(helper, "")
+    # sessionStorage (the tab's claim on its copy) is wrapped too
+    assert obj.count("try {") >= 4 and obj.count("catch") >= 4
+
+
+def test_the_stash_keeps_only_what_was_not_generated_and_never_sends_it_anywhere():
+    helper = _stash_helper(_src())
+    plan = _block(helper, r"^function stashPlan\(", r"^\}\n")
+    assert "['queued', 'error', 'processing']" in plan and "it.demo" in plan
+    assert "STASH_MAX_FILES" in plan and "STASH_MAX_BYTES" in plan
+    for leak in ("fetch(", "fetchT(", "XMLHttpRequest", "sendBeacon", "FormData", "authHeaders"):
+        assert leak not in helper, f"the stash must stay in this browser: found {leak}"
+    # the one thing it writes outside IndexedDB and the tab claim: a flag saying "a copy was made here",
+    # so a browser that never made one never opens IndexedDB at all
+    assert helper.count("localStorage.setItem(") == 1 and "localStorage.setItem(STASH_FLAG, '1')" in helper
+    assert helper.count("sessionStorage.setItem(") == 1 and "sessionStorage.setItem(STASH_TAB_KEY, token)" in helper
+    back = _block(helper, r"^function stashItems\(", r"^\}\n")
+    assert "status: 'queued'" in back and "MAX_UPLOAD" in back and "pptx?|pdf|docx?|txt" in back
+
+
+def test_google_sign_in_stashes_first_and_the_oauth_call_is_unchanged():
+    src = _src()
+    google = _block(src, r"  const google = async \(\) => \{", r"\n  \}\n")
+    call = "sbClient.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } })"
+    assert call in google, "the Google OAuth call must stay exactly as it was"
+    assert "await beforeLeave?.()" in google and google.index("await beforeLeave?.()") < google.index(call), \
+        "what was waiting is kept BEFORE the page leaves for Google"
+    assert "leaveFailed?.()" in google, "if the page never left, the copy is dropped at once"
+    # the auth flow itself is untouched: implicit flow (the supabase-js default), one client, same options
+    assert src.count("signInWithOAuth(") == 1
+    assert "const sb = (() => { try { return createClient(SB_URL, SB_ANON) }" in src
+    for changed in ("flowType", "pkce", "skipBrowserRedirect", "exchangeCodeForSession", "signInWithIdToken"):
+        assert changed not in src, f"the OAuth flow must not change: found {changed}"
+    # the modal gets both hooks from the app
+    assert "beforeLeave={stashForSignIn}" in src and "leaveFailed={dropStash}" in src
+    stash = _block(src, r"const stashForSignIn = ", r"\n  \}\n")
+    assert "if (!freeRef.current) return false" in stash, "token mode (ALIMNE_FREE_MODE=0) keeps its old behaviour: no copy is made"
+    assert "stashPlan(queueRef.current, " in stash and "signinStash.save(" in stash
+
+
+def test_the_stash_is_restored_once_and_never_left_behind():
+    src = _src()
+    restore = _block(src, r"const restoreStash = ", r"\n  \}\n")
+    assert "signinStash.take()" in restore and "stashItems(" in restore and "setQueue(" in restore
+    assert "if (signinStash.idle()) return null" in restore, "a browser with no copy to look for never opens IndexedDB"
+    assert "signinStash.save" not in restore
+    after = _block(src, r"const afterSignIn = ", r"\n  \}\n")
+    assert "stashRestore.current" in after and "tRef.current.stashReady(" in after, \
+        "a sign-in that brought something back says so: signed in, your file is ready, tap Generate"
+    # on every page load (signed in or not), and when the page comes back from the browser's back cache
+    assert re.search(r"stashRestore\.current = restoreStash\(\)", src)
+    assert "'pageshow'" in src and "e.persisted" in src
+    # sign-out wipes it
+    out = _block(src, r"const signOut = async ", r"\n  // Explicit sign-out")
+    assert "signinStash.clear()" in out
+    # the copy is deleted when it is read (take), never read and kept
+    take = _block(_stash_helper(src), r"  take: async ", r"\n  \},\n")
+    assert ".delete()" in take and "STASH_MAX_AGE_MS" in take and "signinStash.page" in take
+    assert "sessionStorage.removeItem(STASH_TAB_KEY)" in take
+
+
+def test_stash_strings_and_privacy_wording_in_both_languages():
+    src = _src()
+    en, ar = _pack(src, "T", "en"), _pack(src, "T", "ar")
+    assert "You're signed in. " in en and "Your file is ready" in en and "' — tap Generate.'" in en
+    assert "'تم تسجيل الدخول. '" in ar and "ملفك جاهز" in ar and "' — اضغط «توليد».'" in ar
+    en_priv = next(l for l in en.splitlines() if l.startswith("    privacy:"))
+    ar_priv = next(l for l in ar.splitlines() if l.startswith("    privacy:"))
+    for must in ("server memory only", "sign in with Google", "your own browser only", "never uploaded early", "within 15 minutes"):
+        assert must in en_priv, f"T.en.privacy lost {must!r}"
+    for must in ("ذاكرة الخادم فقط", "Google", "متصفحك فقط", "دون رفعه مسبقاً", "15 دقيقة"):
+        assert must in ar_priv, f"T.ar.privacy lost {must!r}"
+    # a file that waits during the Google round trip IS on the visitor's own disk for a while: the line must not deny it
+    assert "never written to disk" not in en_priv and "لا تُكتب على القرص" not in ar_priv
+    # the Terms bullet (free mode only: token mode makes no copy and keeps its old text)
+    assert re.search(r"^const TERMS_STASH = \{", src, re.M)
+    block = _block(src, r"^const TERMS_STASH = \{", r"^\}\n")
+    for must in ("your own browser only", "not uploaded until you tap Generate", "sign out", "30 minutes",
+                 "متصفحك فقط", "لا يُرفع قبل أن تضغط «توليد»", "تسجيل خروجك", "30 دقيقة"):
+        assert must in block, f"TERMS_STASH lost {must!r}"
+    assert "TERMS_STASH" in _block(src, r"^const termsText = ", r"^\}\n")
+    assert "TERMS_STASH" not in _block(src, r"^const TERMS_EN_TAIL = `", r"`") and "Google" not in _block(src, r"^const TERMS_EN_LEGACY = `", r"^`|`\n")
+    legacy_en, legacy_ar = _pack(src, "LEGACY", "en"), _pack(src, "LEGACY", "ar")
+    assert "    privacy: 'Your files are processed in memory only — never written to disk or seen by anyone." in legacy_en
+    assert "    privacy: 'ملفاتك تُعالَج في الذاكرة فقط — لا تُكتب على القرص ولا يراها أحد." in legacy_ar
 
 
 # ── 7. behaviour: bundle the real source and render it (needs node + npm ci) ──

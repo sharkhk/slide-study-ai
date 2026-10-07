@@ -18,6 +18,9 @@ const AlimneGlyph = ({ size = 24 }) => (
   </svg>
 )
 
+// "your free guides, the three of them" in Arabic: the count in words up to ten, as the server writes it
+const AR_THE_COUNT = { 3: 'الثلاثة', 4: 'الأربعة', 5: 'الخمسة', 6: 'الستة', 7: 'السبعة', 8: 'الثمانية', 9: 'التسعة', 10: 'العشرة' }
+
 const T = {
   en: {
     brand: 'Alimne',
@@ -25,17 +28,21 @@ const T = {
     h1a: 'Turn any lecture into',
     h1b: 'Study Guides',
     sub: 'Drop a PowerPoint, PDF, or YouTube lecture — get an exam-ready guide with notes, flashcards, and a practice quiz in seconds.',
-    // n = the guides an anonymous visitor may make before a free account is required (from /api/config)
-    heroFree: (n) => n === 1 ? 'Free. No card. Your first guide needs no account.' : `Free. No card. Your first ${n} guides need no account.`,
+    // n = the guides an anonymous visitor may make before a free account is required (from /api/config).
+    // 0 is a real answer (the owner asks for an account from the first guide): then no number is promised.
+    heroFree: (n) => n === 0 ? 'Free. No card. A free account is needed to make guides.'
+      : n === 1 ? 'Free. No card. Your first guide needs no account.' : `Free. No card. Your first ${n} guides need no account.`,
     dropTitle: 'Drop your PowerPoint or PDF files here',
     dropSub: 'or click to browse — .pptx / .ppt / .pdf / .docx / .doc / .txt, multiple files supported',
-    dropFree: (n) => `Free · ${n === 1 ? '1 guide' : `${n} guides`} without an account · then a free sign-in`,
+    dropFree: (n) => n === 0 ? 'Free · a free account is needed to make guides' : `Free · ${n === 1 ? '1 guide' : `${n} guides`} without an account · then a free sign-in`,
     dropFreeUser: 'Free to use · fair-use daily limits apply',
     footerFree: 'Free to use · Files deleted automatically',
     langAuto: 'Auto-detect language',
     langEn: 'English output',
     langAr: 'Arabic output (عربي)',
-    privacy: 'Your files are processed in memory only — never written to disk or seen by anyone. The server wipes everything automatically within 15 minutes; this tab keeps a copy of your guide until you close it, remove it or tap Delete now. Flash-card progress is saved on this device.',
+    // The server keeps files in memory only. One thing does touch the visitor's own disk, and the line says so: a file
+    // or text still waiting when the page leaves for Google sign-in is kept in THIS browser until they are back.
+    privacy: 'Your files are processed in server memory only — never written to our disks or seen by anyone. The server wipes everything automatically within 15 minutes; this tab keeps a copy of your guide until you close it, remove it or tap Delete now. If you leave to sign in with Google, a file or text still waiting is kept in your own browser only (never uploaded early) so it is there when you return. Flash-card progress is saved on this device.',
     generateAll: 'Generate All',
     generating: 'Processing…',
     download: 'Download PDF',
@@ -98,16 +105,23 @@ const T = {
     // The nav counter, the notice in the sign-in modal, the held item, and the toast after signing in.
     anonLeft: (n) => n === 1 ? '1 free guide left' : `${n} free guides left`,
     anonNone: 'Sign in to continue — free',
-    signinRequired: (n) => `You've used your ${n === 1 ? 'free guide' : `${n} free guides`}. Create a free account to keep going — it's still free.`,
+    // WHY a free account is asked for: three causes, three true texts (the same three the server sends), one call
+    // to action. Only the first is about what THIS visitor did, so only it may say "you've used your N free guides".
+    signinRequired: (n) => n === 0 ? "Create a free account to make study guides — it's free." : `You've used your ${n === 1 ? 'free guide' : `${n} free guides`}. Create a free account to keep going — it's still free.`,
+    signinNetwork: "Today's free guides without an account are used up on your network. Create a free account to keep going — it's still free.",
+    signinPool: "Today's free guides without an account are used up. Create a free account to keep going — it's still free.",
     signInToContinue: 'Sign in to continue (free)',
     gateCleared: "You're signed in — you can keep making guides now.",
+    // Back from Google sign-in with what was waiting (k = 'file' | 'files' | 'text' | 'link', else several kinds)
+    stashReady: (k) => "You're signed in. " + ({ file: 'Your file is ready', files: 'Your files are ready', text: 'Your text is ready', link: 'Your link is ready' }[k] || 'Your items are ready') + ' — tap Generate.',
     generateNow: 'Generate',
     // Why sign in (shown in the sign-in modal and in the card after a visitor's first guide).
     // Only real features: more guides (the account's daily fair-use allowance), Chat (needs an account), the invite link.
     perks: (f) => `more guides${f ? ` (up to ${f.user_daily} a day, fair use)` : ''}, chat with your guide, and a link to invite friends`,
     perksNote: (c) => `With a free account you get ${c}.`,
     joinTitle: 'Create a free account',
-    joinBody: (c, left) => `${left > 0 ? `You have ${left === 1 ? '1 free guide' : `${left} free guides`} left without an account.` : "You've used your free guides."} A free account gets you ${c}.`,
+    // limit 0 = an account is asked for from the very first guide, so nothing was "used"
+    joinBody: (c, left, limit) => `${left > 0 ? `You have ${left === 1 ? '1 free guide' : `${left} free guides`} left without an account. ` : limit === 0 ? '' : "You've used your free guides. "}A free account gets you ${c}.`,
     // Invite a friend (plain share link — no rewards)
     referTitle: 'Invite a friend',
     referSub: "Know someone who could use Alimne? Share your link — it's free for them too.",
@@ -254,17 +268,18 @@ const T = {
     h1a: 'حوّل أي محاضرة إلى',
     h1b: 'أدلة دراسة',
     sub: 'ارفع عرضاً تقديمياً أو PDF أو رابط محاضرة من YouTube — واحصل على دليل جاهز للامتحان مع ملخص وبطاقات وأسئلة مراجعة خلال ثوانٍ.',
-    heroFree: (n) => n === 1 ? 'مجاني. بدون بطاقة. دليلك الأول لا يحتاج إلى حساب.' : n === 2 ? 'مجاني. بدون بطاقة. أول دليلين لا يحتاجان إلى حساب.'
+    heroFree: (n) => n === 0 ? 'مجاني. بدون بطاقة. يلزم حساب مجاني لإنشاء الأدلة.'
+      : n === 1 ? 'مجاني. بدون بطاقة. دليلك الأول لا يحتاج إلى حساب.' : n === 2 ? 'مجاني. بدون بطاقة. أول دليلين لا يحتاجان إلى حساب.'
       : `مجاني. بدون بطاقة. أول ${n} ${n <= 10 ? 'أدلة' : 'دليلاً'} لا تحتاج إلى حساب.`,
     dropTitle: 'أسقط ملفات PowerPoint أو PDF هنا',
     dropSub: 'أو انقر للتصفح — .pptx / .ppt / .pdf / .docx / .doc / .txt، يدعم ملفات متعددة',
-    dropFree: (n) => `مجاني · ${n === 1 ? 'دليل واحد' : n === 2 ? 'دليلان' : n <= 10 ? `${n} أدلة` : `${n} دليلاً`} دون حساب · ثم تسجيل دخول مجاني`,
+    dropFree: (n) => n === 0 ? 'مجاني · يلزم حساب مجاني لإنشاء الأدلة' : `مجاني · ${n === 1 ? 'دليل واحد' : n === 2 ? 'دليلان' : n <= 10 ? `${n} أدلة` : `${n} دليلاً`} دون حساب · ثم تسجيل دخول مجاني`,
     dropFreeUser: 'مجاني للاستخدام · تُطبَّق حدود يومية للاستخدام العادل',
     footerFree: 'مجاني للاستخدام · تُحذف الملفات تلقائياً',
     langAuto: 'اكتشاف اللغة تلقائياً',
     langEn: 'الإخراج بالإنجليزية',
     langAr: 'الإخراج بالعربية',
-    privacy: 'ملفاتك تُعالَج في الذاكرة فقط — لا تُكتب على القرص ولا يراها أحد. يمسح الخادم كل شيء تلقائياً خلال 15 دقيقة، وتحتفظ هذه النافذة بنسخة من دليلك حتى تغلقها أو تزيله أو تضغط «احذف الآن». ويُحفظ تقدّمك في البطاقات على هذا الجهاز.',
+    privacy: 'ملفاتك تُعالَج في ذاكرة الخادم فقط — لا تُكتب على أقراصنا ولا يراها أحد. يمسح الخادم كل شيء تلقائياً خلال 15 دقيقة، وتحتفظ هذه النافذة بنسخة من دليلك حتى تغلقها أو تزيله أو تضغط «احذف الآن». وإذا غادرت الصفحة لتسجيل الدخول عبر Google، يبقى الملف أو النص الذي ينتظر محفوظاً في متصفحك فقط (دون رفعه مسبقاً) ليكون موجوداً عند عودتك. ويُحفظ تقدّمك في البطاقات على هذا الجهاز.',
     generateAll: 'توليد الكل',
     generating: 'جارٍ المعالجة…',
     download: 'تحميل PDF',
@@ -327,14 +342,18 @@ const T = {
     // بوابة تسجيل الدخول: عدد من الأدلة للزائر، ثم يلزم حساب مجاني لإنشاء المزيد
     anonLeft: (n) => n === 1 ? 'بقي لك دليل مجاني واحد' : n === 2 ? 'بقي لك دليلان مجانيان' : n <= 10 ? `بقي لك ${n} أدلة مجانية` : `بقي لك ${n} دليلاً مجانياً`,
     anonNone: 'سجّل الدخول للمتابعة — مجاناً',
-    signinRequired: (n) => `استخدمت ${n === 1 ? 'دليلك المجاني' : n === 2 ? 'دليلَيك المجانيَّين' : `أدلتك المجانية الـ${n}`}. أنشئ حساباً مجانياً للمتابعة — وما زال الاستخدام مجانياً.`,
+    // سبب طلب الحساب: ثلاثة أسباب وثلاثة نصوص صادقة (هي نفسها التي يرسلها الخادم) ودعوة واحدة في آخرها
+    signinRequired: (n) => n === 0 ? 'أنشئ حساباً مجانياً لإنشاء أدلة الدراسة — الاستخدام مجاني.' : `لقد استخدمت ${n === 1 ? 'دليلك المجاني' : n === 2 ? 'دليلَيك المجانيَّين' : `أدلتك المجانية ${AR_THE_COUNT[n] || `الـ${n}`}`}. أنشئ حساباً مجانياً للمتابعة — ما زال الاستخدام مجانياً.`,
+    signinNetwork: 'استُنفدت اليوم الأدلة المجانية المتاحة على شبكتك دون حساب. أنشئ حساباً مجانياً للمتابعة — ما زال الاستخدام مجانياً.',
+    signinPool: 'استُنفدت اليوم الأدلة المجانية المتاحة دون حساب. أنشئ حساباً مجانياً للمتابعة — ما زال الاستخدام مجانياً.',
     signInToContinue: 'سجّل الدخول للمتابعة (مجاناً)',
     gateCleared: 'تم تسجيل الدخول — يمكنك الآن متابعة إنشاء الأدلة.',
+    stashReady: (k) => 'تم تسجيل الدخول. ' + ({ file: 'ملفك جاهز', files: 'ملفاتك جاهزة', text: 'نصّك جاهز', link: 'رابطك جاهز' }[k] || 'عناصرك جاهزة') + ' — اضغط «توليد».',
     generateNow: 'توليد',
     perks: (f) => `المزيد من الأدلة${f ? ` (حتى ${f.user_daily} ${f.user_daily <= 10 ? 'أدلة' : 'دليلاً'} في اليوم ضمن الاستخدام العادل)` : ''}، والدردشة مع دليلك، ورابط لدعوة أصدقائك`,
     perksNote: (c) => `بحساب مجاني تحصل على ${c}.`,
     joinTitle: 'أنشئ حساباً مجانياً',
-    joinBody: (c, left) => `${left > 0 ? `بقي لك ${left === 1 ? 'دليل مجاني واحد' : left === 2 ? 'دليلان مجانيان' : left <= 10 ? `${left} أدلة مجانية` : `${left} دليلاً مجانياً`} دون حساب.` : 'استخدمت أدلتك المجانية.'} بحساب مجاني تحصل على ${c}.`,
+    joinBody: (c, left, limit) => `${left > 0 ? `بقي لك ${left === 1 ? 'دليل مجاني واحد' : left === 2 ? 'دليلان مجانيان' : left <= 10 ? `${left} أدلة مجانية` : `${left} دليلاً مجانياً`} دون حساب. ` : limit === 0 ? '' : 'استخدمت أدلتك المجانية. '}بحساب مجاني تحصل على ${c}.`,
     // ادعُ صديقاً (رابط مشاركة فقط — بلا مكافآت)
     referTitle: 'ادعُ صديقاً',
     referSub: 'تعرف من قد يحتاج علّمني؟ شارك رابطك — فهو مجاني لهم أيضاً.',
@@ -487,6 +506,8 @@ const LEGACY = {
     heroFree: '',
     dropFree: '',
     footerFree: 'Free to try · Files deleted automatically',
+    // token mode makes no browser copy for the Google round trip, so it keeps the privacy line it always had
+    privacy: 'Your files are processed in memory only — never written to disk or seen by anyone. The server wipes everything automatically within 15 minutes; this tab keeps a copy of your guide until you close it, remove it or tap Delete now. Flash-card progress is saved on this device.',
     trust: ['No sign-up to try', 'Files wiped in 15 min', 'English & العربية'],
     upgradeTitle: "You're out of free guides",
     upgradeSub: "You've used your free guides for now. Go Pro for 30 a month plus priority processing.",
@@ -516,6 +537,7 @@ const LEGACY = {
     heroFree: '',
     dropFree: '',
     footerFree: 'جرّب مجاناً · تُحذف الملفات تلقائياً',
+    privacy: 'ملفاتك تُعالَج في الذاكرة فقط — لا تُكتب على القرص ولا يراها أحد. يمسح الخادم كل شيء تلقائياً خلال 15 دقيقة، وتحتفظ هذه النافذة بنسخة من دليلك حتى تغلقها أو تزيله أو تضغط «احذف الآن». ويُحفظ تقدّمك في البطاقات على هذا الجهاز.',
     trust: ['بدون تسجيل للتجربة', 'تُمسح الملفات خلال 15 دقيقة', 'الإنجليزية والعربية'],
     upgradeTitle: 'انتهت أدلتك المجانية',
     upgradeSub: 'استخدمت أدلتك المجانية الآن. اشترك للحصول على 30 دليلاً شهرياً ومعالجة ذات أولوية.',
@@ -564,9 +586,12 @@ const perksOf = (t, fair) => t.perks(fair && fair.user_daily ? fair : null)
 // the sign-in modal instead of sending a request that would only be refused. The sample lecture,
 // and viewing / downloading / restoring guides already made, are never gated.
 const FREE_USES_DEFAULT = 3
-// /api/config → { limit, remaining }. A missing or odd field falls back to the default (3 of 3).
+// /api/config → { limit, remaining }. A missing or odd field falls back to the default (3 of 3). A 0 is a real
+// answer, never "missing": the owner asks for an account from the very first guide (ANON_FREE_USES=0).
+// `remaining` is this DEVICE's own count and nothing else: the client is never told how much its network or
+// the whole anonymous pool has left, so it never guesses about them.
 const gateFromConfig = (cfg) => {
-  const limit = posInt(cfg?.signin_after) ?? posInt(cfg?.anon_free_limit) ?? FREE_USES_DEFAULT
+  const limit = countInt(cfg?.signin_after) ?? countInt(cfg?.anon_free_limit) ?? FREE_USES_DEFAULT
   const left = countInt(cfg?.anon_remaining)
   return { limit, remaining: left === null ? limit : Math.min(left, limit) }
 }
@@ -581,6 +606,22 @@ const anonGated = ({ freeMode, authEnabled, authLoading, session, remaining }) =
   !!(freeMode && authEnabled && !authLoading && !session && remaining <= 0)
 // The refusals that mean "sign in to continue": the gate, and what a server from before the gate sent for it
 const GATE_CODES = new Set(['signin_required', 'fair_use_device'])
+// WHY the server asked for a sign-in (the 401's `reason`): 'device' = this browser's own free guides are used,
+// 'network' = the anonymous allowance of this network is used up for today, 'pool' = guides without an account
+// are used up for today. A refusal with no reason (a server from before it) was about the device.
+const signinReason = (data) => (data?.code === 'signin_required' && typeof data?.reason === 'string' && data.reason) ? data.reason : 'device'
+// Only a 'device' refusal is about this browser's own counter. Any other reason leaves the counter as it is, so
+// the next try is sent again and the server decides: the client cannot know what a network or the pool has left.
+const holdsDeviceCount = (data) => signinReason(data) === 'device'   // includes the older 'fair_use_device' code
+
+// The text for a sign-in refusal. Only 'device' may say "you've used your N free guides" (n = the server's number,
+// 0 included). A reason this client does not know shows the server's own sentence instead of a guess.
+const signinText = (t, reason, n, serverText) => {
+  if (reason === 'network') return t.signinNetwork
+  if (reason === 'pool') return t.signinPool
+  if (reason && reason !== 'device' && typeof serverText === 'string' && serverText.trim()) return serverText
+  return t.signinRequired(countInt(n) ?? FREE_USES_DEFAULT)
+}
 // Server refusals that make the rest of a batch pointless: stop it, leave the other files queued
 const STOP_CODES = new Set(['signin_required', 'fair_use_device', 'fair_use_ip', 'fair_use_user', 'busy_today', 'busy'])
 // An item held for sign-in: only a signed-out visitor is asked (once signed in it is simply ready to run)
@@ -592,7 +633,8 @@ const procLine = (t, item) => item.step === 'queued'
 const badgeKey = (item, session) => (item.status === 'processing' && item.step === 'queued') ? 'queued'
   : (item.status === 'queued' && offersSignIn(item, session)) ? 'signin' : item.status
 // Session-only note that the gate asked this visitor to sign in. Google sign-in leaves the page and
-// comes back, so the note (and the link they had typed: never a file, never pasted text) survives it.
+// comes back, so the note (and the link they had typed) survives it. A chosen file or pasted text cannot
+// live in sessionStorage: those go through the sign-in stash further down (signinStash).
 const GATE_KEY = 'alimne_gate_v1'
 const gateNote = {
   save: (o) => { try { sessionStorage.setItem(GATE_KEY, JSON.stringify(o)) } catch { /* best-effort */ } },
@@ -692,9 +734,11 @@ function friendlyErr(t, msg, status, data) {
   // 'your credit was returned' only exists in token mode (LEGACY); free mode never mentions credits
   if (code === 'no_notes') return data?.refunded && t.errNoNotesRefunded ? t.errNoNotesRefunded : t.errNoNotes
   if (code === 'yt_blocked') return t.errYtBlocked
-  // Sign-in gate (HTTP 401 signin_required; 'fair_use_device' is what a server from before the gate sent):
-  // the free guides are used, a free account is needed. The number is the server's own (free_uses).
-  if (code === 'signin_required' || code === 'fair_use_device') return t.signinRequired(posInt(data?.free_uses) || FREE_USES_DEFAULT)
+  // Sign-in gate (HTTP 401 signin_required): a free account is needed, and the server says why (reason: device /
+  // network / pool), so the text is the true one for that cause. The number is the server's own (free_uses, 0 included).
+  if (code === 'signin_required') return signinText(t, data?.reason, data?.free_uses, data?.error)
+  // What a server from before the gate sent for the same thing: it could only mean the device's own guides
+  if (code === 'fair_use_device') return t.signinRequired(posInt(data?.free_uses) || FREE_USES_DEFAULT)
   // Free-mode fair-use / capacity refusals (HTTP 429 / 503, or an SSE error event with status 200):
   // our own words, ahead of the generic 429 / 503 text below
   if (code === 'fair_use_ip') return t.errFairIp
@@ -765,14 +809,203 @@ const csvCell = v => {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 
+// ── Sign-in round trip: what was waiting stays in THIS browser ────────────────
+// Google sign-in leaves the page and comes back, and a page that leaves forgets its memory: a chosen file or
+// pasted text that was waiting (behind the sign-in gate, or simply not generated yet) used to be gone on return.
+// So just before the page leaves, the items that were not generated yet are put in IndexedDB (it can hold a
+// File), in this browser only. Nothing is sent anywhere: an item is uploaded when the visitor taps Generate,
+// exactly as before. The copy
+//   * is capped (STASH_MAX_FILES files, about STASH_MAX_BYTES in all);
+//   * belongs to the tab that made it (a random claim in sessionStorage, which survives the round trip in the
+//     same tab and nothing else): another tab, or another person at the same computer later, cannot take it;
+//   * is deleted in the very transaction that reads it back, deleted on sign-out, and never used once it is
+//     older than STASH_MAX_AGE_MS (any later page load in this browser sweeps it).
+// Every touch of IndexedDB and of the browser's storage is wrapped and time-limited: where they are missing,
+// blocked or broken (some private modes) nothing is kept and the page behaves as it always did. A browser that
+// never made a copy never even opens IndexedDB (STASH_FLAG).
+const STASH_DB = 'alimne_signin_stash'
+const STASH_STORE = 'pending'
+const STASH_TAB_KEY = 'alimne_stash_tab'
+const STASH_FLAG = 'alimne_stash_made'
+const STASH_MAX_AGE_MS = 30 * 60 * 1000
+const STASH_MAX_BYTES = 60 * 1024 * 1024
+const STASH_MAX_FILES = 3
+const STASH_TABS = ['upload', 'youtube', 'text']
+const randomId = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
+
+// What to keep: the queue items that were not generated yet (their File, link or pasted text) and what is typed
+// in the boxes. Only the source: no job, no status, no guide. → { items, box }, or null when nothing is waiting.
+function stashPlan(queue, boxes) {
+  const items = []
+  let files = 0, bytes = 0
+  for (const it of Array.isArray(queue) ? queue : []) {
+    if (!it || it.demo || !['queued', 'error', 'processing'].includes(it.status)) continue
+    const src = it.source || (it.file ? { type: 'file' } : null)
+    if (!src) continue
+    if (src.type === 'file') {
+      const size = it.file ? Number(it.file.size) : NaN
+      if (!(size >= 0) || files >= STASH_MAX_FILES || bytes + size > STASH_MAX_BYTES) continue
+      files++; bytes += size
+      items.push({ kind: 'file', name: String(it.name || it.file.name || ''), file: it.file })
+    } else if (src.type === 'youtube') {
+      const url = keptLink(src.url)
+      if (url) items.push({ kind: 'youtube', url })
+    } else if (src.type === 'text') {
+      const text = typeof src.text === 'string' ? src.text : '', url = keptLink(src.url)
+      if ((!text.trim() && !url) || bytes + text.length * 2 > STASH_MAX_BYTES) continue
+      bytes += text.length * 2
+      items.push({ kind: 'text', text, url, name: String(src.name || it.name || '') })
+    }
+  }
+  const typed = (typeof boxes?.text === 'string' && boxes.text.trim() && bytes + boxes.text.length * 2 <= STASH_MAX_BYTES) ? boxes.text : ''
+  const box = { text: typed, url: keptLink(boxes?.url), yt: keptLink(boxes?.yt), tab: STASH_TABS.includes(boxes?.tab) ? boxes.tab : 'upload' }
+  return (items.length || box.text || box.url || box.yt) ? { items, box } : null
+}
+
+// The kept copy → queue items READY to generate (nothing was sent anywhere, so nothing is 'done' and nothing is
+// held), the boxes' text, and what came back in one word for the toast ('file' | 'files' | 'text' | 'link' |
+// 'items', or null for nothing). Whatever is not exactly what stashPlan writes is dropped: it is never rendered.
+function stashItems(rec) {
+  const items = []
+  let files = 0, texts = 0, links = 0
+  const ready = (extra) => ({ id: uid(), file: null, status: 'queued', jobId: null, error: null, step: null, msg: null, ...extra })
+  for (const s of Array.isArray(rec?.items) ? rec.items : []) {
+    if (!s || typeof s !== 'object') continue
+    if (s.kind === 'file') {
+      const f = s.file
+      const name = String((f && f.name) || s.name || '')
+      if (typeof Blob === 'undefined' || !(f instanceof Blob) || f.size > MAX_UPLOAD || files >= STASH_MAX_FILES ||
+          !/\.(pptx?|pdf|docx?|txt)$/i.test(name)) continue
+      let file = f
+      if (!f.name) { try { file = new File([f], name, { type: f.type || '' }) } catch { continue } }   // a bare Blob came back: give it its name again
+      files++
+      items.push(ready({ file, name, source: { type: 'file' } }))
+    } else if (s.kind === 'youtube') {
+      const url = keptLink(s.url)
+      if (!url) continue
+      links++
+      items.push(ready({ name: url, source: { type: 'youtube', url } }))
+    } else if (s.kind === 'text') {
+      const text = typeof s.text === 'string' ? s.text : '', url = keptLink(s.url)
+      if (!text.trim() && !url) continue
+      const name = (typeof s.name === 'string' && s.name.trim()) ? s.name.slice(0, 80)
+        : url ? url.replace(/^https?:\/\//, '').slice(0, 40) : 'Pasted text'
+      if (text.trim()) texts++; else links++
+      items.push(ready({ name, source: { type: 'text', url, text, name } }))
+    }
+  }
+  const b = (rec?.box && typeof rec.box === 'object') ? rec.box : {}
+  const box = { text: typeof b.text === 'string' ? b.text : '', url: keptLink(b.url), yt: keptLink(b.yt), tab: STASH_TABS.includes(b.tab) ? b.tab : 'upload' }
+  if (box.text.trim()) texts++
+  else if (box.url || box.yt) links++
+  const kind = !(files + texts + links) ? null
+    : (files && !texts && !links) ? (files === 1 ? 'file' : 'files')
+    : (!files && texts === 1 && !links) ? 'text'
+    : (!files && !texts && links === 1) ? 'link' : 'items'
+  return { items, box, kind }
+}
+
+// One IndexedDB transaction on the stash store. → what `work` reported through its second argument once the
+// transaction completed, or undefined when IndexedDB is missing, blocked, too slow (ms) or fails in any way.
+function stashDb(mode, work, ms = 4000) {
+  return new Promise(resolve => {
+    let over = false, timer = null
+    const done = (v) => { if (over) return; over = true; clearTimeout(timer); resolve(v) }
+    timer = setTimeout(() => done(undefined), ms)
+    try {
+      const idb = typeof indexedDB !== 'undefined' ? indexedDB : null
+      if (!idb) { done(undefined); return }
+      const open = idb.open(STASH_DB, 1)
+      open.onupgradeneeded = () => { try { open.result.createObjectStore(STASH_STORE) } catch { /* already there */ } }
+      open.onerror = open.onblocked = () => done(undefined)
+      open.onsuccess = () => {
+        const db = open.result
+        const close = () => { try { db.close() } catch { /* ignore */ } }
+        if (over) { close(); return }               // it answered too late: the caller has moved on
+        try {
+          let out
+          const tx = db.transaction(STASH_STORE, mode)
+          tx.oncomplete = () => { close(); done(out) }
+          tx.onerror = tx.onabort = () => { close(); done(undefined) }
+          work(tx.objectStore(STASH_STORE), (v) => { out = v })
+        } catch { close(); done(undefined) }
+      }
+    } catch { done(undefined) }
+  })
+}
+
+const signinStash = {
+  // This page load. A copy made by this very load is still in memory here, so reading it back only deletes it.
+  page: randomId(),
+  // Does this tab hold a claim on a copy? (synchronous and cheap: no IndexedDB)
+  claimed: () => { try { return !!sessionStorage.getItem(STASH_TAB_KEY) } catch { return false } },
+  // True when there is nothing to look for: this tab holds no claim and no copy was ever made in this browser.
+  // Then IndexedDB is not opened at all (most visitors). Storage that cannot be read counts as "look".
+  idle: () => {
+    if (signinStash.claimed()) return false
+    try { return localStorage.getItem(STASH_FLAG) !== '1' } catch { return false }
+  },
+  // Just before the page leaves for a sign-in. → true when a copy was kept (in this browser, nowhere else).
+  save: async (plan, ms = 6000) => {
+    if (!plan) return false
+    const token = randomId()
+    let old = null
+    try {
+      old = sessionStorage.getItem(STASH_TAB_KEY)
+      sessionStorage.setItem(STASH_TAB_KEY, token)
+      if (sessionStorage.getItem(STASH_TAB_KEY) !== token) return false
+    } catch { return false }                        // no session storage: nothing could claim the copy back, so none is made
+    try { localStorage.setItem(STASH_FLAG, '1') } catch { /* then every page load looks, see idle() */ }
+    const ok = await stashDb('readwrite', (store, out) => {
+      if (old) store.delete(old)                    // this tab's earlier copy, if any: never two for one tab
+      store.put({ v: 1, at: Date.now(), page: signinStash.page, items: plan.items, box: plan.box }, token)
+      out(true)
+    }, ms)
+    if (!ok) { try { sessionStorage.removeItem(STASH_TAB_KEY) } catch { /* ignore */ } }
+    return !!ok
+  },
+  // Back on the page. → the copy THIS tab made on an earlier page load, or null. It is deleted in the same
+  // transaction that reads it: nothing is ever read and kept. A copy older than STASH_MAX_AGE_MS is deleted
+  // whoever made it, and never returned.
+  take: async (ms = 8000) => {
+    let token = null
+    try { token = sessionStorage.getItem(STASH_TAB_KEY) } catch { /* no claim */ }
+    const now = Date.now()
+    let rec = null, left = 0
+    const ran = await stashDb('readwrite', (store, out) => {
+      const cur = store.openCursor()
+      cur.onsuccess = () => {
+        const c = cur.result
+        if (!c) { out(true); return }
+        const r = c.value
+        const mine = !!token && c.key === token
+        const fresh = !!r && typeof r.at === 'number' && now >= r.at && now - r.at <= STASH_MAX_AGE_MS
+        if (mine || !fresh) c.delete()
+        else left++                                  // another tab's, still in its round trip: not ours to touch
+        if (mine && fresh && r.page !== signinStash.page) rec = r
+        c.continue()
+      }
+    }, ms)
+    if (token) { try { sessionStorage.removeItem(STASH_TAB_KEY) } catch { /* ignore */ } }
+    if (ran && !left) { try { localStorage.removeItem(STASH_FLAG) } catch { /* ignore */ } }
+    return ran ? rec : null
+  },
+  // Sign-out: no copy of anyone's stays in this browser.
+  clear: async () => {
+    try { sessionStorage.removeItem(STASH_TAB_KEY) } catch { /* ignore */ }
+    const ran = await stashDb('readwrite', (store, out) => { store.clear(); out(true) })
+    if (ran) { try { localStorage.removeItem(STASH_FLAG) } catch { /* ignore */ } }
+  },
+}
+
 // ── Toast notifications ────────────────────────────────────────────────────
 function ToastContainer() {
   const [toasts, setToasts] = useState([])
   useEffect(() => {
-    window._addToast = (msg, type = 'success') => {
+    window._addToast = (msg, type = 'success', ms = 0) => {
       const id = uid()
       setToasts(p => [...p, { id, msg, type }])
-      setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), type === 'error' ? 5500 : 3000)
+      setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), ms > 0 ? ms : type === 'error' ? 5500 : 3000)
     }
     return () => { delete window._addToast }
   }, [])
@@ -790,7 +1023,7 @@ function ToastContainer() {
     </div>
   )
 }
-const toast = (msg, type) => window._addToast?.(msg, type)
+const toast = (msg, type, ms) => window._addToast?.(msg, type, ms)   // ms: how long it stays (default by type)
 
 // ── Escape key hook ────────────────────────────────────────────────────────
 function useEscapeKey(fn) {
@@ -1794,16 +2027,32 @@ Alimne (علّمني) أداة دراسة مدعومة بالذكاء الاصط
 ${TERMS_AR_TAIL}`
 
 
+// The account rule when NO guide is free without an account (ANON_FREE_USES=0): it replaces the "first N guides" bullet
+const TERMS_EN_RULE_0 = '• A free account is required to make study guides; creating one costs nothing. The sample lecture, and viewing or downloading the guides you already made, stay open to everyone.'
+const TERMS_AR_RULE_0 = '• يلزم حساب مجاني لإنشاء أدلة الدراسة، وإنشاء الحساب لا يكلّف شيئاً. أما المحاضرة النموذجية وعرض الأدلة التي أنشأتها أو تنزيلها فتبقى متاحة للجميع.'
+
+// Free mode only (token mode makes no such copy): what the browser keeps for the Google sign-in round trip.
+// Shown at the end of section 3 (your files and privacy). It must stay true to signinStash above.
+const TERMS_STASH = {
+  en: '• Signing in: if a file, link or pasted text is waiting when you leave the page to sign in with Google, it is kept in your own browser only (it is not uploaded until you tap Generate) so that it is still there when you return. That copy is deleted as soon as it is restored, or when you sign out; a copy older than 30 minutes is never used and is deleted the next time Alimne opens in that browser.',
+  ar: '• تسجيل الدخول: إذا كان لديك ملف أو رابط أو نص ملصق ينتظر عندما تغادر الصفحة لتسجيل الدخول عبر Google، فإنه يُحفظ في متصفحك فقط (ولا يُرفع قبل أن تضغط «توليد») ليبقى موجوداً عند عودتك. تُحذف هذه النسخة فور استعادتها أو عند تسجيل خروجك، ولا تُستخدم أي نسخة مضى عليها أكثر من 30 دقيقة، بل تُحذف عند فتح علّمني في ذلك المتصفح في المرة التالية.',
+}
+
 // The Terms as shown. Free mode names the real number of guides an anonymous visitor may make
-// ({FREE_GUIDES} in the text, from /api/config); token mode (ALIMNE_FREE_MODE=0) is the old text as it was.
+// ({FREE_GUIDES} in the text, from /api/config; with 0 the bullet says an account is required) and discloses
+// the sign-in copy; token mode (ALIMNE_FREE_MODE=0) is the old text as it was.
 const termsText = (lang, freeMode, n) => {
   const isAr = lang === 'ar'
   if (!freeMode) return isAr ? TERMS_AR_LEGACY : TERMS_EN_LEGACY
-  const k = posInt(n) || FREE_USES_DEFAULT
+  const k = countInt(n) ?? FREE_USES_DEFAULT
   const guides = isAr
     ? (k === 1 ? 'دليلك الأول' : k === 2 ? 'أول دليلين' : `أول ${k} ${k <= 10 ? 'أدلة' : 'دليلاً'}`)
     : (k === 1 ? 'guide' : `${k} guides`)
-  return (isAr ? TERMS_AR : TERMS_EN).replace('{FREE_GUIDES}', guides)
+  const section4 = isAr ? '\n\n٤. ' : '\n\n4. '
+  return (isAr ? TERMS_AR : TERMS_EN).split('\n')
+    .map(line => !line.includes('{FREE_GUIDES}') ? line : k === 0 ? (isAr ? TERMS_AR_RULE_0 : TERMS_EN_RULE_0) : line.replace('{FREE_GUIDES}', guides))
+    .join('\n')
+    .replace(section4, `\n${isAr ? TERMS_STASH.ar : TERMS_STASH.en}${section4}`)
 }
 
 function TermsModal({ lang, onClose, freeMode = true, freeUses = FREE_USES_DEFAULT }) {
@@ -1838,12 +2087,15 @@ function TermsModal({ lang, onClose, freeMode = true, freeUses = FREE_USES_DEFAU
 // ── Login Modal ────────────────────────────────────────────────────────────────
 // Inline role=alert messages (not toasts), confirm-email panel with resend,
 // forgot password, and an in-app-browser notice instead of a Google button that
-// can't work there. `gateUses` (free mode): the sign-in gate opened this modal, so it says why,
-// with the number of free guides the visitor has used, for as long as the modal is open.
-function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice, freeMode = true, fair = null, gateUses = null }) {
+// can't work there. `gate` (free mode): the sign-in gate opened this modal, so it says why, for as long
+// as the modal is open: { reason, uses, text } = the cause ('device' | 'network' | 'pool'), the allowance
+// (0 included) and, for a cause this client does not know, the server's own sentence.
+// `beforeLeave` runs just before the page leaves for Google (it keeps what was waiting, in this browser);
+// `leaveFailed` when the page did not leave after all.
+function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice, freeMode = true, fair = null, gate = null, beforeLeave = null, leaveFailed = null }) {
   const t = tFor(lang, freeMode)
   const isAr = lang === 'ar'
-  const gateText = freeMode && posInt(gateUses) ? t.signinRequired(posInt(gateUses)) : null
+  const gateText = freeMode && gate ? signinText(t, gate.reason, gate.uses, gate.text) : null
   const [mode, setMode]         = useState(initialMode === 'signup' ? 'signup' : 'signin')
   const [email, setEmail]       = useState(initialEmail || '')
   const [password, setPassword] = useState('')
@@ -1920,9 +2172,15 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
     setGBusy(true); setMsg(null)
     const tm = later(() => setGBusy(false), 20000)
     try {
+      // The page is about to leave for Google and will forget what it holds: first keep whatever was waiting
+      // (a chosen file, pasted text), in this browser only. Best effort and time-limited: it never stops the sign-in.
+      try { await beforeLeave?.() } catch { /* the sign-in matters more */ }
       const { error } = await sbClient.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } })
       if (error) throw error      // success: the browser is on its way to Google
-    } catch (err) { clearTimeout(tm); setGBusy(false); setMsg({ type: 'error', text: authErrText(t, err) }) }
+    } catch (err) {
+      clearTimeout(tm); setGBusy(false); setMsg({ type: 'error', text: authErrText(t, err) })
+      try { leaveFailed?.() } catch { /* ignore */ }   // the page stayed: everything is still in memory, so the copy goes
+    }
   }
 
   const copyLink = async () => {
@@ -2351,7 +2609,7 @@ function AnonCounter({ t, left, onClick }) {
 // ── Join card: after an anonymous visitor's first guide (free mode) ────────────
 // Non-blocking and dismissible. It says how many free guides are left without an account and
 // names only what an account really adds: more guides, Chat (needs an account) and the invite link.
-function JoinCard({ t, isAr, fair, left = 0, onJoin, onDismiss }) {
+function JoinCard({ t, isAr, fair, left = 0, limit, onJoin, onDismiss }) {
   return (
     <div className="glass" role="region" aria-label={t.joinTitle}
       style={{marginTop:'1rem', padding:'0.95rem 1.15rem', position:'relative', direction: isAr ? 'rtl' : 'ltr',
@@ -2363,7 +2621,7 @@ function JoinCard({ t, isAr, fair, left = 0, onJoin, onDismiss }) {
         <span style={{fontWeight:700, fontSize:'0.9rem', color:'var(--text-primary)'}}>{t.joinTitle}</span>
       </div>
       <div style={{fontSize:'0.8rem', color:'var(--text-secondary)', lineHeight:1.55, marginBottom:'0.75rem', paddingInlineEnd:'1.8rem'}}>
-        {t.joinBody(perksOf(t, fair), left)}
+        {t.joinBody(perksOf(t, fair), left, limit)}
       </div>
       <button className="submit-btn" style={{flex:'none', padding:'0.55rem 1.1rem', fontSize:'0.85rem'}} onClick={onJoin}>
         <LogIn size={14} /> {t.emailBtnSignup}
@@ -2455,13 +2713,13 @@ export default function App() {
   // Sign-in gate (free mode): { limit, remaining } = the guides this anonymous device may make / still has.
   // 3 of 3 until /api/config answers. Only ever shown to, and enforced on, a signed-out visitor.
   const [anonGate, setAnonGate]       = useState(() => gateFromConfig(null))
-  const [loginGate, setLoginGate]     = useState(null)  // set when the gate opened the sign-in modal: the number for its notice
+  const [loginGate, setLoginGate]     = useState(null)  // set when the gate opened the sign-in modal: { reason, uses, text } for its notice
   // The nav counter waits for a real number (from /api/config, a finished guide or a refusal) so a device
   // with none left is never shown "3 free guides left" for a moment. If /api/config never answers, the default shows.
   const [gateKnown, setGateKnown]     = useState(false)
 
-  const openLogin = (mode = 'signin', notice = null, gateUses = null) => {
-    setLoginMode(mode); setLoginNotice(notice); setLoginGate(gateUses); setLoginKey(k => k + 1); setShowLogin(true)
+  const openLogin = (mode = 'signin', notice = null, gate = null) => {
+    setLoginMode(mode); setLoginNotice(notice); setLoginGate(gate); setLoginKey(k => k + 1); setShowLogin(true)
   }
 
   // Referral
@@ -2489,17 +2747,29 @@ export default function App() {
   const meSeq       = useRef(0)
   const rehydrating = useRef({})
   const savedQ      = useRef('')
+  // What is typed in the boxes right now (for the copy kept across the Google sign-in, see stashForSignIn)
+  const boxesRef    = useRef(null);     boxesRef.current = { text: pasteText, url: pasteUrl, yt: ytUrl, tab: inputTab }
+  const stashRestore = useRef(null)      // promise of what this page load brought back from a sign-in round trip (read once)
+  const loadDone     = useRef(false)     // the session restore of this page load has answered
+  const atLoadSignIn = useRef(false)     // the current sign-in is the one the page loaded with (the return from Google)
 
   const setGate = fn => { const next = fn(gateRef.current); gateRef.current = next; setAnonGate(next); setGateKnown(true) }
-  // The sign-in modal, in sign-up mode, saying why: the free guides are used. `n` = the server's number when it sent one.
-  const openGate = (n) => {
+  // What this page itself can say when it asks for a sign-in: its own device counter, or, for a browser that
+  // keeps no device id (its number is then the allowance of its network), the network's.
+  const ownReason = () => getDeviceId() ? 'device' : 'network'
+  // The sign-in modal, in sign-up mode, saying why. `n`, `reason` and `text` are the server's when it refused.
+  const openGate = (n, reason, text) => {
     gateAsked.current = true
     gateNote.save({ tab: inputTab, yt: keptLink(ytUrl), url: keptLink(pasteUrl) })
-    openLogin('signup', null, posInt(n) || gateRef.current.limit)
+    openLogin('signup', null, { reason: reason || ownReason(), uses: countInt(n) ?? gateRef.current.limit, text: text || null })
   }
-  // → true when a new generation must NOT be sent (signed out, no free guides left): the modal opens instead
+  // → true when a new generation must NOT be sent (signed out, no free guides left): the modal opens instead.
+  // Only this device's own counter is known here. Whether its network or the anonymous pool still has room is
+  // for the server to say: such a refusal never empties the counter, so the next try is sent again.
   const gateBlocks = () => {
     if (!anonGated({ freeMode: freeRef.current, authEnabled, authLoading, session: sessionRef.current, remaining: gateRef.current.remaining })) return false
+    // A browser that keeps no device id has no counter of its own (unless no guide is free at all): send, and let the server answer
+    if (gateRef.current.limit > 0 && !getDeviceId()) return false
     openGate()
     return true
   }
@@ -2604,6 +2874,8 @@ export default function App() {
       const id = sess?.user?.id || null
       if (id && id !== lastUid.current) {
         lastUid.current = id
+        // the session this page LOADED with (the return from Google) vs a sign-in made later in the page
+        atLoadSignIn.current = !loadDone.current
         // outside the auth lock: calling supabase inside this callback can deadlock
         setTimeout(() => { fetchUserInfo(); fetchRefStats(); afterSignIn() }, 0)
       } else if (!id) {
@@ -2612,13 +2884,53 @@ export default function App() {
         setUserInfo(null); setUserInfoErr(false); setRefStats(null)
         if (wasSignedIn && freeRef.current) setTimeout(() => loadConfig(2), 0)
       }
+      if (event === 'INITIAL_SESSION') loadDone.current = true
       if (event === 'SIGNED_IN' && sess) setTimeout(applyReferral, 0)
     })
     sb.auth.getSession()
       .then(({ error }) => { if (error) console.warn('auth restore:', error.message) })
       .catch(() => {})
-      .finally(() => { if (live) setAuthLoading(false) })
+      .finally(() => {
+        if (live) setAuthLoading(false)
+        setTimeout(() => { loadDone.current = true }, 5000)   // INITIAL_SESSION normally says so first; this is the net under it
+      })
     return () => { live = false; subscription.unsubscribe() }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ── The sign-in round trip: what was waiting when this tab left for Google comes back ──────────
+  // Back on the page (signed in, or not: a visitor who cancels at Google gets the file back too): the copy this
+  // tab kept is read and deleted in one step (signinStash.take), its items go back in the queue READY to
+  // generate, and typed text goes back in its box. → what came back in one word (for the toast), or null.
+  // A browser with no copy to look for never opens IndexedDB (signinStash.idle).
+  const restoreStash = async () => {
+    if (signinStash.idle()) return null
+    if (!signinStash.claimed()) { signinStash.take(); return null }   // nothing of this tab's: only sweep old copies, in the background
+    const back = stashItems(await signinStash.take())
+    if (!back.kind) return null
+    if (back.items.length) setQueue(prev => [...prev, ...back.items])
+    if (back.box.text) setPasteText(v => v || back.box.text)
+    if (back.box.url) setPasteUrl(v => v || back.box.url)
+    if (back.box.yt) setYtUrl(v => v || back.box.yt)
+    // show where it is: the queue (with its Generate button), else the box the text or link was typed in
+    if (back.items.length) setInputTab('upload')
+    else setInputTab((back.box.tab === 'youtube' && back.box.yt) ? 'youtube' : (back.box.text || back.box.url) ? 'text' : 'youtube')
+    return back.kind
+  }
+  // Just before the page leaves for a full-page sign-in (Google): keep what was waiting, in this browser only.
+  // Best effort and time-limited: it can never stop the sign-in. Token mode keeps its old behaviour (no copy).
+  const stashForSignIn = async () => {
+    if (!freeRef.current) return false
+    try { return await signinStash.save(stashPlan(queueRef.current, boxesRef.current)) } catch { return false }
+  }
+  // The page did not leave after all (the sign-in could not start): everything is still in memory, so the copy goes
+  const dropStash = () => { if (!signinStash.idle()) signinStash.take() }
+  useEffect(() => {
+    if (!stashRestore.current) stashRestore.current = restoreStash()
+    // Back from the browser's back/forward cache: the very same page, its memory intact. take() then only deletes.
+    const onShow = (e) => { if (e.persisted) restoreStash() }
+    window.addEventListener('pageshow', onShow)
+    return () => window.removeEventListener('pageshow', onShow)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -2653,6 +2965,9 @@ export default function App() {
   // Local sign-out (this device only). If the network call fails, clear the stored session and reload.
   const signOut = async () => {
     meSeq.current++; lastUid.current = null; sessionRef.current = null
+    // nothing kept for a sign-in round trip outlives a sign-out (a browser that never made a copy has none to delete)
+    stashRestore.current = null
+    if (!signinStash.idle()) signinStash.clear()
     let error = null
     try { if (sb) error = (await sb.auth.signOut({ scope: 'local' })).error } catch (e) { error = e }
     setSession(null); setUserInfo(null); setUserInfoErr(false); setRefStats(null)
@@ -2736,21 +3051,31 @@ export default function App() {
   // A sign-in clears the gate: held items are simply ready to run again. When the gate had asked for
   // this sign-in, its modal closes and a short toast says to carry on. Google sign-in leaves the page
   // and comes back, so then only the note in sessionStorage says the gate had asked; it also gives
-  // back the link the visitor had typed (a chosen file or pasted text cannot survive leaving the page).
-  const afterSignIn = () => {
+  // back the link the visitor had typed. A chosen file or pasted text comes back through the sign-in
+  // stash (restoreStash, at page load): when it did, the toast says so and what to tap.
+  const afterSignIn = async () => {
     const note = gateNote.take()
     setQueue(prev => prev.some(i => GATE_CODES.has(i.errCode))
-      ? prev.map(i => GATE_CODES.has(i.errCode) ? { ...i, errCode: null } : i) : prev)
-    if (!note && !gateAsked.current) return
+      ? prev.map(i => GATE_CODES.has(i.errCode) ? { ...i, errCode: null, gateReason: null } : i) : prev)
+    // What this page load brought back, for the sign-in the page loaded with only (the return from Google).
+    // A sign-in made later in the page has nothing new to announce: it reads as before.
+    const pending = stashRestore.current
+    stashRestore.current = null
+    const back = (pending && atLoadSignIn.current) ? await pending : null
+    // Signed in without the page ever leaving (email and password, or back from a Google page that was never
+    // completed): whatever was kept for a round trip is still in memory here, so the copy has no use left
+    if (!atLoadSignIn.current) dropStash()
+    if (!back && !note && !gateAsked.current) return
     if (note && !gateAsked.current) {
       const yt = keptLink(note.yt), url = keptLink(note.url)
       if (yt) setYtUrl(v => v || yt)
       if (url) setPasteUrl(v => v || url)
-      if ((note.tab === 'youtube' && yt) || (note.tab === 'text' && url)) setInputTab(note.tab)
+      if (!back && ((note.tab === 'youtube' && yt) || (note.tab === 'text' && url))) setInputTab(note.tab)
     }
     gateAsked.current = false
     setShowLogin(false); setLoginNotice(null); setLoginGate(null)
-    toast(tRef.current.gateCleared, 'success')
+    if (back) toast(tRef.current.stashReady(back), 'success', 9000)   // "You're signed in. Your file is ready — tap Generate."
+    else toast(tRef.current.gateCleared, 'success')
   }
 
   // Back from Stripe Checkout (?sub=success): confirm, then re-read the plan a
@@ -2839,13 +3164,19 @@ export default function App() {
 
   // The server says a free account is needed to make more guides (401 signin_required, or the device
   // refusal of a server from before the gate). Not an error: the item waits exactly as it was (its
-  // upload, link or text untouched), nothing is left on this device's allowance, and the sign-in modal
-  // opens with the reason.
+  // upload, link or text untouched) and the sign-in modal opens with the server's own cause.
+  // Only a refusal about THIS device's guides empties the local counter. When the cause is the network or the
+  // anonymous pool the device still has its guides (the server gave the unit back), so the counter stays and the
+  // next try is sent again: the client never blocks for something it cannot know.
   const holdForSignIn = (id, data) => {
-    const n = posInt(data?.free_uses)
-    setGate(g => ({ limit: n || g.limit, remaining: 0 }))
-    if (id) updateItem(id, { status: 'queued', error: null, errCode: 'signin_required', step: null, msg: null, queuePos: 0 })
-    openGate(n)
+    const n = countInt(data?.free_uses)
+    const reason = signinReason(data)
+    setGate(g => {
+      const limit = n ?? g.limit
+      return holdsDeviceCount(data) ? { limit, remaining: 0 } : { limit, remaining: Math.min(g.remaining, limit) }
+    })
+    if (id) updateItem(id, { status: 'queued', error: null, errCode: 'signin_required', gateReason: reason, step: null, msg: null, queuePos: 0 })
+    openGate(n, reason, typeof data?.error === 'string' ? data.error : null)
   }
 
   // 401 / 402 that a token refresh can't fix. A 402 only exists in token mode (ALIMNE_FREE_MODE=0).
@@ -3859,7 +4190,7 @@ export default function App() {
                           {/* held for sign-in: a plain (not red) line and the button that opens the sign-in modal with the reason */}
                           {held && (<>
                             <div style={{fontSize:'0.72rem',color:'var(--accent)',fontWeight:600,marginTop:2}}>{t.signInToContinue}</div>
-                            <button className="ctrl-btn" onClick={() => openGate()}
+                            <button className="ctrl-btn" onClick={() => openGate(undefined, item.gateReason)}
                               style={{marginTop:6, borderColor:'var(--accent)', color:'var(--accent)'}}>
                               <LogIn size={12} /><span> {t.signInFreeCta}</span>
                             </button>
@@ -4001,7 +4332,7 @@ export default function App() {
 
             {/* After a visitor's first real guide: a quiet, dismissible invitation to create a free account */}
             {showJoinCard({ freeMode, authEnabled, authLoading, session, dismissed: joinDismissed, queue }) && (
-              <JoinCard t={t} isAr={isAr} fair={fair} left={anonGate.remaining} onJoin={openSignUp} onDismiss={dismissJoin} />
+              <JoinCard t={t} isAr={isAr} fair={fair} left={anonGate.remaining} limit={anonGate.limit} onJoin={openSignUp} onDismiss={dismissJoin} />
             )}
 
             {/* Info pills */}
@@ -4062,7 +4393,8 @@ export default function App() {
       {showTerms    && <TermsModal lang={uiLang} freeMode={freeMode} freeUses={anonGate.limit} onClose={() => setShowTerms(false)} />}
       {showLogin    && (
         <LoginModal key={loginKey} onClose={() => { setShowLogin(false); setLoginNotice(null); setLoginGate(null) }}
-          lang={uiLang} sbClient={sb} initialMode={loginMode} freeMode={freeMode} fair={fair} gateUses={loginGate}
+          lang={uiLang} sbClient={sb} initialMode={loginMode} freeMode={freeMode} fair={fair} gate={loginGate}
+          beforeLeave={stashForSignIn} leaveFailed={dropStash}
           initialEmail={ls.get('alimne_lead') || ''} notice={loginNotice} />
       )}
       {showSetPw && sb && <SetPasswordModal onClose={() => setShowSetPw(false)} lang={uiLang} sbClient={sb} />}
