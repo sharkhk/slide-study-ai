@@ -2948,11 +2948,12 @@ def admin_page():
 
     # ── Data: every Supabase read is in _admin_load (bounded, each in its own try) ──
     now    = _admin_now()
-    g      = globals()
     free   = bool(FREE_MODE)
-    # Knobs of the sign-in gate / fair use, read defensively: the gate ships separately.
-    # 0 is a real setting (sign in from the very first guide), never rounded up to 1.
-    gate_limit = max(0, _admin_int(g.get("ANON_FREE_USES", 3), 3))
+    # The sign-in gate's real knob: the funnel's "reached the gate" step counts the
+    # devices that used all of these. Still read through _admin_int, so a value that
+    # is not a count falls back to the default instead of raising. 0 is a real setting
+    # (sign in from the very first guide), never rounded up to 1.
+    gate_limit = max(0, _admin_int(ANON_FREE_USES, 3))
     sb_note = ""
     try:
         sb = _get_sb()
@@ -2983,7 +2984,7 @@ def admin_page():
     _epoch = _admin_dt.datetime(1970, 1, 1, tzinfo=_admin_dt.timezone.utc)
     _admin_safe({}, "the account order",                      # newest first; the query already sends them so
                 lambda: users.sort(key=lambda u: _admin_ts(u.get("created_at")) or _epoch, reverse=True), None)
-    window_h = max(1, _admin_int(g.get("_FAIR_WINDOW_HOURS", 24), 24))   # the fair-use counters' window
+    window_h = max(1, _admin_int(_FAIR_WINDOW_HOURS, 24))   # the fair-use counters' window
     activity = _admin_safe(errors, "activity",
                            lambda: _admin_user_activity(data["activity_rows"], now, window_h), {})
     stats    = _admin_safe(errors, "signups",
@@ -2998,14 +2999,14 @@ def admin_page():
 
     def budget_now():
         try:
-            anon_limit = g["_fair_anon_limit"]() if callable(g.get("_fair_anon_limit")) else None
+            anon_limit = _fair_anon_limit()       # the anonymous slice of FAIR_GLOBAL_DAILY
         except Exception:
-            anon_limit = None
-        return _admin_budget(data["fair_rows"], now, g.get("FAIR_GLOBAL_DAILY", 2000), anon_limit, window_h)
+            anon_limit = None                     # no anonymous meter; the main one still stands
+        return _admin_budget(data["fair_rows"], now, FAIR_GLOBAL_DAILY, anon_limit, window_h)
     budget   = _admin_safe(errors, "budget", budget_now,
                            {"used": 0, "limit": 0, "pct": None, "warn": False, "resets_in_s": None,
                             "anon": None, "window_hours": window_h})
-    gen_gate = _admin_safe(errors, "capacity", lambda: _admin_gen_gate(g), None)
+    gen_gate = _admin_safe(errors, "capacity", lambda: _admin_gen_gate(globals()), None)
 
     # ── Users (the Supabase `users` table) ────────────────────────────────────────
     def referral_tallies():

@@ -740,7 +740,7 @@ def test_empty_database_shows_zeros_and_the_gate_note(client, monkeypatch):
 
 
 def test_gate_note_follows_the_configured_limit_and_goes_away_with_data(client, monkeypatch):
-    monkeypatch.setattr(appmod, "ANON_FREE_USES", 5, raising=False)
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 5)
     _use(monkeypatch, FakeSB())
     assert "sign-in gate data starts when the 5-guide gate goes live" in _page(client)
     _use(monkeypatch, sample_db(gate_limit=5))
@@ -751,7 +751,7 @@ def test_gate_note_follows_the_configured_limit_and_goes_away_with_data(client, 
 
 @pytest.mark.parametrize("setting", [0, -1, "0"])
 def test_gate_set_to_zero_reads_as_sign_in_from_the_first_guide(client, monkeypatch, setting):
-    monkeypatch.setattr(appmod, "ANON_FREE_USES", setting, raising=False)
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", setting)
     sb = sample_db()
     html = _page_of(client, monkeypatch, sb)
     assert 'data-note="gate-from-first"' in html
@@ -776,7 +776,7 @@ def test_gate_set_to_zero_reads_as_sign_in_from_the_first_guide(client, monkeypa
 
 
 def test_gate_set_to_zero_on_an_empty_or_failing_database(client, monkeypatch):
-    monkeypatch.setattr(appmod, "ANON_FREE_USES", 0, raising=False)
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 0)
     html = _page_of(client, monkeypatch, FakeSB())
     assert 'data-note="gate-from-first"' in html and "gate data starts when" not in html
     assert (_num(html, "funnel-devices"), _num(html, "funnel-accounts")) == ("n/a", "0")
@@ -794,7 +794,7 @@ def test_gate_set_to_zero_on_an_empty_or_failing_database(client, monkeypatch):
 
 
 def test_a_one_guide_gate_is_still_a_gate(client, monkeypatch):
-    monkeypatch.setattr(appmod, "ANON_FREE_USES", 1, raising=False)
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 1)
     html = _page_of(client, monkeypatch, FakeSB())
     assert "sign-in gate data starts when the 1-guide gate goes live" in html
     assert 'data-note="gate-from-first"' not in html and _num(html, "funnel-devices") == "0"
@@ -1445,3 +1445,59 @@ def test_leads_section_is_short_when_empty(client, monkeypatch):
     html = _page(client)
     assert "Leads (old paywall emails)" in html and "none" in html[html.index('id="sec-leads"'):][:600]
     assert "Captured (UTC)" not in html                          # no empty table
+
+
+# ═════════════════════════ 5. together with the sign-in gate ═════════════════════
+# The dashboard was written before the gate shipped, so it looked the gate's knobs
+# up by name with a made-up default. They now live in the same module: the page has
+# to read the REAL ones, or a renamed knob would silently show a number that the
+# gate does not enforce.
+GATE_KNOBS = ("ANON_FREE_USES", "FAIR_GLOBAL_DAILY", "_FAIR_WINDOW_HOURS", "_fair_anon_limit")
+
+
+def test_the_knobs_the_dashboard_shows_exist_for_real():
+    for name in GATE_KNOBS + ("ANON_USES_WINDOW_HOURS", "FAIR_ANON_IP_DAILY", "_anon_gate"):
+        assert hasattr(appmod, name), name
+    assert appmod.ANON_FREE_USES == 3                            # the owner's rule (conftest clears the env)
+    assert callable(appmod._fair_anon_limit) and callable(appmod._anon_gate)
+
+
+def test_admin_page_reads_the_real_knobs_not_a_lookup_by_name():
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(appmod.admin_page))
+    by_name = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    read = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    for knob in GATE_KNOBS:
+        assert knob not in by_name, f"{knob} is still looked up by name, with a default that can go stale"
+        assert knob in read, f"the page does not read {knob}"
+
+
+def test_funnel_gate_step_counts_what_the_real_gate_counts(client, monkeypatch):
+    """Same counter key as the gate (_anon_gate), same limit (ANON_FREE_USES): the
+    device the gate refuses next is the device the funnel puts at the gate."""
+    limit = appmod.ANON_FREE_USES
+    rows = []
+    for d, count in enumerate([limit, limit, limit - 1, 1, 0]):  # the last one was refunded: no guide
+        key, _window = appmod._anon_gate(f"{d:032x}", "203.0.113.7")
+        rows.append(_counter(key, count, NOW - timedelta(hours=1 + d)))
+    noid_key, _window = appmod._anon_gate("", "203.0.113.7")     # no device id: the network's allowance, not a device
+    assert not noid_key.startswith("gate:dev:")
+    rows.append(_counter(noid_key, limit, NOW - timedelta(hours=1)))
+    html = _page_of(client, monkeypatch, FakeSB({"anon_usage": rows}))
+    assert (_num(html, "funnel-devices"), _num(html, "funnel-gate")) == ("4", "2")
+    assert f"devices that used all {limit} free guides" in html
+    # the knob moves the gate and the funnel together (no raising=False: the name is real)
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 2)
+    html = _page_of(client, monkeypatch, FakeSB({"anon_usage": rows}))
+    assert (_num(html, "funnel-devices"), _num(html, "funnel-gate")) == ("4", "3")
+    assert "devices that used all 2 free guides" in html
+
+
+def test_budget_meters_follow_the_real_limits(client, monkeypatch):
+    html = _page_of(client, monkeypatch, sample_db())
+    assert f"of {appmod.FAIR_GLOBAL_DAILY:,}<" in html and f"of {appmod._fair_anon_limit():,}<" in html
+    monkeypatch.setattr(appmod, "FAIR_GLOBAL_DAILY", 4000)
+    html = _page_of(client, monkeypatch, sample_db())
+    assert "of 4,000<" in html and "of 2,400<" in html           # the anonymous slice is 60% of it
+    assert (_num(html, "budget-pct"), _num(html, "budget-anon-pct")) == ("31%", "29%")   # 1,220 / 4,000 and 700 / 2,400
