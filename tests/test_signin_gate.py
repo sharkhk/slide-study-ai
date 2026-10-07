@@ -10,8 +10,8 @@ What this file pins, SERVER side:
   1. 3 anonymous guides, then 401 `signin_required` with `free_uses` (every endpoint)
   2. the allowance is a LIFETIME one (the long window), not a daily one
   3. the counters and their order: gate, anonymous-IP, IP, anonymous pool, global
-  4. rotating the device id runs into FAIR_ANON_IP_DAILY; no device id is counted per
-     IP (`gate:noid:`) and cannot dodge the gate
+  4. rotating the device id runs into FAIR_ANON_IP_DAILY (10 a day per IP); no device id
+     is counted per IP (`gate:noid:`) and cannot dodge the gate
   5. a signed-in request never touches a gate key and is never asked to sign in
   6. refunds: a failed generation gives the use back, a disconnect after the paid AI
      work started does not; a refusal rolls back what was already taken
@@ -21,6 +21,8 @@ What this file pins, SERVER side:
  10. the refusal text, English and Arabic, with the real number
  11. ALIMNE_FREE_MODE=0 is exactly the old token system
  12. the knobs parse safely
+ 13. the refusal says WHY (`reason`: device / network / pool), each with its own true
+     text: a visitor who made no guides is never told "you've used your 3 free guides"
 
 EVERYTHING IS OFFLINE: Supabase is an in-memory fake with a clock, Groq / yt-dlp are faked.
 """
@@ -53,7 +55,13 @@ POOL = "fair:global:anon"
 GLOBAL = "fair:global"
 ORDER = [GATE, ANONIP, FAIRIP, POOL, GLOBAL]   # the charge order of an anonymous request
 
-EN_TEXT = "You've used your 3 free guides. Create a free account to keep going - it's still free."
+# The three sign-in refusals. Each is true for its own cause, and all end with the same call to action.
+CTA = "Create a free account to keep going - it's still free."
+EN_TEXT = "You've used your 3 free guides. " + CTA                                        # reason "device"
+EN_NETWORK = "Today's free guides without an account are used up on your network. " + CTA  # reason "network"
+EN_POOL = "Today's free guides without an account are used up. " + CTA                     # reason "pool"
+AR_CTA = "أنشئ حسابًا مجانيًا للمتابعة — ما زال الاستخدام مجانيًا."
+PER_IP = 10                                    # FAIR_ANON_IP_DAILY: anonymous guides per IP a day, all devices together
 
 
 # ── fakes + helpers ──────────────────────────────────────────────────────────────
@@ -237,12 +245,13 @@ def _charge(device=DEV, uid=None):
         return appmod._charge_credit(uid, appmod.request)
 
 
-def _refused(resp, free_uses=3):
-    """A sign-in refusal: 401, the code, the allowance, a message. Returns the body."""
+def _refused(resp, free_uses=3, reason="device"):
+    """A sign-in refusal: 401, the code, the allowance, WHY (`reason`), a message. Returns the body."""
     assert resp.status_code == 401, resp.get_data(as_text=True)[:300]
     d = resp.get_json()
     assert d["code"] == "signin_required" and d["free_uses"] == free_uses and d["error"]
-    assert set(d) == {"error", "code", "free_uses"}
+    assert set(d) == {"error", "code", "free_uses", "reason"}
+    assert d["reason"] == reason, d
     return d
 
 
@@ -250,7 +259,7 @@ def _refused(resp, free_uses=3):
 def test_the_defaults_are_the_product_rule():
     assert appmod.ANON_FREE_USES == 3
     assert appmod.ANON_USES_WINDOW_HOURS == LONG
-    assert appmod.FAIR_ANON_IP_DAILY == 30
+    assert appmod.FAIR_ANON_IP_DAILY == PER_IP == 10
     assert appmod.FAIR_USER_DAILY == 40                       # signed-in users are unchanged
 
 
@@ -331,7 +340,7 @@ def test_daily_counters_reset_but_the_gate_does_not(client, auth_on, sb, llm, mo
     for _ in range(3):
         _done(_post_text(client))                             # device A: its 3 uses (and the IP's 3 for today)
     other = "device-bbbb-0002"
-    _refused(_post_text(client, device=other))                # device B: the network is used up for today
+    _refused(_post_text(client, device=other), reason="network")   # device B: the network is used up for today
     sb.advance(25)
     _done(_post_text(client, device=other))                   # tomorrow B is welcome (a daily counter)
     _refused(_post_text(client))                              # A is still asked to sign in (a lifetime one)
@@ -350,7 +359,7 @@ def test_an_anonymous_request_is_charged_in_the_documented_order(sb):
     assert err is None
     assert sb.calls == [
         ("anon_consume", {"p_key": GATE,   "p_limit": 3,    "p_window_hours": LONG}),
-        ("anon_consume", {"p_key": ANONIP, "p_limit": 30,   "p_window_hours": 24}),
+        ("anon_consume", {"p_key": ANONIP, "p_limit": 10,   "p_window_hours": 24}),
         ("anon_consume", {"p_key": FAIRIP, "p_limit": 250,  "p_window_hours": 24}),
         ("anon_consume", {"p_key": POOL,   "p_limit": 1200, "p_window_hours": 24}),
         ("anon_consume", {"p_key": GLOBAL, "p_limit": 2000, "p_window_hours": 24}),
@@ -381,8 +390,8 @@ def test_rotating_the_device_id_runs_into_the_anonymous_ip_cap(client, auth_on, 
     monkeypatch.setattr(appmod, "FAIR_ANON_IP_DAILY", 4)
     for i in range(4):
         _done(_post_text(client, device=f"device-rota-{i:04d}"))      # a fresh id every time
-    d = _refused(_post_text(client, device="device-rota-9999"))
-    assert d["error"] == EN_TEXT
+    d = _refused(_post_text(client, device="device-rota-9999"), reason="network")
+    assert d["error"] == EN_NETWORK                                   # this device made nothing: it is not told it did
     assert sb.count("gate:dev:device-rota-9999") == 0                 # its gate unit was given back
     assert sb.count(ANONIP) == 4
     # the cap is on ANONYMOUS use of the network only: an account from the same IP is fine
@@ -392,19 +401,40 @@ def test_rotating_the_device_id_runs_into_the_anonymous_ip_cap(client, auth_on, 
     _done(_post_text(client, device="device-rota-9999"))
 
 
-def test_thirty_anonymous_guides_per_ip_a_day_by_default(sb):
-    for i in range(30):
+def test_ten_anonymous_guides_per_ip_a_day_by_default(sb):
+    # A private window, cleared site data or another browser is a new device id with 3 more
+    # guides. What bounds that on one network is this cap: 10 a day per IP, whatever the ids.
+    for i in range(PER_IP):
         charge, err = _charge(device=f"device-rota-{i:04d}")
         assert err is None, i
     charge, err = _charge(device="device-rota-9999")
-    assert charge is None and err[1] == 401 and err[0].get_json()["code"] == "signin_required"
-    assert sb.count(ANONIP) == 30 and sb.count(FAIRIP) == 30 and sb.count(GLOBAL) == 30
+    assert charge is None and err[1] == 401
+    assert err[0].get_json()["code"] == "signin_required" and err[0].get_json()["reason"] == "network"
+    assert sb.count(ANONIP) == PER_IP and sb.count(FAIRIP) == PER_IP and sb.count(GLOBAL) == PER_IP
+
+
+def test_a_fresh_browser_buys_three_more_but_a_network_stops_at_ten(client, auth_on, sb, llm):
+    """The bypass the reviewers found, end to end: reset the browser after every 3 guides."""
+    made = 0
+    for browser in range(4):                                          # 4 "private windows" on one network
+        for _ in range(3):
+            r = _post_text(client, device=f"device-priv-{browser:04d}")
+            if r.status_code != 200:
+                _refused(r, reason="network")
+                break
+            _done(r)
+            made += 1
+    assert made == PER_IP                                             # 3 + 3 + 3 + 1, then the network says sign in
+    _refused(_post_text(client, device="device-priv-9999"), reason="network")
+    _done(_post_text(client, headers=_bearer("user-7")))              # an account on that network is not affected
 
 
 def test_no_device_id_is_counted_per_ip_and_cannot_dodge_the_gate(client, auth_on, sb, llm):
     for _ in range(3):
         _done(_post_text(client, device=None))
-    _refused(_post_text(client, device=None))
+    # this allowance is the IP's (everyone on it who sends no id shares it), so the refusal says "network"
+    d = _refused(_post_text(client, device=None), reason="network")
+    assert d["error"] == EN_NETWORK
     assert sb.count(NOID) == 3
     assert sb.params("anon_consume", NOID)[0] == {"p_key": NOID, "p_limit": 3, "p_window_hours": 24}
     assert not any(k.startswith("gate:dev:") for k in sb.rows)
@@ -413,7 +443,7 @@ def test_no_device_id_is_counted_per_ip_and_cannot_dodge_the_gate(client, auth_o
 @pytest.mark.parametrize("bad", ["bad id!", "short", "x" * 65, "  "])
 def test_a_malformed_device_id_counts_as_none(client, auth_on, sb, llm, bad):
     sb.seed(NOID, 3)
-    _refused(_post_text(client, device=bad))
+    _refused(_post_text(client, device=bad), reason="network")
 
 
 def test_no_device_id_and_no_ip_still_meets_the_gate(sb, monkeypatch):
@@ -527,19 +557,20 @@ def test_a_validation_error_never_costs_a_use(client, auth_on, sb, llm):
 
 
 ROLLBACK = [
-    # the exhausted counter, the refusal, the counters taken before it (all must be given back)
-    (ANONIP, 401, "signin_required", [GATE]),
-    (FAIRIP, 429, "fair_use_ip",     [GATE, ANONIP]),
-    (POOL,   401, "signin_required", [GATE, ANONIP, FAIRIP]),
-    (GLOBAL, 503, "busy_today",      [GATE, ANONIP, FAIRIP, POOL]),
+    # the exhausted counter, the refusal (and its reason), the counters taken before it (all must be given back)
+    (ANONIP, 401, "signin_required", "network", [GATE]),
+    (FAIRIP, 429, "fair_use_ip",     None,      [GATE, ANONIP]),
+    (POOL,   401, "signin_required", "pool",    [GATE, ANONIP, FAIRIP]),
+    (GLOBAL, 503, "busy_today",      None,      [GATE, ANONIP, FAIRIP, POOL]),
 ]
 
 
-@pytest.mark.parametrize("full,status,code,taken", ROLLBACK, ids=["anonip", "ip", "anon-pool", "global"])
-def test_a_later_refusal_rolls_back_the_counters_already_taken(client, auth_on, sb, llm, full, status, code, taken):
+@pytest.mark.parametrize("full,status,code,reason,taken", ROLLBACK, ids=["anonip", "ip", "anon-pool", "global"])
+def test_a_later_refusal_rolls_back_the_counters_already_taken(client, auth_on, sb, llm, full, status, code, reason, taken):
     sb.seed(full, 10 ** 6)
     r = _post_text(client)
     assert r.status_code == status and r.get_json()["code"] == code
+    assert r.get_json().get("reason") == reason                # only the sign-in refusal carries a reason
     assert sb.keys("anon_refund") == taken                    # each one given back, once, in order
     assert sb.spent() == {full: 10 ** 6}                      # the free use included: it was not burned
     assert llm == []
@@ -591,6 +622,7 @@ def test_a_failing_gate_does_not_hide_an_exhausted_ip_cap(sb):
     sb.seed(ANONIP, 10 ** 6)
     charge, err = _charge()
     assert charge is None and err[1] == 401 and err[0].get_json()["code"] == "signin_required"
+    assert err[0].get_json()["reason"] == "network"
 
 
 # ── 8. the demo and existing guides are never gated ──────────────────────────────
@@ -786,6 +818,106 @@ def test_every_sign_in_refusal_is_logged_for_the_funnel(client, auth_on, sb, llm
     assert "fair-use refusal" in caplog.text and "signin_required" in caplog.text
 
 
+# ── 13. WHY: device / network / pool, each with its own true words ───────────────
+REASONS = [
+    # the exhausted counter, the reason, the English text
+    (GATE,   "device",  EN_TEXT),
+    (ANONIP, "network", EN_NETWORK),
+    (POOL,   "pool",    EN_POOL),
+]
+
+
+@pytest.mark.parametrize("full,reason,text", REASONS, ids=[r[1] for r in REASONS])
+@pytest.mark.parametrize("name,post", ENDPOINTS, ids=EP_IDS)
+def test_the_refusal_says_why_on_every_endpoint(client, auth_on, sb, llm, name, post, full, reason, text):
+    sb.seed(full, 10 ** 6)
+    d = _refused(post(client), reason=reason)
+    assert d["error"] == text
+    assert llm == [] and sb.spent() == {full: 10 ** 6}
+
+
+def test_a_visitor_who_made_no_guides_is_never_told_they_used_their_own(client, auth_on, sb, llm):
+    """The false text the reviewers found: the network's (or the whole anonymous pool's) allowance
+    is gone, this browser has made nothing, and it was told "You've used your 3 free guides"."""
+    for full, reason in ((ANONIP, "network"), (POOL, "pool")):
+        sb.rows.clear()
+        sb.seed(full, 10 ** 6)
+        for lang in ("en", "ar"):
+            d = _refused(_post_text(client, device="device-new-00001", language=lang), reason=reason)
+            for false_claim in ("You've used your", "your 3 free guides", "لقد استخدمت", "أدلتك المجانية"):
+                assert false_claim not in d["error"], (reason, lang, d["error"])
+            assert _has_arabic(d["error"]) is (lang == "ar")
+        assert sb.count("gate:dev:device-new-00001") == 0     # and it still has all three for another day / network
+
+
+def test_all_three_refusals_end_with_the_same_call_to_action():
+    with appmod.app.test_request_context("/"):
+        en = [appmod._fair_refusal("signin_required", False, r)[0].get_json() for r in ("device", "network", "pool")]
+        ar = [appmod._fair_refusal("signin_required", True, r)[0].get_json() for r in ("device", "network", "pool")]
+    assert [d["error"] for d in en] == [EN_TEXT, EN_NETWORK, EN_POOL]
+    assert [d["reason"] for d in en] == [d["reason"] for d in ar] == ["device", "network", "pool"]
+    assert all(d["error"].endswith(" " + CTA) for d in en)
+    assert all(d["error"].endswith(" " + AR_CTA) and _has_arabic(d["error"]) for d in ar)
+    assert len({d["error"] for d in en}) == 3 and len({d["error"] for d in ar}) == 3
+    assert "شبكتك" in ar[1]["error"] and "شبكتك" not in ar[2]["error"] and "اليوم" in ar[1]["error"] and "اليوم" in ar[2]["error"]
+    assert "network" in en[1]["error"] and "network" not in en[2]["error"]
+    for d in en + ar:
+        assert d["code"] == "signin_required" and d["free_uses"] == 3
+
+
+def test_the_reason_is_always_one_of_the_three(monkeypatch):
+    with appmod.app.test_request_context("/"):
+        for odd in (None, "", "nonsense", 7):
+            d = appmod._fair_refusal("signin_required", False, odd)[0].get_json()
+            assert d["reason"] == "device" and d["error"] == EN_TEXT
+        # the other refusals carry no reason at all
+        for code in ("fair_use_ip", "fair_use_user", "busy_today"):
+            assert "reason" not in appmod._fair_refusal(code)[0].get_json()
+            assert "reason" not in appmod._fair_refusal(code, False, "network")[0].get_json()
+
+
+@pytest.mark.parametrize("n", [0, 1, 2, 3, 5, 11])
+@pytest.mark.parametrize("reason", ["device", "network", "pool"])
+def test_no_reason_text_promises_too_much(monkeypatch, n, reason):
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", n)
+    with appmod.app.test_request_context("/"):
+        for ar in (False, True):
+            text = appmod._fair_refusal("signin_required", ar, reason)[0].get_json()["error"]
+            assert _has_arabic(text) is ar
+            low = text.lower()
+            for banned in ("unlimited", "غير محدود", "بلا حدود", "بدون حدود", "no sign-up", "no account needed",
+                           "token", "upgrade", "subscribe", "اشتراك", "tomorrow", "غدًا"):
+                assert banned not in low, (n, reason, banned)
+            assert ("free account" in low) or ("حساب" in text and "مجاني" in text)
+            if reason != "device":
+                assert "you've used" not in low and "استخدمت" not in text
+
+
+def test_zero_free_uses_is_the_device_reason_with_its_own_words(client, auth_on, sb, llm, monkeypatch):
+    monkeypatch.setattr(appmod, "ANON_FREE_USES", 0)
+    d = _refused(_post_text(client), 0, reason="device")
+    assert d["error"] == "Create a free account to make study guides - it's free."
+    assert "used" not in d["error"]                               # nobody "used" anything: there were none
+
+
+def test_the_refusal_log_line_names_the_reason_for_the_funnel(client, auth_on, sb, llm, caplog):
+    sb.seed(ANONIP, 10 ** 6)
+    with caplog.at_level("INFO", logger="app"):
+        _refused(_post_text(client), reason="network")
+    assert "fair-use refusal code=signin_required status=401 reason=network" in caplog.text
+    assert DEV not in caplog.text and IP not in caplog.text       # the counter's name, never the visitor
+
+
+def test_config_anon_remaining_stays_the_device_counter(client, auth_on, sb, llm):
+    """A used-up network or anonymous pool is not this device's count: /api/config keeps reporting
+    what the DEVICE has left, so the client never tells a visitor their own guides are gone."""
+    sb.seed(ANONIP, 10 ** 6)
+    sb.seed(POOL, 10 ** 6)
+    d = client.get("/api/config", headers={"X-Device-Id": DEV}).get_json()
+    assert d["anon_remaining"] == 3 and d["anon_free_limit"] == 3 and d["signin_after"] == 3
+    assert "reason" not in d
+
+
 # ── 11. ALIMNE_FREE_MODE=0 is exactly the old token system ───────────────────────
 def test_legacy_anonymous_is_the_old_402_and_never_meets_the_gate(client, auth_on, sb, llm, legacy_tokens, monkeypatch):
     monkeypatch.setattr(appmod, "_anon_durable_consume", lambda dev: (False, 0))
@@ -879,7 +1011,7 @@ def _import_knobs(**env):
 
 
 def test_knob_defaults_and_overrides_at_import():
-    assert _import_knobs() == {"ANON_FREE_USES": 3, "ANON_USES_WINDOW_HOURS": LONG, "FAIR_ANON_IP_DAILY": 30,
+    assert _import_knobs() == {"ANON_FREE_USES": 3, "ANON_USES_WINDOW_HOURS": LONG, "FAIR_ANON_IP_DAILY": 10,
                                "FAIR_DEVICE_DAILY": 10, "FAIR_USER_DAILY": 40, "FREE_MODE": True}
     # the retired device knob is still read, harmlessly: it changes nothing about the gate
     k = _import_knobs(ANON_FREE_USES=" 5 ", ANON_USES_WINDOW_HOURS="720", FAIR_ANON_IP_DAILY="12",
@@ -899,7 +1031,7 @@ def _knobs(monkeypatch, **env):
 
 
 def test_the_module_constants_come_from_the_knob_parser(monkeypatch):
-    assert _knobs(monkeypatch) == (3, LONG, 30)
+    assert _knobs(monkeypatch) == (3, LONG, 10)
     assert _knobs(monkeypatch, ANON_FREE_USES="4", ANON_USES_WINDOW_HOURS="48", FAIR_ANON_IP_DAILY="9") == (4, 48, 9)
 
 
@@ -911,7 +1043,7 @@ def test_the_module_constants_come_from_the_knob_parser(monkeypatch):
 ], ids=["blank", "garbage", "not-integers", "negative"])
 def test_knob_nonsense_falls_back_to_the_safe_defaults(monkeypatch, uses, window, per_ip):
     assert _knobs(monkeypatch, ANON_FREE_USES=uses, ANON_USES_WINDOW_HOURS=window,
-                  FAIR_ANON_IP_DAILY=per_ip) == (3, LONG, 30)
+                  FAIR_ANON_IP_DAILY=per_ip) == (3, LONG, 10)
 
 
 def test_knob_zero_is_meaningful_only_where_it_is_safe(monkeypatch):

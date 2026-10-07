@@ -335,6 +335,8 @@ ANON_CASES = [
     ("anon",   "signin_required", 401, ["gate", "anonip", "ip"]),   # the anonymous slice of the global budget
     ("global", "busy_today",      503, ["gate", "anonip", "ip", "anon"]),
 ]
+# WHY a sign-in refusal was given (the 401 body's `reason`): each cause has its own, true, text
+SIGNIN_REASON = {"gate": "device", "anonip": "network", "anon": "pool"}
 
 
 @pytest.mark.parametrize("which,code,status,taken_before", ANON_CASES, ids=[c[0] for c in ANON_CASES])
@@ -349,6 +351,7 @@ def test_exhausted_counter_refuses_and_rolls_back_the_ones_already_taken(
     assert d["code"] == code and d["error"]
     assert d["code"] not in ("no_tokens", "signin_for_more", "fair_use_device")
     assert d.get("free_uses") == (appmod.ANON_FREE_USES if code == "signin_required" else None)
+    assert d.get("reason") == SIGNIN_REASON.get(which)       # None for the refusals that are not about signing in
     # the exhausted counter was not touched; every one taken before it was given back
     assert sb.counts[key[which]] == 10 ** 6
     assert all(sb.counts.get(key[w], 0) == 0 for w in key if w != which)
@@ -397,7 +400,7 @@ def test_caps_are_the_configured_knobs(client, auth_on, sb, llm, monkeypatch):
     monkeypatch.setattr(appmod, "FAIR_ANON_IP_DAILY", 2)
     assert [_status(_post_text(client, device=f"device-cccc-000{i}")) for i in range(3)] == [200, 200, 401]
     sb.counts = {}
-    monkeypatch.setattr(appmod, "FAIR_ANON_IP_DAILY", 30)
+    monkeypatch.setattr(appmod, "FAIR_ANON_IP_DAILY", 10)
     monkeypatch.setattr(appmod, "FAIR_IP_DAILY", 1)
     assert [_status(_post_text(client, device=f"device-bbbb-000{i}")) for i in range(2)] == [200, 429]
     sb.counts = {}
@@ -420,7 +423,7 @@ def test_counters_use_the_documented_rpc_and_window(monkeypatch, sb):
         charge, err = appmod._charge_credit(None, appmod.request)
     assert err is None
     assert seen == [("anon_consume", {"p_key": f"gate:dev:{DEV}", "p_limit": 3, "p_window_hours": 87600}),
-                    ("anon_consume", {"p_key": f"fair:anonip:{IP}", "p_limit": 30, "p_window_hours": 24}),
+                    ("anon_consume", {"p_key": f"fair:anonip:{IP}", "p_limit": 10, "p_window_hours": 24}),
                     ("anon_consume", {"p_key": f"fair:ip:{IP}", "p_limit": 250, "p_window_hours": 24}),
                     ("anon_consume", {"p_key": "fair:global:anon", "p_limit": 1200, "p_window_hours": 24}),
                     ("anon_consume", {"p_key": "fair:global", "p_limit": 2000, "p_window_hours": 24})]
@@ -1101,7 +1104,7 @@ def test_knob_defaults_and_overrides_at_import():
                         "FAIR_GLOBAL_DAILY": 2000, "FAIR_ANON_SHARE_PCT": 60, "FAIR_CHAT_DAILY": 100,
                         "WEB_THREADS": 4, "GEN_MAX_CONCURRENT": 2, "GEN_MAX_WAITING": 1, "GEN_QUEUE_WAIT_S": 45.0,
                         "RATE_SUMMARIZE_PER_MIN": 30, "RATE_PRECHECK_PER_MIN": 5,
-                        "ANON_FREE_USES": 3, "ANON_USES_WINDOW_HOURS": 87600, "FAIR_ANON_IP_DAILY": 30}
+                        "ANON_FREE_USES": 3, "ANON_USES_WINDOW_HOURS": 87600, "FAIR_ANON_IP_DAILY": 10}
     k = _knobs(ALIMNE_FREE_MODE="0", FAIR_DEVICE_DAILY="7", FAIR_IP_DAILY="99", FAIR_USER_DAILY="5",
                FAIR_GLOBAL_DAILY="123", FAIR_ANON_SHARE_PCT="40", FAIR_CHAT_DAILY="9", WEB_THREADS="8",
                GEN_MAX_CONCURRENT="5", GEN_MAX_WAITING="2", GEN_QUEUE_WAIT_S="9.5", RATE_SUMMARIZE_PER_MIN="12",
@@ -1119,7 +1122,7 @@ def test_knob_defaults_and_overrides_at_import():
     assert k["FREE_MODE"] is True and k["FAIR_DEVICE_DAILY"] == 10 and k["GEN_MAX_CONCURRENT"] == 2
     assert k["GEN_QUEUE_WAIT_S"] == 45.0 and k["RATE_SUMMARIZE_PER_MIN"] == 30
     assert k["WEB_THREADS"] == 4 and k["RATE_PRECHECK_PER_MIN"] == 5 and k["FAIR_ANON_SHARE_PCT"] == 60
-    assert (k["ANON_FREE_USES"], k["ANON_USES_WINDOW_HOURS"], k["FAIR_ANON_IP_DAILY"]) == (3, 87600, 30)
+    assert (k["ANON_FREE_USES"], k["ANON_USES_WINDOW_HOURS"], k["FAIR_ANON_IP_DAILY"]) == (3, 87600, 10)
 
 
 def test_the_free_mode_code_adds_no_import_time_threads_or_lazy_imports():

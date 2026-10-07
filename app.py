@@ -853,8 +853,10 @@ _CHAT_USER_PER_MIN     = 10     # chat questions per signed-in user per minute
 # The sign-in gate: an anonymous visitor may make ANON_FREE_USES guides without an
 # account; after those they must sign in (a free account) to make more. It is a
 # LIFETIME allowance per device, not a daily one: its counter is read with the long
-# ANON_USES_WINDOW_HOURS window instead of 24 h. FAIR_ANON_IP_DAILY caps anonymous
-# guides per IP a day across ALL devices, so rotating the device id buys little.
+# ANON_USES_WINDOW_HOURS window instead of 24 h. A device is only an id the browser
+# keeps, so a private window, cleared site data or another browser is a NEW device
+# with its own free guides. FAIR_ANON_IP_DAILY is what bounds that: anonymous guides
+# per IP a day across ALL devices (default 10, about three browsers' worth).
 _ANON_USES_WINDOW_MAX_H = 876000   # 100 years. A window Postgres cannot subtract from now() makes the RPC raise, and a raising RPC fails OPEN
 
 def _anon_gate_knobs():
@@ -864,7 +866,7 @@ def _anon_gate_knobs():
     guide); a zero window is not (it would hand the free guides back at once)."""
     return (_env_num("ANON_FREE_USES", 3),
             min(_env_num("ANON_USES_WINDOW_HOURS", 87600, minimum=1), _ANON_USES_WINDOW_MAX_H),
-            _env_num("FAIR_ANON_IP_DAILY", 30))
+            _env_num("FAIR_ANON_IP_DAILY", 10))
 
 ANON_FREE_USES, ANON_USES_WINDOW_HOURS, FAIR_ANON_IP_DAILY = _anon_gate_knobs()
 
@@ -996,15 +998,32 @@ _FAIR_REFUSALS = {
 _AR_THE_COUNT = {3: "الثلاثة", 4: "الأربعة", 5: "الخمسة", 6: "الستة", 7: "السبعة",
                  8: "الثمانية", 9: "التسعة", 10: "العشرة"}
 
-def _signin_required_text(ar=False):
-    """The sign-in refusal in words, with the REAL allowance (ANON_FREE_USES), so
-    the number can never go stale. Signing in is free and stays free: it never
-    mentions a price, a plan or "unlimited"."""
+# WHY a sign-in refusal was given: the 401 body's `reason`. Each has its own words,
+# because only one of them is about what THIS visitor did:
+#   device   this browser's own free guides are used (the gate counter)
+#   network  the anonymous allowance of this network is used up for today (the per-IP
+#            cap across all devices, or the per-IP allowance of a request without a
+#            device id)
+#   pool     the guides everyone may make without an account are used up for today
+#            (the anonymous slice of the global budget)
+_SIGNIN_REASONS = ("device", "network", "pool")
+
+def _signin_required_text(ar=False, reason="device"):
+    """The sign-in refusal in words. Only 'device' says "you've used your N free
+    guides" (with the REAL allowance, ANON_FREE_USES, so the number can never go
+    stale): a visitor refused because the network's or the whole anonymous pool's
+    allowance is gone may have made nothing at all, and is told what really
+    happened. All three end with the same call to action. Signing in is free and
+    stays free: no text mentions a price, a plan or "unlimited"."""
     n = ANON_FREE_USES
     if ar:
         tail = "أنشئ حسابًا مجانيًا للمتابعة — ما زال الاستخدام مجانيًا."
         if n <= 0:
             return "أنشئ حسابًا مجانيًا لإنشاء أدلة الدراسة — الاستخدام مجاني."
+        if reason == "network":
+            return "استُنفدت اليوم الأدلة المجانية المتاحة على شبكتك دون حساب. " + tail
+        if reason == "pool":
+            return "استُنفدت اليوم الأدلة المجانية المتاحة دون حساب. " + tail
         if n == 1:
             return "لقد استخدمت دليلك المجاني. " + tail
         if n == 2:
@@ -1013,6 +1032,10 @@ def _signin_required_text(ar=False):
     tail = "Create a free account to keep going - it's still free."
     if n <= 0:
         return "Create a free account to make study guides - it's free."
+    if reason == "network":
+        return "Today's free guides without an account are used up on your network. " + tail
+    if reason == "pool":
+        return "Today's free guides without an account are used up. " + tail
     if n == 1:
         return "You've used your free guide. " + tail
     return "You've used your %d free guides. " % n + tail
@@ -1036,17 +1059,22 @@ def _anon_rule_text():
         ar = "أول %d دليلًا دراسيًا لا تحتاج إلى حساب، وبعدها يلزم إنشاء حساب مجاني لإنشاء المزيد." % n
     return ("Your first %d study guides need no account; after that, a free account is required to make more." % n, ar)
 
-def _fair_refusal(code, ar=False):
+def _fair_refusal(code, ar=False, reason=None):
     """A fair-use refusal as (JSON response, status). 'signin_required' is the
     sign-in gate: 401 (an account is needed — nothing is "too many") with
-    `free_uses`, so the client can word its own prompt."""
-    extra = {}
+    `free_uses` and `reason` (one of _SIGNIN_REASONS: why the account is needed),
+    so the client can word its own prompt truthfully. The other refusals carry no
+    reason."""
+    extra, tail = {}, ""
     if code == "signin_required":
-        status, msg, extra = 401, _signin_required_text(ar), {"free_uses": max(0, ANON_FREE_USES)}
+        reason = reason if reason in _SIGNIN_REASONS else "device"
+        status, msg = 401, _signin_required_text(ar, reason)
+        extra, tail = {"free_uses": max(0, ANON_FREE_USES), "reason": reason}, " reason=" + reason
     else:
         status, en, ar_msg = _FAIR_REFUSALS[code]
         msg = ar_msg if ar else en
-    _log.info("fair-use refusal code=%s status=%s", code, status)   # so 'many refusals' can be alerted on
+    # so 'many refusals' can be alerted on; the reason tells the device's own gate from a used-up network
+    _log.info("fair-use refusal code=%s status=%s%s", code, status, tail)
     return jsonify({"error": msg, "code": code, **extra}), status
 
 def _ip_bucket(ip):
@@ -1081,8 +1109,9 @@ def _fair_charge(uid, req, data=None):
                  anonymous slice of the global budget, the global daily budget.
     An anonymous visitor past the gate — or on a network, or on a day, whose
     anonymous allowance is used up — is answered 401 'signin_required': a free
-    account is the way forward in each of those cases. A signed-in request never
-    touches a gate key.
+    account is the way forward in each of those cases, and the body's `reason`
+    says which one it was (device / network / pool, see _SIGNIN_REASONS). A
+    signed-in request never touches a gate key.
     A counter that can't be read fails open (see _fair_take), and all the lookups
     of one request share _FAIR_BUDGET_S: a slow database costs a request a few
     seconds at most, never a pinned web thread."""
@@ -1092,26 +1121,28 @@ def _fair_charge(uid, req, data=None):
     has_ip = bool(ip) and ip != "unknown"
     day = _FAIR_WINDOW_HOURS
     gate_key = None
-    plan = []                            # (counter key, limit, window hours, refusal code)
+    plan = []                            # (counter key, limit, window hours, refusal code, sign-in reason)
     if uid:
-        plan.append((f"fair:user:{uid}", FAIR_USER_DAILY, day, "fair_use_user"))
+        plan.append((f"fair:user:{uid}", FAIR_USER_DAILY, day, "fair_use_user", None))
     else:
         if ANON_FREE_USES <= 0:
             # No free guides at all: decided here, without the database, so a DB
             # hiccup can never fail this one open.
-            return None, _fair_refusal("signin_required", _wants_ar(data))
+            return None, _fair_refusal("signin_required", _wants_ar(data), "device")
         gate_key, gate_window = _anon_gate(dev, ip)
-        plan.append((gate_key, ANON_FREE_USES, gate_window, "signin_required"))
+        # A device id: the visitor's OWN free guides. No device id: the allowance is the
+        # IP's, shared by everyone on it who sends none, so its refusal is about the network.
+        plan.append((gate_key, ANON_FREE_USES, gate_window, "signin_required", "device" if dev else "network"))
         if has_ip:
-            plan.append((f"fair:anonip:{ipk}", FAIR_ANON_IP_DAILY, day, "signin_required"))
+            plan.append((f"fair:anonip:{ipk}", FAIR_ANON_IP_DAILY, day, "signin_required", "network"))
     if has_ip:
-        plan.append((f"fair:ip:{ipk}", FAIR_IP_DAILY, day, "fair_use_ip"))
+        plan.append((f"fair:ip:{ipk}", FAIR_IP_DAILY, day, "fair_use_ip", None))
     if not uid:
-        plan.append(("fair:global:anon", _fair_anon_limit(), day, "signin_required"))
-    plan.append(("fair:global", FAIR_GLOBAL_DAILY, day, "busy_today"))
+        plan.append(("fair:global:anon", _fair_anon_limit(), day, "signin_required", "pool"))
+    plan.append(("fair:global", FAIR_GLOBAL_DAILY, day, "busy_today", None))
     taken, anon_left = [], None
     t0 = time.monotonic()
-    for i, (key, limit, window, code) in enumerate(plan):
+    for i, (key, limit, window, code, reason) in enumerate(plan):
         if i and time.monotonic() - t0 > _FAIR_BUDGET_S:
             _log.warning("fair-use counters over their %.1fs time budget — failing open for %s and the rest",
                          _FAIR_BUDGET_S, _counter_label(key))
@@ -1119,7 +1150,7 @@ def _fair_charge(uid, req, data=None):
         got, left = _fair_take(key, limit, window)
         if got is False:
             _fair_refund(taken)          # an exhausted counter must not cost the others (the free use included)
-            return None, _fair_refusal(code, _wants_ar(data))
+            return None, _fair_refusal(code, _wants_ar(data), reason)
         if got is True:
             taken.append(key)
             if key == gate_key and left is not None:
