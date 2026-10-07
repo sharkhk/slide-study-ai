@@ -5,14 +5,17 @@
 //   node frontend/scripts/verify-login-flows.mjs
 //
 // verify-free-mode.mjs renders the components to a string: no effect runs there and nothing is clicked. The
-// things below can only be seen in a browser (two of them were found that way: a focus that fell to <body>, and
-// "Back to Google sign-in" turning into the Google button under a second Enter):
+// things below can only be seen in a browser (three of them were found that way: a focus that fell to <body>
+// between two views, the same when the dialog closed, and "Back to Google sign-in" turning into the Google
+// button under a second Enter):
 //   * ?join=1 on arrival: the sign-up dialog opens once, the mark comes off the address, and it stays out of the
 //     way of a link that came back with an error;
 //   * a failed Google return (bad_oauth_state) keeps the Google button; only an expired EMAIL link opens the
 //     email sign-in view;
 //   * the dialog takes the focus, Tab stays inside it, the focus follows the visitor between the Google view and
 //     the email view, and a second Enter or tap never acts on what took the place of the link just used;
+//   * when the dialog closes (Escape, the X, a click beside it) the focus goes back to the control that opened
+//     it: the top bar's "Sign in", or "Generate from Text" when the sign-in gate opened it;
 //   * a normal browser can ask Supabase to sign in, never to sign up; another app's browser can do both;
 //   * "Open in browser": the address it asks for (intent:// in the named Android apps, x-safari-https:// on
 //     iPhone, none in an unknown Android web view), the way by hand about 2 s later when the page is still in
@@ -135,10 +138,10 @@ const CORS = [{ name: 'Access-Control-Allow-Origin', value: '*' }, { name: 'Acce
 const b64 = (s) => Buffer.from(s).toString('base64')
 const json = (code, obj, extra = []) => ({ responseCode: code, responseHeaders: [{ name: 'Content-Type', value: 'application/json' }, ...extra], body: b64(JSON.stringify(obj)) })
 
-function reply(req) {
+function reply(req, config = CONFIG) {
   const u = new URL(req.url)
   if (u.origin === ORIGIN) {
-    if (u.pathname === '/api/config') return json(200, CONFIG)
+    if (u.pathname === '/api/config') return json(200, config)
     if (u.pathname.startsWith('/api/')) return json(404, { error: 'not found' })
     const file = path.resolve(dist, '.' + (u.pathname === '/' ? '/index.html' : u.pathname))
     if (file.startsWith(dist + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile())
@@ -232,7 +235,7 @@ const PHONE = { width: 390, height: 844, deviceScaleFactor: 2, mobile: true }
 const DESK = { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false }
 
 // ── one page: its own browser context (fresh storage), every request answered here ───
-async function openPage(where, { ua = UA.desktop, screen = DESK } = {}) {
+async function openPage(where, { ua = UA.desktop, screen = DESK, config = CONFIG } = {}) {
   const { browserContextId } = await send('Target.createBrowserContext')
   const { targetId } = await send('Target.createTarget', { url: 'about:blank', browserContextId })
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true })
@@ -240,7 +243,7 @@ async function openPage(where, { ua = UA.desktop, screen = DESK } = {}) {
   const page = { requests: [], asked: [], errors: [], refused: [], reached: 0 }
   listeners.set(sessionId, (method, p) => {
     if (method === 'Fetch.requestPaused') {
-      const r = reply(p.request)
+      const r = reply(p.request, config)
       page.requests.push({ url: p.request.url, method: p.request.method, body: p.request.postData || '' })
       if (r) cdp('Fetch.fulfillRequest', { requestId: p.requestId, ...r }).catch(() => {})
       else { page.refused.push(p.request.url); cdp('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' }).catch(() => {}) }
@@ -431,6 +434,7 @@ try {
       await page.ev(`!!window.__back && !document.contains(window.__back) && window.__back !== __t.btn(${JSON.stringify(GOOGLE)})`))
     check('...and a second Enter does NOT start the Google sign-in', authorize(page).length === 0 && await page.ev('location.origin') === ORIGIN, authorize(page).map(r => r.url).join(' | '))
     check('Escape closes the dialog', (await page.press('Escape'), await page.until('!__t.dialog()', 2000)))
+    check('...and with no control that opened it (it opened by itself), the focus is sent nowhere', await page.ev('__t.active()') === 'BODY', await page.ev('__t.active()'))
   })
 
   await run('1b. a normal browser on a phone: a double tap, and the Google button', '/?join=1', { ua: UA.iosSafari, screen: PHONE }, async (page) => {
@@ -486,6 +490,52 @@ try {
     await sleep(1200)
     check('...and the sign-up dialog does not replace it', await page.ev(titleIs(TITLE.email)) && !await page.ev(titleIs(TITLE.signup)))
     check('both marks come off the address', await page.ev('__t.at()') === '/', await page.ev('__t.at()'))
+  })
+
+  // ── 2e/2f. closing the dialog: the focus goes back to what opened it ────────────────
+  await run('2e. closing the dialog gives the keyboard focus back to the control that opened it', '/', {}, async (page) => {
+    const opener = `__t.pageBtn('Sign in')`
+    const openByKey = async () => { await page.focus(opener); await page.press('Enter'); return page.until(titleIs(TITLE.signin)) }
+    const backOnOpener = async () => await page.until('!__t.dialog()', 3000) && await page.ev(`document.activeElement === ${opener}`)
+    check('Enter on "Sign in" in the top bar opens the dialog, and the dialog takes the focus', await openByKey() &&
+      await page.ev(`document.activeElement.id === 'login-title'`), await page.ev('__t.active()'))
+    await page.press('Escape')
+    check('Escape closes it, and the focus is back on "Sign in" (not on <body>, the top of the page)', await backOnOpener(), await page.ev('__t.active()'))
+    await page.press('Tab')
+    check('...so the next Tab goes on from there, not from the first link of the page', await page.ev(`(() => { const a = document.activeElement, from = ${opener}
+      return a !== document.body && a !== from && !!(from.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING) })()`), await page.ev('__t.active()'))
+    await openByKey()
+    await page.click(`__t.dialog().querySelector('.modal-close')`)
+    check('the X closes it with the focus back on "Sign in"', await backOnOpener(), await page.ev('__t.active()'))
+    await page.click(opener)
+    await page.until(titleIs(TITLE.signin))
+    await page.point(`__t.btn(${JSON.stringify(GOOGLE)})`)   // the dialog has stopped moving
+    const beside = await page.ev(`(() => { const x = 6, y = Math.round(innerHeight / 2); return document.elementFromPoint(x, y) === __t.dialog().parentElement ? { x, y } : null })()`)
+    if (beside) await page.tapAt(beside)
+    check('a click beside the dialog closes it with the focus back on "Sign in"', !!beside && await backOnOpener(), await page.ev('__t.active()'))
+    // a focus that is somewhere else on the page by then is the visitor's: it is not taken away
+    await openByKey()
+    const other = `document.querySelector('#root a[href]')`
+    await page.focus(other)
+    await page.press('Escape')
+    check('a focus that is elsewhere on the page when the dialog closes stays where it is', await page.until('!__t.dialog()', 3000) &&
+      await page.ev(`!!${other} && document.activeElement === ${other}`), await page.ev('__t.active()'))
+  })
+
+  await run('2f. the sign-in gate reached by keyboard: closing it leaves the visitor on "Generate from Text"', '/', { config: { ...CONFIG, anon_remaining: 0 } }, async (page) => {
+    const generate = `__t.pageBtn('Generate from Text')`, words = 'Photosynthesis turns light, water and air into sugar.'
+    await page.click(`__t.pageBtn('Paste Text / URL')`)
+    await page.until(`!!document.querySelector('textarea.text-input')`)
+    await page.focus(`document.querySelector('textarea.text-input')`); await page.type(words)
+    check('with text in the box, "Generate from Text" can be used', await page.until(`!!${generate} && !${generate}.disabled`))
+    await page.focus(generate); await page.press('Enter')
+    check('no free guide left: Enter on it opens the sign-up dialog with the reason, takes the focus, and sends nothing',
+      await page.until(titleIs(TITLE.signup)) && await page.ev(`__t.inDialog() && !!__t.dialog().querySelector('[role="status"]') && __t.dialog().querySelector('[role="status"]').textContent.trim().length > 0`) &&
+      page.to(ORIGIN + '/api/summarize-text').length === 0, await page.ev('__t.text()'))
+    await page.press('Escape')
+    check('Escape closes it and the focus is back on "Generate from Text": the visitor goes on from where they were',
+      await page.until('!__t.dialog()', 3000) && await page.ev(`document.activeElement === ${generate}`), await page.ev('__t.active()'))
+    check('...with the text still in its box', await page.ev(`document.querySelector('textarea.text-input').value`) === words)
   })
 
   // ── 3. browsers where Google works: no in-app view ─────────────────────────────────

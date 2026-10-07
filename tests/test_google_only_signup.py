@@ -203,7 +203,8 @@ def test_the_dialog_is_named_takes_the_focus_and_keeps_the_keyboard_inside():
     """Found by driving the bundle in a browser (verify-login-flows.mjs repeats it): the link that opened the email
     view was unmounted with the focus on it, so the focus fell to <body> and Tab walked the page behind the dialog;
     and "Back to Google sign-in" and "Continue with Google" were the same DOM button (unkeyed siblings), so a
-    second Enter on Back started the Google redirect."""
+    second Enter on Back started the Google redirect. And once the dialog took the focus, closing it left the focus
+    on <body>: the next Tab started from the top of the page instead of from the button that had opened it."""
     modal = _modal(_src())
     in_app, email_view, default, _ = _views(modal)
     # no control of one view is ever reused as a control of another
@@ -221,7 +222,14 @@ def test_the_dialog_is_named_takes_the_focus_and_keeps_the_keyboard_inside():
     assert 'role="dialog" aria-modal="true" aria-labelledby="login-title" ref={boxRef}' in modal
     assert '<div id="login-title" tabIndex={-1} ref={titleRef} ' in modal and "onKeyDown={keepTabInside}" in modal
     # the focus goes to the title: not to a button (a stray Enter would start a sign-in), not to the box itself
-    assert "  useEffect(() => { titleRef.current?.focus?.() }, [])\n" in modal
+    mount = _block(modal, r"  useEffect\(\(\) => \{\n    const opener = document\.activeElement, box = boxRef\.current\n", r"\n  \}, \[\]\)")
+    assert modal.count("titleRef.current?.focus?.()") == 1 and mount.index("titleRef.current?.focus?.()") < mount.index("return () => {")
+    # ...and when the dialog closes it goes back to the control that had it before (remembered BEFORE the title takes
+    # it), unless the visitor has put it elsewhere on the page meanwhile. The page is not scrolled by it.
+    closing = mount[mount.index("return () => {"):]
+    assert "const at = document.activeElement" in closing
+    assert "const left = !at || at === document.body || !document.contains(at) || !!box?.contains(at)" in closing
+    assert "if (left && opener && opener !== document.body && document.contains(opener)) opener.focus?.({ preventScroll: true })" in closing
     assert "boxRef.current?.focus" not in modal and "autoFocus" not in modal
     assert "useEscapeKey(onClose)" in modal
     trap = _block(modal, r"  const keepTabInside = \(e\) => \{", r"\n  \}\n")
@@ -538,7 +546,9 @@ def test_the_served_bundle_is_the_google_only_client():
                    "Accounts are created with Google", "We never see your Google password",
                    # after review: the wider test for an embedded browser, the named dialog, the reworded lines
                    "LinkedInApp", "MicroMessenger", "login-title", "open Alimne in your browser and sign in with Google.",
-                   "Downloads may not work inside this app.", "Google: for sign-in with your Google account"):
+                   "Downloads may not work inside this app.", "Google: for sign-in with your Google account",
+                   # after the second review: the focus goes back to what opened the dialog (the bundle's only preventScroll)
+                   "preventScroll"):
         assert marker in js, f"{name} is missing {marker!r} - rebuild: cd frontend && npm run build"
     for stale in ("create your account in a minute", "or use email below", "Use Continue with Google.", "doesn't work inside this app",
                   "inside Instagram/TikTok"):
@@ -585,6 +595,31 @@ def test_the_manual_does_not_overstate_what_the_client_side_rule_holds():
 
 # ── 8. the dialog in a real browser ───────────────────────────────────────────
 _HAVE_NODE = shutil.which("node")
+
+
+def test_the_browser_script_checks_where_the_focus_goes_when_the_dialog_closes():
+    """Second review: the dialog took the focus when it opened and nothing gave it back, so Escape left a keyboard
+    visitor on <body> and the next Tab started from the first link of the page. The script closes the dialog every
+    way a visitor can, and comes to the sign-in gate the way a keyboard does (Enter on "Generate from Text")."""
+    script = _read(FLOWS)
+    for must in ("'2e. closing the dialog gives the keyboard focus back to the control that opened it'",
+                 "'Escape closes it, and the focus is back on \"Sign in\" (not on <body>, the top of the page)'",
+                 "'...so the next Tab goes on from there, not from the first link of the page'",
+                 "'the X closes it with the focus back on \"Sign in\"'",
+                 "'a click beside the dialog closes it with the focus back on \"Sign in\"'",
+                 "'a focus that is elsewhere on the page when the dialog closes stays where it is'",
+                 "'2f. the sign-in gate reached by keyboard: closing it leaves the visitor on \"Generate from Text\"'",
+                 "'Escape closes it and the focus is back on \"Generate from Text\": the visitor goes on from where they were'",
+                 "'...and with no control that opened it (it opened by itself), the focus is sent nowhere'"):
+        assert must in script, f"verify-login-flows.mjs lost its check: {must}"
+    # the gate scenario is the client's own gate: a device with no free guide left, and nothing sent
+    assert "{ config: { ...CONFIG, anon_remaining: 0 } }" in script and "page.to(ORIGIN + '/api/summarize-text').length === 0" in script
+    # ...and the labels it presses are the ones the page shows
+    en = _pack(_src(), "en")
+    assert "'Paste Text / URL'" in _line(en, "tabText") and "'Generate from Text'" in _line(en, "textBtn")
+    assert "__t.pageBtn('Paste Text / URL')" in script and "__t.pageBtn('Generate from Text')" in script
+    # the manual says it too
+    assert "the focus goes back to the control that opened it" in re.sub(r"\s+", " ", _read(MANUAL))
 
 
 def test_the_browser_script_is_not_judged_by_its_own_clock():
@@ -641,10 +676,10 @@ def test_the_browser_script_is_not_judged_by_its_own_clock():
 @pytest.mark.skipif(not _HAVE_NODE, reason="node not available")
 def test_the_login_flows_in_a_real_browser():
     """Drives the bundle in dist/ in a local headless Chrome / Edge, offline (the script answers every request
-    itself): ?join=1 on arrival, a failed Google return, the keyboard focus, a double tap, which Supabase call a
-    normal browser and an in-app one can make, and "Open in browser". Skipped where no such browser is installed.
-    Nothing in it is judged by the script's own clock (see the top of the script), so a busy machine does not
-    change the result."""
+    itself): ?join=1 on arrival, a failed Google return, the keyboard focus (in the dialog, and back on what opened
+    it when it closes), a double tap, which Supabase call a normal browser and an in-app one can make, and "Open in
+    browser". Skipped where no such browser is installed. Nothing in it is judged by the script's own clock (see
+    the top of the script), so a busy machine does not change the result."""
     r = subprocess.run(["node", FLOWS], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=420)
     if r.returncode == 77:
         pytest.skip((r.stdout.strip().splitlines() or ["no browser"])[-1])

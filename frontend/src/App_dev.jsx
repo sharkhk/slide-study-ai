@@ -2298,7 +2298,18 @@ function LoginModal({ onClose, lang, sbClient, initialMode, initialEmail, notice
   // The dialog takes the focus when it opens: a keyboard or a screen reader starts inside it, not on the page behind.
   // It goes to the title, not to a button (an Enter must not start a sign-in nobody asked for) and not to the box
   // itself (the page's focus ring style would square its corners).
-  useEffect(() => { titleRef.current?.focus?.() }, [])
+  // When it closes, the focus goes back to the control that had it (the button that opened the dialog): whoever
+  // closes with Escape or the X goes on from where they were, not from the top of the page. Only a focus that was
+  // left in the dialog is moved; one the visitor has put elsewhere on the page meanwhile stays. The page is not scrolled.
+  useEffect(() => {
+    const opener = document.activeElement, box = boxRef.current
+    titleRef.current?.focus?.()
+    return () => {
+      const at = document.activeElement
+      const left = !at || at === document.body || !document.contains(at) || !!box?.contains(at)
+      if (left && opener && opener !== document.body && document.contains(opener)) opener.focus?.({ preventScroll: true })
+    }
+  }, [])
   // Between the Google view and the email view the control that was used goes away, and the focus would fall back
   // to the page behind. It goes to the email field, or back to the link that leads there (never to the Google button).
   useEffect(() => {
