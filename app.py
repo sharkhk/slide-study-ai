@@ -7752,6 +7752,11 @@ than 30 minutes is never used and is deleted the next time you open Alimne in th
                           " ولا يُرسَل إلينا قبل أن تضغط «توليد».")
     else:
         signin_copy = signin_copy_ar = ""
+    # How an account is made, and what it keeps (section 2), in one Arabic sentence. Both modes: the sign-in
+    # dialog is the same one. It must stay true to the client (LoginModal in App_dev.jsx: Google, and an email
+    # and a password inside in-app browsers) and to what _identity_from_payload stores.
+    account_ar = (" يُنشأ الحساب عبر Google، أو ببريد إلكتروني وكلمة مرور داخل متصفحات التطبيقات،"
+                  " ونحتفظ ببريدك الإلكتروني، ومعه اسمك وصورة ملفك الشخصي إن أُنشئ الحساب عبر Google، لتمييز حسابك.")
     body = """
 <h1>Privacy Policy</h1>
 <div class="updated">Last updated: 7 October 2026</div>
@@ -7768,7 +7773,7 @@ This policy explains what we handle and why.</p>
 ولا تُكتب على القرص ولا يطّلع عليها أي شخص، وتُحذف <strong>تلقائيًا خلال 15 دقيقة</strong> أو فورًا عند طلبك.
 لا نبيع بياناتك ولا نعرض إعلانات. الأدلة المشتركة: إذا اخترتَ «مشاركة» يُخزَّن الدليل الناتج (وليس ملفك الأصلي)
 ليبقى رابطه العام يعمل. ولتطبيق حدود الاستخدام العادل نحتفظ بعدّاد (رقم وتواريخ فقط، دون أي محتوى دراسي) مرتبط بمعرّف
-عشوائي لجهازك أو بعنوان IP أو بحسابك.""" + signin_copy_ar + """ النص الإنجليزي هو المرجع.</div>
+عشوائي لجهازك أو بعنوان IP أو بحسابك.""" + account_ar + signin_copy_ar + """ النص الإنجليزي هو المرجع.</div>
 
 <h2>1. Study content you submit</h2>
 <ul>
@@ -7783,8 +7788,15 @@ file) is stored so its public link keeps working until it is removed.</li>""" + 
 
 <h2>2. Account &amp; fair-use information</h2>
 <ul>
-<li>If you sign in, we store your <strong>email address</strong> and a display name/avatar (when provided by
-Google) in our authentication database (Supabase) to identify your account and """ + acct_use + """.</li>
+<li><strong>Your account:</strong> an account is created by continuing with Google. Google then gives us your
+<strong>email address</strong>, your name and your profile picture, with an identifier for your Google account.
+We store them in our authentication and account database (Supabase) to identify your account, to show it to you
+when you are signed in, and to """ + acct_use + """. We never see your Google password, and we ask Google
+for nothing else.</li>
+<li><strong>Email accounts:</strong> inside an in-app browser (a page opened inside another app), where Google
+does not allow its sign-in, an account can be created with an email address and a password instead, and accounts
+created that way earlier still work. For these we store your email address. The password goes directly to our
+authentication provider (Supabase) and is never sent to Alimne's own server.</li>
 <li>We use a session cookie / local storage entry to keep you signed in.</li>
 """ + counters + """
 </ul>
@@ -7806,7 +7818,7 @@ You may request access to, or deletion of, your account data or any usage counte
 <a href="mailto:sales@souc.ai">sales@souc.ai</a>.</p>
 
 <h2>6. Third-party services</h2>
-<p>We rely on Supabase (authentication, account database &amp; usage counters), Stripe (payments for existing subscribers), Groq (AI processing),
+<p>We rely on Supabase (authentication, account database &amp; usage counters), Google (sign-in), Stripe (payments for existing subscribers), Groq (AI processing),
 Render (hosting) and Cloudflare (DNS/network). Each processes data only as needed to provide the service.</p>
 
 <h2>7. Changes &amp; contact</h2>
@@ -7830,6 +7842,10 @@ def terms_page():
 <li><strong>Free account:</strong> """ + rule_en + """ Creating an account is free, and the
 Service stays free once you have one. The sample lecture, and opening, downloading or restoring study guides you
 have already made, never need an account. The number of study guides that need no account may change.</li>
+<li><strong>Creating an account:</strong> accounts are created with Google ("Continue with Google"). Inside an
+in-app browser (a page opened inside another app), where Google does not allow its sign-in, you can open Alimne in
+your browser, or create the account with an email address and a password. Our <a href="/privacy">Privacy Policy</a>
+says what an account keeps.</li>
 <li><strong>Fair use:</strong> to keep the Service available to everyone and to control costs, we apply daily limits
 on how many study guides an account can generate, as well as limits per network and an overall daily
 capacity. These limits may change at any
@@ -7842,6 +7858,7 @@ charges already made are non-refundable except where required by law.</li>
         summary_ar = """
 <div class="note" lang="ar" dir="rtl"><strong>باختصار:</strong> علّمني <strong>مجاني</strong> \u2014 لا حاجة لاشتراك
 مدفوع ولا لبطاقة ائتمان. """ + rule_ar + """ إنشاء الحساب مجاني، ويبقى الاستخدام مجانيًا بعده.
+يُنشأ الحساب عبر Google، أو ببريد إلكتروني وكلمة مرور داخل متصفحات التطبيقات حيث لا يسمح Google بتسجيل الدخول.
 تُطبَّق على الحسابات حدود <strong>استخدام عادل</strong> يومية قد تتغيّر،
 وقد تنتظر دورك في أوقات الازدحام. ومن اشترك سابقًا في خطة مدفوعة يمكنه إدارة اشتراكه أو إلغاءه في أي وقت من داخل
 التطبيق، وتُعالَج مدفوعاته عبر Stripe. النص الإنجليزي هو المرجع.</div>
