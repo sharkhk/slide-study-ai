@@ -1655,9 +1655,11 @@ def track_visitor():
 def admin_block():
     if not _admin_ok():
         return jsonify({"error": "Unauthorized"}), 401
-    ip = request.json.get("ip", "").strip()
-    if not ip:
+    data = request.get_json(silent=True)
+    ip = data.get("ip") if isinstance(data, dict) else None
+    if not isinstance(ip, str) or not ip.strip():
         return jsonify({"error": "No IP"}), 400
+    ip = ip.strip()
     with _vis_lock:
         _blocked_ips.add(ip)
     return jsonify({"ok": True, "blocked": ip})
@@ -1667,7 +1669,11 @@ def admin_block():
 def admin_unblock():
     if not _admin_ok():
         return jsonify({"error": "Unauthorized"}), 401
-    ip = request.json.get("ip", "").strip()
+    data = request.get_json(silent=True)
+    ip = data.get("ip", "") if isinstance(data, dict) else None
+    if not isinstance(ip, str):
+        return jsonify({"error": "No IP"}), 400
+    ip = ip.strip()
     with _vis_lock:
         _blocked_ips.discard(ip)
     return jsonify({"ok": True, "unblocked": ip})
@@ -1733,7 +1739,9 @@ def admin_user_grant():
     """Grant (or deduct) tokens for one user. Admin-only, header-authenticated."""
     if not _admin_ok():
         return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
     uid = str(data.get("user_id", "")).strip()
     try:
         amount = int(data.get("amount", 0))
@@ -1760,7 +1768,9 @@ def admin_user_cancel():
     the status). Otherwise the local status is downgraded to free. Admin-only."""
     if not _admin_ok():
         return jsonify({"error": "Unauthorized"}), 401
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
     uid = str(data.get("user_id", "")).strip()
     if not _UUID_RE.match(uid):
         return jsonify({"error": "invalid user_id"}), 400
