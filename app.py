@@ -5590,7 +5590,9 @@ def capture_lead():
     table."""
     if not _check_rate_limit(_client_ip(), scope="lead", limit=10):
         return jsonify({"error": "Too many requests. Please wait a moment."}), 429
-    data   = request.get_json(silent=True) or {}
+    data   = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = {}
     email  = str(data.get("email", "")).strip().lower()
     source = str(data.get("source", "paywall"))[:40]
     if not email or len(email) > 254 or not _EMAIL_RE.match(email):
