@@ -5692,6 +5692,12 @@ def _bad_field(exc, data=None):
 _NO_TEXT_EN = "No text or URL provided"
 _NO_TEXT_AR = "لم يتم إدخال أي نص أو رابط."
 
+# Un-coded generation errors are shown as sent, so they follow the request's language.
+_NO_CONTENT_EN  = "No readable content in this file"
+_NO_CONTENT_AR  = "لا يحتوي هذا الملف على نص يمكن قراءته."
+_YT_TOO_LONG_EN = "This video is too long. Maximum supported length is 50 minutes."
+_YT_TOO_LONG_AR = "هذا الفيديو طويل جدًا. أقصى مدة مدعومة هي 50 دقيقة."
+
 _BAD_URL_EN = "Only public http(s) URLs are supported — paste the full link, starting with https://"
 _BAD_URL_AR = "لا نقبل إلا الروابط العامة (http أو https) — الصق الرابط كاملًا بدءًا بـ https://"
 
@@ -5930,7 +5936,7 @@ def summarize_stream():
             if not any(s["content"] or s["title"] for s in slides):
                 settled = True
                 charge.refund()
-                yield _sse({"error": "No readable content in this file"}); return
+                yield _sse({"error": _NO_CONTENT_AR if ar else _NO_CONTENT_EN}); return
 
             total = len([s for s in slides if s["content"].strip()])
 
@@ -7247,7 +7253,7 @@ def youtube_transcript():
     # Reject videos longer than 50 minutes (checked before consuming a token)
     _dur = _yt_duration(video_id)
     if _dur and _dur > 3000:
-        return jsonify({"error": "This video is too long. Maximum supported length is 50 minutes."}), 400
+        return jsonify({"error": _YT_TOO_LONG_AR if _wants_ar(data) else _YT_TOO_LONG_EN}), 400
 
     charge, err = _charge_credit(uid, request, data)
     if err:
