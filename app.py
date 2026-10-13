@@ -6177,6 +6177,16 @@ def share_guide(job_id):
         return _job_expired_json()
     # Sharing is idempotent per guide: a second tap (or a script) gets the SAME link
     # back and stores nothing new, so the shared_guides table cannot be filled from here.
+    # The per-guide lock spans the check AND the insert, so a second tap that lands
+    # while the first insert is still in flight waits for it and gets its link.
+    with _jobs_lock:
+        share_lock = job.setdefault("share_lock", threading.Lock())
+    with share_lock:
+        return _share_guide_locked(job)
+
+
+def _share_guide_locked(job):
+    """share_guide's body; the caller holds this job's share_lock."""
     with _jobs_lock:
         known = job.get("share_slug")
     if known:
