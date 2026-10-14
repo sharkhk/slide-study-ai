@@ -7396,6 +7396,22 @@ def _decode_html(content, content_type):
     except UnicodeDecodeError:
         return content.decode("cp1252", "replace")
 
+class _UrlFetchError(ValueError):
+    """A URL-fetch failure the visitor sees: str() is the English text, .ar the Arabic."""
+    def __init__(self, en, ar):
+        super().__init__(en)
+        self.ar = ar
+
+_URL_NOT_PAGE_EN = ("This link is a file, not a web page — download it and upload it in "
+                    "the Upload File tab instead.")
+_URL_NOT_PAGE_AR = "هذا الرابط ملف وليس صفحة ويب — نزّله ثم ارفعه من تبويب «رفع ملف»."
+
+def _is_page_type(content_type):
+    """True for a web page or text (or no Content-Type at all); False for a file."""
+    mime = (content_type or "").split(";", 1)[0].strip().lower()
+    return (not mime or mime.startswith("text/") or "html" in mime
+            or mime.endswith("/xml") or mime.endswith("+xml"))
+
 def _fetch_url_text(url):
     """Fetch a PUBLIC webpage and extract readable text. SSRF guard: public
     http(s) only, no private/internal addresses, no redirects, 5 MB cap. The
@@ -7428,6 +7444,8 @@ def _fetch_url_text(url):
         if 300 <= r.status_code < 400:
             raise ValueError("URL redirects are not supported — paste the final URL.")
         r.raise_for_status()
+        if not _is_page_type(r.headers.get("Content-Type")):   # a PDF / image / .pptx link
+            raise _UrlFetchError(_URL_NOT_PAGE_EN, _URL_NOT_PAGE_AR)
         content = r.raw.read(5 * 1024 * 1024 + 1, decode_content=True)
         if len(content) > 5 * 1024 * 1024:
             raise ValueError("Page too large (max 5 MB).")
@@ -7627,7 +7645,8 @@ def summarize_text():
             text = _fetch_url_text(url)
         except ValueError as e:
             charge.refund()
-            return jsonify({"error": str(e)}), 400
+            ar_text = getattr(e, "ar", None)
+            return jsonify({"error": ar_text if ar_text and _wants_ar(data) else str(e)}), 400
         except Exception:
             charge.refund()
             raise
