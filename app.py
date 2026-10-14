@@ -7406,6 +7406,17 @@ _URL_NOT_PAGE_EN = ("This link is a file, not a web page — download it and upl
                     "the Upload File tab instead.")
 _URL_NOT_PAGE_AR = "هذا الرابط ملف وليس صفحة ويب — نزّله ثم ارفعه من تبويب «رفع ملف»."
 
+_URL_NO_HOST_EN  = "Couldn't find this website — check the link and try again."
+_URL_NO_HOST_AR  = "تعذّر العثور على هذا الموقع — تحقّق من الرابط وحاول مرة أخرى."
+_URL_REDIRECT_EN = "This link redirects to another page — open it and paste the final link instead."
+_URL_REDIRECT_AR = "هذا الرابط يحوّل إلى صفحة أخرى — افتحه والصق الرابط النهائي بدلًا منه."
+_URL_TOO_BIG_EN  = "This page is too large (max 5 MB) — copy its text and paste it instead."
+_URL_TOO_BIG_AR  = "هذه الصفحة كبيرة جدًا (الحد الأقصى 5 ميغابايت) — انسخ نصها والصقه بدلًا من ذلك."
+_URL_STATUS_EN   = "Couldn't open this link (the site answered {code}) — check it, or copy the page's text and paste it instead."
+_URL_STATUS_AR   = "تعذّر فتح هذا الرابط (ردّ الموقع بالرمز {code}) — تحقّق منه، أو انسخ نص الصفحة والصقه بدلًا من ذلك."
+_URL_UNREACH_EN  = "Couldn't reach this link — check it, or copy the page's text and paste it instead."
+_URL_UNREACH_AR  = "تعذّر الوصول إلى هذا الرابط — تحقّق منه، أو انسخ نص الصفحة والصقه بدلًا من ذلك."
+
 def _is_page_type(content_type):
     """True for a web page or text (or no Content-Type at all); False for a file."""
     mime = (content_type or "").split(";", 1)[0].strip().lower()
@@ -7425,7 +7436,7 @@ def _fetch_url_text(url):
     try:
         infos = socket.getaddrinfo(p.hostname, port, proto=socket.IPPROTO_TCP)
     except OSError:
-        raise ValueError("Could not resolve URL host.")
+        raise _UrlFetchError(_URL_NO_HOST_EN, _URL_NO_HOST_AR)
     pinned_ip = None
     for info in infos:
         addr = ipaddress.ip_address(info[4][0])
@@ -7435,24 +7446,28 @@ def _fetch_url_text(url):
         if pinned_ip is None:
             pinned_ip = str(addr)
     if not pinned_ip:
-        raise ValueError("Could not resolve URL host.")
+        raise _UrlFetchError(_URL_NO_HOST_EN, _URL_NO_HOST_AR)
     sess = http.Session()
     sess.mount(f"{p.scheme}://", _PinnedIPAdapter(p.hostname, pinned_ip, p.scheme == "https"))
     try:
         r = sess.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"},
                      allow_redirects=False, stream=True)
         if 300 <= r.status_code < 400:
-            raise ValueError("URL redirects are not supported — paste the final URL.")
-        r.raise_for_status()
+            raise _UrlFetchError(_URL_REDIRECT_EN, _URL_REDIRECT_AR)
+        if r.status_code >= 400:   # never the raw "… for url: https://<pinned IP>/…" text
+            _log.warning("URL fetch answered HTTP %s", r.status_code)
+            raise _UrlFetchError(_URL_STATUS_EN.format(code=r.status_code),
+                                 _URL_STATUS_AR.format(code=r.status_code))
         if not _is_page_type(r.headers.get("Content-Type")):   # a PDF / image / .pptx link
             raise _UrlFetchError(_URL_NOT_PAGE_EN, _URL_NOT_PAGE_AR)
         content = r.raw.read(5 * 1024 * 1024 + 1, decode_content=True)
         if len(content) > 5 * 1024 * 1024:
-            raise ValueError("Page too large (max 5 MB).")
+            raise _UrlFetchError(_URL_TOO_BIG_EN, _URL_TOO_BIG_AR)
     except ValueError:
         raise
     except Exception as e:
-        raise ValueError(f"Could not fetch URL: {e}")
+        _log.warning("URL fetch failed: %s", e)   # the raw text names the pinned IP: logs only
+        raise _UrlFetchError(_URL_UNREACH_EN, _URL_UNREACH_AR)
     finally:
         sess.close()
     html = _decode_html(content, r.headers.get("Content-Type", ""))
