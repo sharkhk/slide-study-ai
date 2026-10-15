@@ -4096,8 +4096,9 @@ class _ArabicParagraph(Paragraph):
 
     def wrap(self, availWidth, availHeight):
         entry = self._layout(availWidth, availHeight)
-        if entry[1] is None:
-            # A layout is only ever wrapped at its own width, so its size is fixed.
+        # A layout is only ever wrapped at its own width, so its size is fixed -
+        # unless a split() that fit no line dropped its blPara: then wrap it again.
+        if entry[1] is None or not hasattr(entry[0], "blPara"):
             entry[1] = entry[0].wrap(availWidth, availHeight)
         self.width, self.height = entry[1]
         return self.width, self.height
@@ -4105,7 +4106,7 @@ class _ArabicParagraph(Paragraph):
     def split(self, availWidth, availHeight):
         # The parts are plain Paragraphs of already-ordered lines.
         entry = self._layout(availWidth, availHeight)
-        if entry[1] is None:
+        if entry[1] is None or not hasattr(entry[0], "blPara"):
             entry[1] = entry[0].wrap(availWidth, availHeight)
         return entry[0].split(availWidth, availHeight)
 
