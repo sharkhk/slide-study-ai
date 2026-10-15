@@ -5726,8 +5726,56 @@ def _url_precheck(url):
 
 # ── SSE streaming endpoint ─────────────────────────────────────────────────────
 
-def _sse(data):
+def _sse(data, ar=False):
+    if ar:
+        data = _progress_ar(data)
     return f"data: {json.dumps(data)}\n\n"
+
+# Progress lines (a step event's `msg`) are shown as sent, so an Arabic request gets them in Arabic.
+_PROGRESS_AR = {
+    "Extracting content…":                 "جارٍ استخراج المحتوى…",
+    "Preparing content…":                  "جارٍ تجهيز المحتوى…",
+    "Analysing structure and keywords…":   "جارٍ تحليل البنية والمصطلحات الأساسية…",
+    "Building PDF & Markdown…":            "جارٍ إنشاء ملفَي PDF وMarkdown…",
+    "Summary-only mode — skipping flash cards and quiz…": "وضع الملخص فقط — بدون بطاقات تعليمية ولا اختبار…",
+    "Generating flash cards…":             "جارٍ إنشاء البطاقات التعليمية…",
+    "Flash cards ready…":                  "البطاقات التعليمية جاهزة…",
+    "Quiz skipped…":                       "تم تخطي الاختبار…",
+    "Generating quiz…":                    "جارٍ إنشاء الاختبار…",
+    "Quiz ready…":                         "الاختبار جاهز…",
+    "Looking for captions…":               "جارٍ البحث عن الترجمة النصية للفيديو…",
+    "Captions found — processing…":        "تم العثور على الترجمة النصية — جارٍ المعالجة…",
+    "No captions — downloading audio for Whisper transcription…":
+        "لا توجد ترجمة نصية — جارٍ تنزيل الصوت لتحويله إلى نص…",
+    "Audio transcribed — processing…":     "تم تحويل الصوت إلى نص — جارٍ المعالجة…",
+}
+_LANG_LABEL_AR = {"Arabic": "العربية", "English": "الإنجليزية"}
+_PROGRESS_AR_RE = (
+    (re.compile(r"Found (\d+) content slides \((Arabic|English)\) — analysing…"),
+     lambda m: f"تم العثور على {m[1]} شريحة فيها محتوى ({_LANG_LABEL_AR[m[2]]}) — جارٍ التحليل…"),
+    (re.compile(r"Split into (\d+) segments — analysing…"),
+     lambda m: f"تم التقسيم إلى {m[1]} أجزاء — جارٍ التحليل…"),
+    (re.compile(r"Section (\d+)/(\d+): (.*)…", re.S),
+     lambda m: f"القسم {m[1]}/{m[2]}: {m[3]}…"),
+    (re.compile(r"Sections: (\d+)/(\d+) done…"),
+     lambda m: f"الأقسام المكتملة: {m[1]}/{m[2]}…"),
+    (re.compile(r"Transcript ready \((Arabic|English)\) — building study guide…"),
+     lambda m: f"النص جاهز ({_LANG_LABEL_AR[m[1]]}) — جارٍ إنشاء دليل المذاكرة…"),
+)
+
+def _progress_ar(data):
+    """A step event with its English `msg` in Arabic (a copy); anything else as is."""
+    msg = data.get("msg") if isinstance(data, dict) and data.get("step") else None
+    if not isinstance(msg, str):
+        return data
+    ar_msg = _PROGRESS_AR.get(msg)
+    if ar_msg is None:
+        for rx, fmt in _PROGRESS_AR_RE:
+            m = rx.fullmatch(msg)
+            if m:
+                ar_msg = fmt(m)
+                break
+    return {**data, "msg": ar_msg} if ar_msg else data
 
 _NO_NOTES_REFUNDED = ("The AI couldn't build notes for this file right now — your credit was "
                       "returned, please try again.")
@@ -5931,7 +5979,7 @@ def summarize_stream():
                     settled = True
                     charge.refund()
                     yield _sse(_busy_event(ar)); return
-            yield _sse({"step": "extract", "msg": "Extracting content…"})
+            yield _sse({"step": "extract", "msg": "Extracting content…"}, ar)
             slides = extract_slides(io.BytesIO(file_bytes), filename=f.filename)
             if not any(s["content"] or s["title"] for s in slides):
                 settled = True
@@ -5943,10 +5991,10 @@ def summarize_stream():
             # Auto-detect language from slide content
             language = lang_param if lang_param in ("ar", "en") else _detect_language(slides)
             lang_label = "Arabic" if language == "ar" else "English"
-            yield _sse({"step": "extract", "msg": f"Found {total} content slides ({lang_label}) — analysing…", "language": language})
+            yield _sse({"step": "extract", "msg": f"Found {total} content slides ({lang_label}) — analysing…", "language": language}, ar)
 
             # Pass 1
-            yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
+            yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"}, ar)
             charge.begin_work()   # the first paid AI call: from here a disconnect no longer refunds
             overview = pass1_overview(
                 [s for s in slides if s["content"].strip() or s["title"].strip()],
@@ -5977,15 +6025,15 @@ def summarize_stream():
             sections = overview["sections"]
 
             for evt in _sections_parallel(sections, content_slides, language, dcfg):
-                yield _sse(evt)
+                yield _sse(evt, ar)
             _require_notes(sections)   # no notes at all → refunded error, not a hollow 'Ready'
 
             for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz, include_mcq):
-                yield _sse(evt)
+                yield _sse(evt, ar)
 
             # Build PDF + Markdown
             overview["language"] = language   # so exports + the in-app viewer localise
-            yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"})
+            yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"}, ar)
             pdf_buf   = build_pdf(overview, language, out_name)
             pdf_bytes = pdf_buf.read()
             md_text   = build_markdown(overview)
@@ -7104,17 +7152,17 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
                     settled = True
                     _refund()
                     yield _sse(_busy_event(_ar)); return
-            yield _sse({"step": "extract", "msg": "Preparing content…"})
+            yield _sse({"step": "extract", "msg": "Preparing content…"}, _ar)
             slides = _text_to_slides(text)
             if not slides:
                 settled = True
                 _refund()
                 yield _sse({"error": "No content extracted"}); return
-            yield _sse({"step": "extract", "msg": f"Split into {len(slides)} segments — analysing…"})
+            yield _sse({"step": "extract", "msg": f"Split into {len(slides)} segments — analysing…"}, _ar)
 
             dcfg = _dcfg
 
-            yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
+            yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"}, _ar)
             if charge is not None:
                 charge.begin_work()   # the first paid AI call: from here a disconnect no longer refunds
             overview = pass1_overview(slides, language, dcfg)
@@ -7137,14 +7185,14 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
 
             sections = overview["sections"]
             for evt in _sections_parallel(sections, slides, language, dcfg):
-                yield _sse(evt)
+                yield _sse(evt, _ar)
             _require_notes(sections, charged=charge is not None)
 
             for evt in _flashcards_mcq_parallel(overview, language, dcfg, include_quiz, include_mcq):
-                yield _sse(evt)
+                yield _sse(evt, _ar)
 
             overview["language"] = language   # so exports + the in-app viewer localise
-            yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"})
+            yield _sse({"step": "pdf", "msg": "Building PDF & Markdown…"}, _ar)
             pdf_buf = build_pdf(overview, language, out_name)
             pdf_bytes = pdf_buf.read()
             md_text = build_markdown(overview)
@@ -7290,10 +7338,10 @@ def youtube_transcript():
                     settled = True
                     charge.refund()
                     yield _sse(_busy_event(ar)); return
-            yield _sse({"step": "transcript", "msg": "Looking for captions…"})
+            yield _sse({"step": "transcript", "msg": "Looking for captions…"}, ar)
             try:
                 transcript_text = _fetch_captions(video_id)
-                yield _sse({"step": "transcript", "msg": "Captions found — processing…"})
+                yield _sse({"step": "transcript", "msg": "Captions found — processing…"}, ar)
             except ValueError as e:
                 if str(e) != "no_captions":
                     settled = True
@@ -7303,11 +7351,11 @@ def youtube_transcript():
                     settled = True
                     charge.refund()
                     yield _sse({"error": "No captions found and GROQ_API_KEY not set."}); return
-                yield _sse({"step": "transcript", "msg": "No captions — downloading audio for Whisper transcription…"})
+                yield _sse({"step": "transcript", "msg": "No captions — downloading audio for Whisper transcription…"}, ar)
                 try:
                     charge.begin_work()   # the paid Whisper call: from here a disconnect no longer refunds
                     transcript_text = _transcribe_with_whisper(video_id)
-                    yield _sse({"step": "transcript", "msg": "Audio transcribed — processing…"})
+                    yield _sse({"step": "transcript", "msg": "Audio transcribed — processing…"}, ar)
                 except ValueError as we:
                     settled = True
                     charge.refund()
@@ -7315,7 +7363,7 @@ def youtube_transcript():
 
             language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
             lang_label = "Arabic" if language == "ar" else "English"
-            yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language})
+            yield _sse({"step": "transcript", "msg": f"Transcript ready ({lang_label}) — building study guide…", "language": language}, ar)
             delegated = True
             yield from _stream_text_as_sse(transcript_text, language, out_name, "youtube", yt_dcfg, tok_left,
                                            include_quiz, include_mcq=include_mcq, charge=charge,
@@ -7538,12 +7586,12 @@ def _demo_cache_put(lang, overview, pdf_bytes, md_text):
                              "pdf": pdf_bytes, "md": md_text,
                              "filename": "sample_lecture_study_guide.pdf"}
 
-def _demo_replay(entry):
+def _demo_replay(entry, ar=False):
     """The cached sample as an SSE generator function: the same kind of events as a real
     run, a NEW job id each time (own 15-minute life, own delete), no AI call."""
     def generate():
-        yield _sse({"step": "extract", "msg": "Preparing content…"})
-        yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"})
+        yield _sse({"step": "extract", "msg": "Preparing content…"}, ar)
+        yield _sse({"step": "overview", "msg": "Analysing structure and keywords…"}, ar)
         guide  = copy.deepcopy(entry["guide"])
         job_id = uuid.uuid4().hex
         store_job(job_id, entry["pdf"], entry["md"], guide, None, entry["filename"])
@@ -7587,7 +7635,7 @@ def summarize_text():
         cached = _demo_cache_get(d_lang) if FREE_MODE else None
         if cached is not None:
             _log_usage_async("demo", "demo")
-            return Response(stream_with_context(_demo_replay(cached)()), mimetype="text/event-stream",
+            return Response(stream_with_context(_demo_replay(cached, d_lang == "ar")()), mimetype="text/event-stream",
                             headers=sse_headers)
         if not ollama_running():
             return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
