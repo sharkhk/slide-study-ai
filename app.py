@@ -3560,6 +3560,20 @@ def _as_list(v):
         return [v]
     return []
 
+
+def _drop_nulls(v, keep_slots=False):
+    """A guide with the model's JSON nulls treated as missing, so no export prints
+    "None": a null dict value is dropped (the reader's default applies), a null list
+    item is dropped, except in a table's headers/rows where it is an empty cell."""
+    if isinstance(v, dict):
+        return {k: _drop_nulls(x, k in ("headers", "rows")) for k, x in v.items() if x is not None}
+    if isinstance(v, list):
+        if keep_slots:
+            return ["" if x is None else _drop_nulls(x, True) for x in v]
+        return [_drop_nulls(x) for x in v if x is not None]
+    return v
+
+
 def _scalar_text(v):
     """Display text for a scalar guide value: a str as-is, a number as str();
     anything else (None, bool, list, dict) → ''."""
@@ -4383,6 +4397,7 @@ def _flashcards_mcq_parallel(overview, language, dcfg, include_quiz=True, includ
 
 def build_markdown(guide):
     """Convert guide dict to a Markdown string (labels follow the guide language)."""
+    guide = _drop_nulls(guide) if isinstance(guide, dict) else {}
     is_ar = guide.get("language") == "ar"
     L = {
         "title":      "دليل الدراسة" if is_ar else "Study Guide",
@@ -4768,6 +4783,8 @@ def _page_num(canvas, doc):
 def build_pdf(guide, language, out_filename="study_guide"):
     if not isinstance(guide, dict):
         guide = {}
+    cleaned = _drop_nulls(guide)   # in place, like the shape fixes below
+    guide.clear(); guide.update(cleaned)
     guide["sections"]   = [s for s in _as_list(guide.get("sections"))   if isinstance(s, dict)]
     guide["keywords"]   = [k for k in _as_list(guide.get("keywords"))   if isinstance(k, dict)]
     guide["flashcards"] = [f for f in _as_list(guide.get("flashcards")) if isinstance(f, dict)]
