@@ -6947,8 +6947,11 @@ def _parse_caption_xml(xml_text):
     except Exception:
         return None
     texts = []
-    for elem in root.iter("text"):
-        t = (elem.text or "").strip()
+    # srv1 (a caption track's default) uses <text>; srv3 (the timedtext fallback) uses <p>, often split into <s>
+    for elem in root.iter():
+        if elem.tag not in ("text", "p"):
+            continue
+        t = "".join(elem.itertext()).strip()
         if t:
             t = t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
             texts.append(t)
