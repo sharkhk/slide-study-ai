@@ -4219,13 +4219,14 @@ Rules:
     result = _as_dict(result, list_key="bullets")
     # If model returned a flat list of strings under "bullets", normalise each element
     # and strip any bullet glyphs the model embedded (leading OR inline) so facts
-    # render as clean prose everywhere downstream.
+    # render as clean prose everywhere downstream. A {"text": ...} / {"fact": ...}
+    # object is its text (it was stored as a Python repr).
     bullets = result.get("bullets", [])
     if isinstance(bullets, str):       # one fact as a bare string, not a list
         bullets = [bullets]
     elif not isinstance(bullets, list):
         bullets = []
-    result["bullets"] = [c for b in bullets if b for c in (_debullet(b),) if c]
+    result["bullets"] = [c for b in bullets if b for c in (_sg_bullet(b),) if c]
     return result
 
 
