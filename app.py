@@ -7131,10 +7131,10 @@ def _extract_video_id(url):
         return None
     host = (parsed.hostname or "").lower()
     host = host[4:] if host.startswith("www.") else host  # strip prefix, not charset
-    if host not in ("youtube.com", "youtu.be", "m.youtube.com"):
+    if host not in ("youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"):
         return None
     patterns = [
-        r'(?:v=|youtu\.be/|/embed/|/shorts/)([a-zA-Z0-9_-]{11})',
+        r'(?:v=|youtu\.be/|/embed/|/shorts/|/live/)([a-zA-Z0-9_-]{11})',
     ]
     for p in patterns:
         m = re.search(p, url)
