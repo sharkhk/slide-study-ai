@@ -4499,13 +4499,25 @@ def ask_ollama(slides, language, progress_cb=None):
 
 # ── File extraction — PPTX, PPT binary, PDF ───────────────────────────────────
 
+class _FileOpenError(ValueError):
+    """An upload the parser can't open: str() is the English text, .ar the Arabic."""
+    def __init__(self, en, ar):
+        super().__init__(en)
+        self.ar = ar
+
+_PPTX_OPEN_EN = ("Couldn't open this PowerPoint file — it may be damaged or not a real .pptx. "
+                 "Open it in PowerPoint, save it again, or export it as PDF and upload that.")
+_PPTX_OPEN_AR = ("تعذّر فتح ملف PowerPoint هذا — قد يكون تالفًا أو ليس ملف .pptx حقيقيًا. "
+                 "افتحه في PowerPoint واحفظه من جديد، أو صدّره بصيغة PDF وارفعه.")
+
 def _extract_pptx_raw(raw):
     """Open as pptx; on relationship errors fall back to raw ZIP XML walk."""
     try:
         prs = Presentation(io.BytesIO(raw))
     except Exception as e:
         if "officeDocument" not in str(e) and "relationship" not in str(e):
-            raise ValueError(f"Cannot open PowerPoint file: {e}")
+            _log.warning("pptx open failed: %s", e)   # raw parser text: logs only
+            raise _FileOpenError(_PPTX_OPEN_EN, _PPTX_OPEN_AR)
         # Fallback: read slide XML directly from the ZIP
         import zipfile, xml.etree.ElementTree as ET
         slides = []
@@ -5824,6 +5836,8 @@ def _gen_error_event(e, charge=None, ar=False):
         refunded = bool(charge is not None and charge.refunded)
         return {"error": _NO_NOTES_REFUNDED if refunded else _NO_NOTES_PLAIN,
                 "code": "no_notes", "refunded": refunded}
+    if isinstance(e, _FileOpenError):
+        return {"error": e.ar if ar else str(e)}
     return {"error": _safe_err(e)}
 
 def _is_partial(overview, include_quiz, include_mcq):
