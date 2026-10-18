@@ -1459,7 +1459,7 @@ def _admin_ok():
     return True
 
 def _safe_err(e):
-    if isinstance(e, ValueError):
+    if isinstance(e, ValueError) and not isinstance(e, _ModelOutputError):
         return str(e)
     _log.error("internal error: %s\n%s", e, _tb.format_exc())
     return "Processing failed — please try again."
@@ -3618,6 +3618,9 @@ def ollama_models():
     except Exception:
         return []
 
+class _ModelOutputError(ValueError):
+    """The AI's answer isn't usable JSON — a server-side failure, never shown raw."""
+
 def _extract_json(text):
     text = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.IGNORECASE)
     text = re.sub(r'\s*```$', '', text).strip()
@@ -3632,7 +3635,7 @@ def _extract_json(text):
     obj_pos = text.find('{')
     arr_pos = text.find('[')
     if obj_pos == -1 and arr_pos == -1:
-        raise ValueError("No JSON found in model output")
+        raise _ModelOutputError("No JSON found in model output")
     if arr_pos != -1 and (obj_pos == -1 or arr_pos < obj_pos):
         start, open_c, close_c = arr_pos, '[', ']'
     else:
@@ -3718,8 +3721,8 @@ def _extract_json(text):
         except json.JSONDecodeError:
             continue
 
-    raise ValueError(f"Cannot parse model output (length={len(text)}). "
-                     "Model may have returned incomplete JSON.")
+    raise _ModelOutputError(f"Cannot parse model output (length={len(text)}). "
+                            "Model may have returned incomplete JSON.")
 
 def _call_ollama(prompt, retries=3, num_predict=4096):
     if GROQ_API_KEY:
