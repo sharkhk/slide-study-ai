@@ -5831,6 +5831,25 @@ def _require_notes(sections, charged=True):
 
 _NO_NOTES_PLAIN_AR = "تعذّر على الذكاء الاصطناعي إعداد الملاحظات الآن — يُرجى المحاولة مرة أخرى."
 
+# The un-coded texts a failed generation can end with (_safe_err, file reading), in Arabic.
+_GEN_ERR_AR = {
+    "Processing failed — please try again.": "تعذّرت المعالجة — يُرجى المحاولة مرة أخرى.",
+    "Unrecognised file format. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt":
+        "صيغة الملف غير معروفة. الصيغ المدعومة: ‎.pptx و‎.ppt و‎.pdf و‎.docx و‎.doc و‎.txt",
+    "The text file appears to be empty.": "يبدو أن الملف النصي فارغ.",
+    "No readable text found in the PDF — it may be a scanned/image-based file.":
+        "لم يُعثر على نص يمكن قراءته في ملف PDF — قد يكون ملفًا ممسوحًا ضوئيًا أو مكوّنًا من صور.",
+    "No readable text found in the Word document.": "لم يُعثر على نص يمكن قراءته في مستند Word.",
+    "No readable text found in the binary .ppt file": "لم يُعثر على نص يمكن قراءته في ملف ‎.ppt هذا.",
+    "Not a valid binary PowerPoint file": "هذا ليس ملف PowerPoint ‏(‎.ppt) صالحًا.",
+    "Not a valid binary Word (.doc) file.": "هذا ليس ملف Word ‏(‎.doc) صالحًا.",
+    "Could not extract readable text from this .doc file. Try saving it as .docx and uploading again.":
+        "تعذّر استخراج نص مقروء من ملف ‎.doc هذا. جرّب حفظه بصيغة ‎.docx ثم ارفعه من جديد.",
+    f"PDF has too many pages (max {_MAX_PAGES}).": f"ملف PDF يحتوي على صفحات كثيرة جدًا (الحد الأقصى {_MAX_PAGES}).",
+    "File is too large when decompressed — refusing to process.": "الملف كبير جدًا بعد فك ضغطه — لا يمكن معالجته.",
+    "File has a suspicious compression ratio — refusing to process.": "نسبة ضغط هذا الملف غير طبيعية — لا يمكن معالجته.",
+}
+
 def _gen_error_event(e, charge=None, ar=False):
     """SSE error event for a failed generation — build it AFTER the refund, so
     'your credit was returned' is only said when it really was (e.g. not while
@@ -5845,7 +5864,8 @@ def _gen_error_event(e, charge=None, ar=False):
                 "code": "no_notes", "refunded": refunded}
     if isinstance(e, _FileOpenError):
         return {"error": e.ar if ar else str(e)}
-    return {"error": _safe_err(e)}
+    msg = _safe_err(e)
+    return {"error": _GEN_ERR_AR.get(msg, msg) if ar else msg}
 
 def _is_partial(overview, include_quiz, include_mcq):
     """Flash cards / quiz were requested but came back empty."""
