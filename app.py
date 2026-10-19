@@ -4952,7 +4952,11 @@ def build_pdf(guide, language, out_filename="study_guide"):
     sections = guide.get("sections", [])
     if sections:
         toc_rows = [[Paragraph(L["contents"], ST["toc_title"])]]
-        toc_names = [s.get("title", "") for s in sections] + L["toc_extra"]
+        # KEY TERMS / FLASH CARDS only when that part is printed below
+        kw_name, fc_name = L["toc_extra"]
+        toc_names = ([s.get("title", "") for s in sections]
+                     + ([kw_name] if guide.get("keywords") else [])
+                     + ([fc_name] if guide.get("flashcards") else []))
         for i, name in enumerate(toc_names, 1):
             dot_row = Table(
                 [[P(name, ST["toc_item"], prefix=f"{i}.  "), Paragraph("", ST["toc_item"])]],
