@@ -4513,6 +4513,11 @@ _PPTX_OPEN_EN = ("Couldn't open this PowerPoint file — it may be damaged or no
 _PPTX_OPEN_AR = ("تعذّر فتح ملف PowerPoint هذا — قد يكون تالفًا أو ليس ملف .pptx حقيقيًا. "
                  "افتحه في PowerPoint واحفظه من جديد، أو صدّره بصيغة PDF وارفعه.")
 
+_DOCX_OPEN_EN = ("Couldn't open this Word file — it may be damaged or not a real .docx. "
+                 "Open it in Word, save it again, or export it as PDF and upload that.")
+_DOCX_OPEN_AR = ("تعذّر فتح ملف Word هذا — قد يكون تالفًا أو ليس ملف .docx حقيقيًا. "
+                 "افتحه في Word واحفظه من جديد، أو صدّره بصيغة PDF وارفعه.")
+
 def _extract_pptx_raw(raw):
     """Open as pptx; on relationship errors fall back to raw ZIP XML walk."""
     try:
@@ -4635,7 +4640,11 @@ def _extract_docx(raw):
     except ImportError:
         raise ValueError("python-docx not installed — run: pip install python-docx")
 
-    doc = Document(io.BytesIO(raw))
+    try:
+        doc = Document(io.BytesIO(raw))
+    except Exception as e:
+        _log.warning("docx open failed: %s", e)   # raw parser text: logs only
+        raise _FileOpenError(_DOCX_OPEN_EN, _DOCX_OPEN_AR)
     slides, current_title, current_lines, slide_num = [], "Document", [], 1
     for para in doc.paragraphs:
         text = para.text.strip()
@@ -4740,10 +4749,12 @@ def extract_slides(file_stream, filename=""):
         try:
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
                 names = z.namelist()
-            if any(n.startswith('word/') for n in names):
-                return _extract_docx(raw)
         except Exception:
-            pass
+            names = []
+            if fname.endswith('.docx'):   # damaged Word file: don't call it PowerPoint
+                raise _FileOpenError(_DOCX_OPEN_EN, _DOCX_OPEN_AR)
+        if any(n.startswith('word/') for n in names):
+            return _extract_docx(raw)
         return _extract_pptx_raw(raw)
 
     if raw[:8] == b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1':  # OLE2 (ppt or doc)
