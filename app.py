@@ -6696,7 +6696,8 @@ Rules:
     except Exception as e:
         if chat_key:
             _fair_refund_key(chat_key)       # the question failed: give its unit back
-        return jsonify({"error": _safe_err(e)}), 500
+        msg = _safe_err(e)
+        return jsonify({"error": _GEN_ERR_AR.get(msg, msg) if language == "ar" else msg}), 500
 
 
 # (/api/download-zip was removed: the shipped frontend never called it, and it
