@@ -6458,6 +6458,8 @@ def _render_shared_guide(row):
         "psub":  "ارفع محاضرة — PowerPoint أو PDF أو رابط YouTube — واحصل على ملخص وبطاقات واختبار خلال ثوانٍ. مجاني، دون بطاقة ائتمان."
                  if is_ar else "Upload a lecture — PowerPoint, PDF, or a YouTube link — and get notes, flashcards and a quiz in seconds. Free, no credit card needed.",
         "pbtn":  "ابدأ مجاناً" if is_ar else "Start free",
+        "foot":  "صُنع باستخدام alimne.app — حوّل أي محاضرة إلى دليل دراسة."
+                 if is_ar else "Made with alimne.app — turn any lecture into a study guide.",
     }
     title_raw = _scalar_text(g.get("title")) or "Study Guide"
     title = _he(title_raw)
@@ -6515,9 +6517,9 @@ def _render_shared_guide(row):
         "<div class=\"wrap\"><div class=\"tag\">%s</div><h1>%s</h1>%s%s%s"
         "<div class=\"promo\"><h3>%s</h3><p>%s</p>"
         "<a href=\"%s/%sshare_cta\">%s</a></div>"
-        "<div class=\"foot\">Made with alimne.app — turn any lecture into a study guide.</div></div>"
+        "<div class=\"foot\">%s</div></div>"
     ) % (APP_URL, APP_URL, cta_q, _he(L["try"]), _he(L["tag"]), title, sub, meta,
-         "".join(parts), _he(L["ptitle"]), _he(L["psub"]), APP_URL, cta_q, _he(L["pbtn"]))
+         "".join(parts), _he(L["ptitle"]), _he(L["psub"]), APP_URL, cta_q, _he(L["pbtn"]), _he(L["foot"]))
 
     ld = {"@context": "https://schema.org", "@type": "LearningResource",
           "name": title_raw, "description": desc, "inLanguage": row.get("language", "en"),
