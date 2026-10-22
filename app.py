@@ -5746,6 +5746,10 @@ _NO_CONTENT_EN  = "No readable content in this file"
 _NO_CONTENT_AR  = "لا يحتوي هذا الملف على نص يمكن قراءته."
 _YT_TOO_LONG_EN = "This video is too long. Maximum supported length is 50 minutes."
 _YT_TOO_LONG_AR = "هذا الفيديو طويل جدًا. أقصى مدة مدعومة هي 50 دقيقة."
+_YT_NO_URL_EN   = "No URL provided"
+_YT_NO_URL_AR   = "لم يُرسَل أي رابط."
+_YT_BAD_LINK_EN = "Could not extract video ID from URL"
+_YT_BAD_LINK_AR = "تعذّر التعرّف على الفيديو من هذا الرابط — تأكّد أنه رابط فيديو على YouTube."
 
 _BAD_URL_EN = "Only public http(s) URLs are supported — paste the full link, starting with https://"
 _BAD_URL_AR = "لا نقبل إلا الروابط العامة (http أو https) — الصق الرابط كاملًا بدءًا بـ https://"
@@ -7382,13 +7386,13 @@ def youtube_transcript():
         return _bad_field(e, data)
     yt_dcfg = DETAIL.get(detail_level, DETAIL["standard"])
     if not url:
-        return jsonify({"error": "No URL provided"}), 400
+        return jsonify({"error": _YT_NO_URL_AR if _wants_ar(data) else _YT_NO_URL_EN}), 400
     if not ollama_running():
         return jsonify({"error": "AI service is not configured. Set GROQ_API_KEY."}), 503
 
     video_id = _extract_video_id(url)
     if not video_id:
-        return jsonify({"error": "Could not extract video ID from URL"}), 400
+        return jsonify({"error": _YT_BAD_LINK_AR if _wants_ar(data) else _YT_BAD_LINK_EN}), 400
 
     # Free mode: a full house is busy NOW — before the yt-dlp probe below (it holds a web
     # thread outside the generation gate) and before anything is charged.
