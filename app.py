@@ -5856,6 +5856,13 @@ _GEN_ERR_AR = {
     "Not a valid binary Word (.doc) file.": "هذا ليس ملف Word ‏(‎.doc) صالحًا.",
     "Could not extract readable text from this .doc file. Try saving it as .docx and uploading again.":
         "تعذّر استخراج نص مقروء من ملف ‎.doc هذا. جرّب حفظه بصيغة ‎.docx ثم ارفعه من جديد.",
+    # YouTube audio transcription (no captions → Whisper)
+    "Audio download produced no file.": "تعذّر تنزيل صوت هذا الفيديو.",
+    "Video audio exceeds 20 MB — try a shorter video (under ~15 minutes).":
+        "صوت هذا الفيديو أكبر من 20 ميغابايت — جرّب فيديو أقصر (أقل من 15 دقيقة تقريبًا).",
+    "Audio file too large for Whisper — try a shorter video (under ~15 minutes).":
+        "ملف الصوت أكبر من أن يُحوَّل إلى نص — جرّب فيديو أقصر (أقل من 15 دقيقة تقريبًا).",
+    "yt-dlp not installed — cannot transcribe audio.": "تحويل صوت الفيديو إلى نص غير متاح حاليًا.",
     f"PDF has too many pages (max {_MAX_PAGES}).": f"ملف PDF يحتوي على صفحات كثيرة جدًا (الحد الأقصى {_MAX_PAGES}).",
     "File is too large when decompressed — refusing to process.": "الملف كبير جدًا بعد فك ضغطه — لا يمكن معالجته.",
     "File has a suspicious compression ratio — refusing to process.": "نسبة ضغط هذا الملف غير طبيعية — لا يمكن معالجته.",
@@ -7329,11 +7336,14 @@ def _yt_friendly_err(e):
                 "transcript in the Text tab.")
     return _safe_err(e)
 
-def _yt_error_event(e):
-    """SSE error event for the YouTube phase; code 'yt_blocked' → localized text."""
+def _yt_error_event(e, ar=False):
+    """SSE error event for the YouTube phase; code 'yt_blocked' → localized text.
+    Other texts are shown as sent, so an Arabic request gets them in Arabic."""
     ev = {"error": _yt_friendly_err(e)}
     if _yt_blocked(e):
         ev["code"] = "yt_blocked"
+    elif ar:
+        ev["error"] = _GEN_ERR_AR.get(ev["error"], ev["error"])
     return ev
 
 
@@ -7436,7 +7446,7 @@ def youtube_transcript():
                 except ValueError as we:
                     settled = True
                     charge.refund()
-                    yield _sse({"error": _safe_err(we)}); return
+                    yield _sse(_yt_error_event(we, ar)); return
 
             language = lang_param if lang_param in ("ar", "en") else _detect_language(transcript_text)
             lang_label = "Arabic" if language == "ar" else "English"
@@ -7450,7 +7460,7 @@ def youtube_transcript():
             settled = True
             _log.error("youtube SSE error: %s\n%s", ex, _tb.format_exc())
             charge.refund()
-            yield _sse(_yt_error_event(ex))
+            yield _sse(_yt_error_event(ex, ar))
         finally:
             if slot is not None:
                 slot.release()
