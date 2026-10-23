@@ -6010,7 +6010,7 @@ def summarize_stream():
     if uid is False:
         return _auth_rejected()
     if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+        return _bad_request("No file uploaded", "لم يُرفع أي ملف — اختر ملفاً وحاول مرة أخرى.", request.form)
     f     = request.files["file"]
     fname = f.filename or ""
     # Validate BEFORE the charge: a rejected type used to be charged and then
@@ -6019,7 +6019,9 @@ def summarize_stream():
     # (Multipart form fields are always strings, so no type checks are needed.)
     _ALLOWED_EXT = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".txt")
     if not fname.lower().endswith(_ALLOWED_EXT):
-        return jsonify({"error": "Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt"}), 400
+        return _bad_request("Unsupported file type. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt",
+                            "نوع ملف غير مدعوم — استخدم .pptx أو .ppt أو .pdf أو .docx أو .doc أو .txt.",
+                            request.form)
 
     # Free mode: no slot and no seat in line → busy NOW, before anything is charged.
     if FREE_MODE and not _gen_has_room():
