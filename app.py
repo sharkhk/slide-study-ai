@@ -6443,15 +6443,29 @@ def _shared_shell(title_tag, head_extra, body_html, lang="en"):
             ) % (lang, d, title_tag, head_extra, _SHARED_CSS, body_html)
 
 def _shared_404():
+    # No guide to take a language from: follow the browser's Accept-Language.
+    # The texts are app constants (already HTML-safe), so they go in unescaped.
+    is_ar = _wants_ar()
+    L = ({"try": "جرّب مجاناً", "h1": "هذا الدليل غير موجود",
+          "sub": "قد يكون الرابط خاطئاً، أو لم يُنشر هذا الدليل قط.",
+          "ptitle": "أنشئ دليل دراستك مجاناً",
+          "psub": "حوّل أي محاضرة إلى ملخص وبطاقات تعليمية واختبار.",
+          "pbtn": "ابدأ مجاناً", "title": "الدليل غير موجود · Alimne"} if is_ar else
+         {"try": "Try it free", "h1": "This guide isn't here",
+          "sub": "The link may be wrong, or the guide was never published.",
+          "ptitle": "Make your own study guide — free",
+          "psub": "Turn any lecture into notes, flashcards &amp; a quiz.",
+          "pbtn": "Start free", "title": "Guide not found · Alimne"})
     body = ("<div class=\"bar\"><a class=\"brand\" href=\"%s/\">📖 Alimne</a>"
-            "<a class=\"cta-btn\" href=\"%s/\">Try it free</a></div>"
+            "<a class=\"cta-btn\" href=\"%s/\">%s</a></div>"
             "<div class=\"wrap\" style=\"text-align:center;padding-top:3rem\">"
-            "<h1>This guide isn't here</h1><p class=\"sub\">The link may be wrong, or the guide was never published.</p>"
-            "<div class=\"promo\"><h3>Make your own study guide — free</h3>"
-            "<p>Turn any lecture into notes, flashcards &amp; a quiz.</p>"
-            "<a href=\"%s/?utm_source=shared_guide&utm_medium=share&utm_campaign=notfound\">Start free</a></div></div>"
-            ) % (APP_URL, APP_URL, APP_URL)
-    return _shared_shell("Guide not found · Alimne", "", body)
+            "<h1>%s</h1><p class=\"sub\">%s</p>"
+            "<div class=\"promo\"><h3>%s</h3>"
+            "<p>%s</p>"
+            "<a href=\"%s/?utm_source=shared_guide&utm_medium=share&utm_campaign=notfound\">%s</a></div></div>"
+            ) % (APP_URL, APP_URL, L["try"], L["h1"], L["sub"],
+                 L["ptitle"], L["psub"], APP_URL, L["pbtn"])
+    return _shared_shell(L["title"], "", body, "ar" if is_ar else "en")
 
 def _render_shared_guide(row):
     # Every field read here tolerates loose shapes (see _as_list / _scalar_text):
