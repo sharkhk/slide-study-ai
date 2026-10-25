@@ -3583,6 +3583,39 @@ def _scalar_text(v):
         return str(v)
     return ""
 
+def _field_text(v):
+    """Text for a flash card / quiz field the model may send loosely: an object
+    is its text/answer, a list its items joined by "; ", a number its digits,
+    anything else '' (never a Python repr)."""
+    if isinstance(v, dict):
+        v = next((v[k] for k in ("text", "answer", "value") if k in v), None)
+    if isinstance(v, list):
+        return "; ".join(t for t in (_field_text(x).strip() for x in v) if t)
+    return _scalar_text(v)
+
+_CARD_KEYS = ("q", "a", "question", "answer")
+
+def _text_cards(cards):
+    """Flash cards with each q / a (or question / answer) field as text; a card
+    left with no text at all is dropped."""
+    out = []
+    for c in cards:
+        c = {**c, **{k: _field_text(c[k]) for k in _CARD_KEYS if k in c}}
+        if any(isinstance(c.get(k), str) and c[k].strip() for k in _CARD_KEYS):
+            out.append(c)
+    return out
+
+def _text_mcqs(mcqs):
+    """Quiz questions with q / question / explanation as text and each option
+    as text (empty options dropped)."""
+    out = []
+    for m in mcqs:
+        m = {**m, **{k: _field_text(m[k]) for k in ("q", "question", "explanation") if k in m}}
+        if isinstance(m.get("options"), list):
+            m["options"] = [t for t in (_field_text(o) for o in m["options"]) if t.strip()]
+        out.append(m)
+    return out
+
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY        = colors.HexColor('#0a1628')
 NAVY_MID    = colors.HexColor('#1a3a6e')
@@ -4277,8 +4310,12 @@ Rules:
 - Output JSON only""", num_predict=dcfg["num_predict"])
     # Model may return the array directly instead of wrapping it
     if isinstance(result, list):
-        return {"flashcards": [x for x in result if isinstance(x, dict)]}
-    return _as_dict(result, list_key="flashcards")
+        result = {"flashcards": result}
+    result = _as_dict(result, list_key="flashcards")
+    cards = result.get("flashcards")
+    if isinstance(cards, list):
+        result["flashcards"] = _text_cards([x for x in cards if isinstance(x, dict)])
+    return result
 
 
 def pass4_mcq(guide, language, dcfg=None):
@@ -4317,8 +4354,12 @@ Rules:
 {_lang_rules(language)}
 - JSON only""", num_predict=dcfg["num_predict"])
     if isinstance(result, list):
-        return {"mcqs": [x for x in result if isinstance(x, dict)]}
-    return _as_dict(result, list_key="mcqs")
+        result = {"mcqs": result}
+    result = _as_dict(result, list_key="mcqs")
+    mcqs = result.get("mcqs")
+    if isinstance(mcqs, list):
+        result["mcqs"] = _text_mcqs([x for x in mcqs if isinstance(x, dict)])
+    return result
 
 
 def _slide_nums(sec):
