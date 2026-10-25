@@ -107,7 +107,9 @@ def test_arabic_pdf_has_no_missing_glyph_boxes():
 def test_section_header_dot_and_footer_are_drawn():
     layout, _ = _pdf_texts(AR_GUIDE)
     assert "·" in layout                         # "1 · ..." and the footer separators
-    assert "Made with alimne.app — turn any lecture into a study guide" in layout
+    # the brand line is Arabic in an Arabic guide; the Latin "alimne.app" inside it is still drawn
+    assert "alimne.app" in layout
+    assert "turn any lecture into a study guide" not in layout
 
 
 # ── the flowable ──────────────────────────────────────────────────────────────

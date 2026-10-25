@@ -25,8 +25,9 @@ def _text(guide):
 
 
 def _toc_numbers(text):
-    # an Arabic CONTENTS line extracts as " . <title>N" (right-to-left)
-    return re.findall(r"(?m)^ \. .*?([0-9])$", text)
+    # an Arabic CONTENTS line extracts as " . <title>N" (right-to-left), " N. <title>" or a lone " N"
+    # line, depending on the pypdf version
+    return ["".join(m) for m in re.findall(r"(?m)^ (?:\. .*?([0-9])|([0-9])\. .*|([0-9]))$", text)]
 
 
 def test_no_key_terms_or_flash_cards_in_toc_when_empty():

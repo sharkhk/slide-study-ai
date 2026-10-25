@@ -5198,7 +5198,8 @@ def build_pdf(guide, language, out_filename="study_guide"):
         # letters either.
         sep = " \N{HYPHEN} "
         elems.append(P(f"{guide.get('title', '')}{sep}{AR_GUIDE}{sep}{AR_LUCK}", ST["footer"]))
-        elems.append(Paragraph(made_with, _st("FTL", ST["footer"], fontName="Helvetica")))
+        # The brand line in Arabic too (it was English under an Arabic guide), with the same separator.
+        elems.append(P(f"صُنع باستخدام alimne.app{sep}حوّل أي محاضرة إلى دليل دراسة", ST["footer"]))
     else:
         elems.append(Paragraph(
             f"{T(guide.get('title',''))}  ·  {L['guide']}  ·  {L['luck']}<br/>" + made_with,
