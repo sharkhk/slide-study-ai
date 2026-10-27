@@ -6303,6 +6303,9 @@ def rehydrate_guide():
     for k in ("sections", "flashcards", "mcqs", "keywords", "objectives"):
         if not isinstance(guide[k], list):
             guide[k] = []
+    # A copy signed before cards/quiz were made text can still hold lists/objects.
+    guide["flashcards"] = _text_cards([c for c in guide["flashcards"] if isinstance(c, dict)])
+    guide["mcqs"]       = _text_mcqs([m for m in guide["mcqs"] if isinstance(m, dict)])
     lang = "ar" if guide.get("language") == "ar" else "en"
     guide["language"] = lang
     fname = _safe_name(str(obj.get("filename") or "study_guide.pdf"), 120)
