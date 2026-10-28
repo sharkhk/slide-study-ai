@@ -3613,8 +3613,24 @@ def _text_mcqs(mcqs):
         m = {**m, **{k: _field_text(m[k]) for k in ("q", "question", "explanation") if k in m}}
         if isinstance(m.get("options"), list):
             m["options"] = [t for t in (_field_text(o) for o in m["options"]) if t.strip()]
+        if "answer" in m:
+            m["answer"] = _mcq_answer(m["answer"], _as_list(m.get("options")))
         out.append(m)
     return out
+
+def _mcq_answer(ans, options):
+    """The quiz answer as the label of the option it names ("a", "B)", "C. text",
+    the option's text, ["D"] → that option's first character), since the quizzes
+    score a pick by option[0] == answer. An answer naming no labelled option is
+    kept as text."""
+    a = _field_text(ans).strip()
+    labelled = [o for o in options if isinstance(o, str) and re.match(r'^\S\s*[\).:\-]', o)]
+    hit = next((o for o in labelled if _mcq_correct(o, a)), None)
+    if hit is None:
+        lm = re.match(r'^([A-Za-z])\s*[\).:\-]', a)
+        if lm:
+            hit = next((o for o in labelled if o[:1].upper() == lm.group(1).upper()), None)
+    return hit[:1] if hit else a
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 NAVY        = colors.HexColor('#0a1628')
