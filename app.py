@@ -3596,21 +3596,26 @@ def _field_text(v):
 _CARD_KEYS = ("q", "a", "question", "answer")
 
 def _text_cards(cards):
-    """Flash cards with each q / a (or question / answer) field as text; a card
-    left with no text at all is dropped."""
+    """Flash cards with each q / a (or question / answer) field as text, an empty
+    q / a taken from question / answer; a card left with no text at all is dropped."""
     out = []
     for c in cards:
         c = {**c, **{k: _field_text(c[k]) for k in _CARD_KEYS if k in c}}
+        for short, long in (("q", "question"), ("a", "answer")):
+            if not (c.get(short) or "").strip() and (c.get(long) or "").strip():
+                c[short] = c[long]
         if any(isinstance(c.get(k), str) and c[k].strip() for k in _CARD_KEYS):
             out.append(c)
     return out
 
 def _text_mcqs(mcqs):
-    """Quiz questions with q / question / explanation as text and each option
-    as text (empty options dropped)."""
+    """Quiz questions with q / question / explanation as text (an empty q taken
+    from question) and each option as text (empty options dropped)."""
     out = []
     for m in mcqs:
         m = {**m, **{k: _field_text(m[k]) for k in ("q", "question", "explanation") if k in m}}
+        if not (m.get("q") or "").strip() and (m.get("question") or "").strip():
+            m["q"] = m["question"]
         if isinstance(m.get("options"), list):
             m["options"] = [t for t in (_field_text(o) for o in m["options"]) if t.strip()]
         if "answer" in m:

@@ -45,4 +45,4 @@ def test_question_answer_keys_are_kept(monkeypatch):
     monkeypatch.setattr(appmod, "_call_ollama", lambda *a, **k: [
         {"question": "Q?", "answer": ["x", "y"]}, "junk"])
     cards = appmod.pass3_flashcards({"title": "T", "sections": []}, "en")["flashcards"]
-    assert cards == [{"question": "Q?", "answer": "x; y"}]
+    assert cards == [{"question": "Q?", "answer": "x; y", "q": "Q?", "a": "x; y"}]
