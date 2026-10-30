@@ -6560,8 +6560,9 @@ def _render_shared_guide(row):
     sub_raw = _scalar_text(g.get("subtitle"))
     sub   = ("<p class=\"sub\">%s</p>" % _he(sub_raw)) if sub_raw else ""
 
-    flashcards = [f for f in _as_list(g.get("flashcards")) if isinstance(f, dict)]
-    mcqs       = [m for m in _as_list(g.get("mcqs")) if isinstance(m, dict)]
+    # A row shared before cards/quiz were made text can still hold lists/objects.
+    flashcards = _text_cards([f for f in _as_list(g.get("flashcards")) if isinstance(f, dict)])
+    mcqs       = _text_mcqs([m for m in _as_list(g.get("mcqs")) if isinstance(m, dict)])
     meta_bits = []
     if flashcards: meta_bits.append(("%d بطاقة" % len(flashcards)) if is_ar else "%d flashcards" % len(flashcards))
     if mcqs:       meta_bits.append(("%d سؤال" % len(mcqs)) if is_ar else "%d quiz questions" % len(mcqs))
