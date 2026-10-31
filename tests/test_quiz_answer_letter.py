@@ -35,7 +35,8 @@ def test_arabic_letters_and_unmatched_answers_unchanged(monkeypatch):
     ]})
     mcqs = appmod.pass4_mcq({"title": "T", "sections": []}, "ar")["mcqs"]
     assert mcqs[0]["answer"] == "ب"
-    assert mcqs[1]["answer"] == "Paris"      # unlabelled options: keep the text
+    # unlabelled options get labels (test_quiz_unlabelled_options.py)
+    assert mcqs[1]["options"] == ["A. Paris", "B. London"] and mcqs[1]["answer"] == "A"
     assert mcqs[2]["answer"] == "E"
     assert "answer" not in mcqs[3]
 

@@ -3618,10 +3618,34 @@ def _text_mcqs(mcqs):
             m["q"] = m["question"]
         if isinstance(m.get("options"), list):
             m["options"] = [t for t in (_field_text(o) for o in m["options"]) if t.strip()]
+            m = _label_mcq_options(m)
         if "answer" in m:
             m["answer"] = _mcq_answer(m["answer"], _as_list(m.get("options")))
         out.append(m)
     return out
+
+_MCQ_LABEL_RE  = re.compile(r'^\S\s*[\).:\-]')
+_MCQ_LABELS_EN = "ABCDEFGH"
+_MCQ_LABELS_AR = "أبجدهوزح"
+
+def _label_mcq_options(m):
+    """Options sent with no label at all (["Paris", "London"]) get A. / B. / …
+    (أ. / ب. / … when they are Arabic), and an answer naming one of them (its
+    text, or a bare label letter) becomes that label: the quizzes score a pick
+    by option[0] == answer, so unlabelled options could never be scored right."""
+    opts = m["options"]
+    if not opts or len(opts) > len(_MCQ_LABELS_EN) or any(_MCQ_LABEL_RE.match(o) for o in opts):
+        return m
+    labels = _MCQ_LABELS_AR if any(_AR_LETTER_RE.search(o) for o in opts) else _MCQ_LABELS_EN
+    m = {**m, "options": [f"{labels[i]}. {o.strip()}" for i, o in enumerate(opts)]}
+    if "answer" in m:
+        a = _field_text(m["answer"]).strip()
+        idx = next((i for i, o in enumerate(opts) if a and o.strip().lower() == a.lower()), None)
+        if idx is None and len(a) == 1:
+            idx = next((i for i, l in enumerate(labels[:len(opts)]) if l.upper() == a.upper()), None)
+        if idx is not None:
+            m["answer"] = labels[idx]
+    return m
 
 def _mcq_answer(ans, options):
     """The quiz answer as the label of the option it names ("a", "B)", "C. text",
