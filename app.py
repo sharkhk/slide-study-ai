@@ -5962,6 +5962,7 @@ _GEN_ERR_AR = {
     "Unrecognised file format. Supported: .pptx, .ppt, .pdf, .docx, .doc, .txt":
         "صيغة الملف غير معروفة. الصيغ المدعومة: ‎.pptx و‎.ppt و‎.pdf و‎.docx و‎.doc و‎.txt",
     "The text file appears to be empty.": "يبدو أن الملف النصي فارغ.",
+    "No content extracted": "لم يُعثر على محتوى يمكن قراءته.",
     "No readable text found in the PDF — it may be a scanned/image-based file.":
         "لم يُعثر على نص يمكن قراءته في ملف PDF — قد يكون ملفًا ممسوحًا ضوئيًا أو مكوّنًا من صور.",
     "No readable text found in the Word document.": "لم يُعثر على نص يمكن قراءته في مستند Word.",
@@ -7375,7 +7376,8 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             if not slides:
                 settled = True
                 _refund()
-                yield _sse({"error": "No content extracted"}); return
+                msg = "No content extracted"
+                yield _sse({"error": _GEN_ERR_AR.get(msg, msg) if _ar else msg}); return
             yield _sse({"step": "extract", "msg": f"Split into {len(slides)} segments — analysing…"}, _ar)
 
             dcfg = _dcfg
