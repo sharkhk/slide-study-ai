@@ -60,6 +60,7 @@ from reportlab.platypus import (
     Paragraph, Spacer, Table, TableStyle,
     HRFlowable, KeepTogether
 )
+from reportlab.platypus.doctemplate import LayoutError as _LayoutError
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
 from reportlab.pdfbase import pdfmetrics as _pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont as _TTFont
@@ -4196,10 +4197,15 @@ class _ArabicParagraph(Paragraph):
         if entry[1] is None or not hasattr(entry[0], "blPara"):
             entry[1] = entry[0].wrap(availWidth, availHeight)
         self.width, self.height = entry[1]
+        self._wrapped_at = availWidth
         return self.width, self.height
 
     def split(self, availWidth, availHeight):
-        # The parts are plain Paragraphs of already-ordered lines.
+        # The parts are plain Paragraphs of already-ordered lines. A table row
+        # split (build_pdf's LayoutError retry) asks at the cell's full width
+        # but wrapped it without the padding: split at the wrapped width, so the
+        # parts match the height the table measured.
+        availWidth = getattr(self, "_wrapped_at", availWidth)
         entry = self._layout(availWidth, availHeight)
         if entry[1] is None or not hasattr(entry[0], "blPara"):
             entry[1] = entry[0].wrap(availWidth, availHeight)
@@ -4975,14 +4981,17 @@ def build_pdf(guide, language, out_filename="study_guide"):
     class Doc(BaseDocTemplate):
         pass
 
-    doc = Doc(buf, pagesize=A4,
-              leftMargin=1.8*cm, rightMargin=1.8*cm,
-              topMargin=1.8*cm, bottomMargin=1.5*cm)
-    doc.title_str = guide.get("title", "")
+    def _new_doc():
+        d = Doc(buf, pagesize=A4,
+                leftMargin=1.8*cm, rightMargin=1.8*cm,
+                topMargin=1.8*cm, bottomMargin=1.5*cm)
+        d.title_str = guide.get("title", "")
+        frame = Frame(d.leftMargin, d.bottomMargin, d.width, d.height - 0.3*cm,
+                      id='main', leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+        d.addPageTemplates([PageTemplate(id='main', frames=[frame], onPage=_page_num)])
+        return d
 
-    frame = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height - 0.3*cm,
-                  id='main', leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
-    doc.addPageTemplates([PageTemplate(id='main', frames=[frame], onPage=_page_num)])
+    doc = _new_doc()
 
     base = getSampleStyleSheet()["Normal"]
     ST = {
@@ -5251,7 +5260,21 @@ def build_pdf(guide, language, out_filename="study_guide"):
             ST["footer"]
         ))
 
-    doc.multiBuild(elems)
+    try:
+        doc.multiBuild(elems)
+    except _LayoutError:
+        # One table row (a very long bullet, definition, flash card…) is taller
+        # than a page: build again with rows allowed to split across pages,
+        # rather than losing the whole guide. Normal guides never get here.
+        def _split_rows(fl):
+            for f in fl:
+                if isinstance(f, Table):
+                    f.splitInRow = 1
+                elif isinstance(f, KeepTogether):
+                    _split_rows(f._content)
+        _split_rows(elems)
+        buf.seek(0); buf.truncate()
+        _new_doc().multiBuild(elems)
     buf.seek(0)
     return buf
 
