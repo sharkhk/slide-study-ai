@@ -3635,7 +3635,16 @@ def _label_mcq_options(m):
     text, or a bare label letter) becomes that label: the quizzes score a pick
     by option[0] == answer, so unlabelled options could never be scored right."""
     opts = m["options"]
-    if not opts or len(opts) > len(_MCQ_LABELS_EN) or any(_MCQ_LABEL_RE.match(o) for o in opts):
+    if not opts or len(opts) > len(_MCQ_LABELS_EN):
+        return m
+    # Already labelled: every option starts like a label and the labels differ,
+    # or one carries its own position's label ("A. …" first, "ب. …" second).
+    # One look-alike ("U.S.A", "3.14") or a shared "letter" ("1.5 m/s",
+    # "1.0 m/s") is not a set of labels.
+    if all(_MCQ_LABEL_RE.match(o) for o in opts) and len({o[:1].upper() for o in opts}) == len(opts):
+        return m
+    if any(_MCQ_LABEL_RE.match(o) and o[:1].upper() in (_MCQ_LABELS_EN[i], _MCQ_LABELS_AR[i])
+           for i, o in enumerate(opts)):
         return m
     labels = _MCQ_LABELS_AR if any(_AR_LETTER_RE.search(o) for o in opts) else _MCQ_LABELS_EN
     m = {**m, "options": [f"{labels[i]}. {o.strip()}" for i, o in enumerate(opts)]}
