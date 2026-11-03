@@ -3626,6 +3626,9 @@ def _text_mcqs(mcqs):
     return out
 
 _MCQ_LABEL_RE  = re.compile(r'^\S\s*[\).:\-]')
+# A label at its own position: a hyphen joined to a word ("B-cells", "D-glucose")
+# is part of the option's text, not a label separator ("B - …" / "B- …" are).
+_MCQ_OWN_LABEL_RE = re.compile(r'^\S\s*(?:[\).:]|-(?=\s|$))')
 _MCQ_LABELS_EN = "ABCDEFGH"
 _MCQ_LABELS_AR = "أبجدهوزح"
 
@@ -3643,7 +3646,7 @@ def _label_mcq_options(m):
     # "1.0 m/s") is not a set of labels.
     if all(_MCQ_LABEL_RE.match(o) for o in opts) and len({o[:1].upper() for o in opts}) == len(opts):
         return m
-    if any(_MCQ_LABEL_RE.match(o) and o[:1].upper() in (_MCQ_LABELS_EN[i], _MCQ_LABELS_AR[i])
+    if any(_MCQ_OWN_LABEL_RE.match(o) and o[:1].upper() in (_MCQ_LABELS_EN[i], _MCQ_LABELS_AR[i])
            for i, o in enumerate(opts)):
         return m
     labels = _MCQ_LABELS_AR if any(_AR_LETTER_RE.search(o) for o in opts) else _MCQ_LABELS_EN
