@@ -3584,6 +3584,20 @@ def _scalar_text(v):
         return str(v)
     return ""
 
+def _overview_items(raw, key, extra):
+    """The model's overview "sections" / "keywords" as dicts: a dict is kept, a
+    plain string or number becomes {key: its text, **extra}, and a null / list /
+    empty item is skipped (it used to become a section or key term "None")."""
+    out = []
+    for x in (raw if isinstance(raw, list) else []):
+        if isinstance(x, dict):
+            out.append(x)
+        else:
+            t = _scalar_text(x).strip()
+            if t:
+                out.append({key: t, **extra})
+    return out
+
 def _field_text(v):
     """Text for a flash card / quiz field the model may send loosely: an object
     is its text/answer, a list its items joined by "; ", a number its digits,
@@ -4566,15 +4580,9 @@ def ask_ollama(slides, language, progress_cb=None):
 
     # Normalize sections/keywords (mistral may return plain strings)
     raw_sec = overview.get("sections", [])
-    overview["sections"] = [
-        s if isinstance(s, dict) else {"title": str(s), "slide_nums": []}
-        for s in (raw_sec if isinstance(raw_sec, list) else [])
-    ]
+    overview["sections"] = _overview_items(raw_sec, "title", {"slide_nums": []})
     raw_kw = overview.get("keywords", [])
-    overview["keywords"] = [
-        k if isinstance(k, dict) else {"term": str(k), "definition": ""}
-        for k in (raw_kw if isinstance(raw_kw, list) else [])
-    ]
+    overview["keywords"] = _overview_items(raw_kw, "term", {"definition": ""})
     if not overview["sections"]:
         overview["sections"] = [{"title": overview.get("title", "Overview"), "slide_nums": [s["slide_num"] for s in content_slides]}]
 
@@ -6210,15 +6218,9 @@ def summarize_stream():
 
             # Normalize: mistral sometimes returns sections/keywords as plain strings
             raw_sections = overview.get("sections", [])
-            overview["sections"] = [
-                s if isinstance(s, dict) else {"title": str(s), "slide_nums": []}
-                for s in (raw_sections if isinstance(raw_sections, list) else [])
-            ]
+            overview["sections"] = _overview_items(raw_sections, "title", {"slide_nums": []})
             raw_keywords = overview.get("keywords", [])
-            overview["keywords"] = [
-                k if isinstance(k, dict) else {"term": str(k), "definition": ""}
-                for k in (raw_keywords if isinstance(raw_keywords, list) else [])
-            ]
+            overview["keywords"] = _overview_items(raw_keywords, "term", {"definition": ""})
 
             content_slides = [s for s in slides if s["content"].strip()]
 
@@ -7400,15 +7402,9 @@ def _stream_text_as_sse(text, language, out_name, job_source, dcfg=None, tok_lef
             overview = pass1_overview(slides, language, dcfg)
 
             raw_sections = overview.get("sections", [])
-            overview["sections"] = [
-                s if isinstance(s, dict) else {"title": str(s), "slide_nums": []}
-                for s in (raw_sections if isinstance(raw_sections, list) else [])
-            ]
+            overview["sections"] = _overview_items(raw_sections, "title", {"slide_nums": []})
             raw_keywords = overview.get("keywords", [])
-            overview["keywords"] = [
-                k if isinstance(k, dict) else {"term": str(k), "definition": ""}
-                for k in (raw_keywords if isinstance(raw_keywords, list) else [])
-            ]
+            overview["keywords"] = _overview_items(raw_keywords, "term", {"definition": ""})
             if not overview["sections"]:
                 overview["sections"] = [{
                     "title": overview.get("title", "Content Overview"),
