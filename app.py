@@ -6756,7 +6756,10 @@ def _chat_context(guide):
         parts.append("Key terms:\n" + "\n".join(kw_lines))
     return "\n\n".join(parts) or "No material available."
 
-def _chat_answer(result):
+_CHAT_NO_ANSWER_EN = "No answer found in the material."
+_CHAT_NO_ANSWER_AR = "لم يُعثر على إجابة في المادة."
+
+def _chat_answer(result, ar=False):
     """The model's answer as a string, whatever JSON shape came back: a list
     ([{"answer": …}]), a bare JSON string, an answer that is a list of lines…
     An unusable answer is '' (the client then shows its own localized
@@ -6765,8 +6768,8 @@ def _chat_answer(result):
     if isinstance(result, str):
         return result.strip()
     res = _as_dict(result)
-    if "answer" not in res:
-        return "No answer found in the material."
+    if "answer" not in res:   # in the chat's language (it was English for Arabic chats)
+        return _CHAT_NO_ANSWER_AR if ar else _CHAT_NO_ANSWER_EN
     ans = res.get("answer")
     if isinstance(ans, list):
         ans = "\n".join(t for t in (_scalar_text(a) for a in ans) if t.strip())
@@ -6851,7 +6854,7 @@ Rules:
 - If genuinely not covered, say so briefly
 - Be helpful and detailed; include facts, definitions, examples from the material
 - JSON only""", num_predict=1024)
-        return jsonify({"answer": _chat_answer(result)})
+        return jsonify({"answer": _chat_answer(result, language == "ar")})
     except Exception as e:
         if chat_key:
             _fair_refund_key(chat_key)       # the question failed: give its unit back
