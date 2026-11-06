@@ -4441,11 +4441,14 @@ Rules:
 
 def _slide_nums(sec):
     """The section's slide numbers as a set of ints; the model sometimes sends a
-    bare int, null or a nested list instead of a flat list."""
+    bare int, null or a nested list instead of a flat list, or digit strings
+    ("3") - those count too (they matched no slide, so the section's notes came
+    from an even slice of the material instead of its own slides)."""
     raw = sec.get("slide_nums")
     if not isinstance(raw, list):
         raw = [raw]
-    return {n for n in raw if isinstance(n, int)}
+    return {int(n.strip()) if isinstance(n, str) else n for n in raw
+            if isinstance(n, int) or (isinstance(n, str) and n.strip().isdecimal())}
 
 
 def _sections_parallel(sections, content_slides, language, dcfg):
