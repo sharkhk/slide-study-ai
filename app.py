@@ -4456,7 +4456,8 @@ def _sections_parallel(sections, content_slides, language, dcfg):
     Yields plain dicts. Flashcards+MCQ are parallelized separately."""
     n = len(sections)
     for i, sec in enumerate(sections):
-        yield {"step": "section", "msg": f"Section {i+1}/{n}: {sec.get('title', '')}…"}
+        title = _scalar_text(sec.get("title"))   # a null / non-text title is '' (it showed as "None")
+        yield {"step": "section", "msg": f"Section {i+1}/{n}: {title}…"}
         nums = _slide_nums(sec)
         sl = [s for s in content_slides if s["slide_num"] in nums]
         if not sl:
@@ -4465,7 +4466,7 @@ def _sections_parallel(sections, content_slides, language, dcfg):
             end   = start + chunk if i < n - 1 else len(content_slides)
             sl    = content_slides[start:end] or content_slides
         try:
-            det = pass2_section(sec.get("title", ""), sl, language, dcfg)
+            det = pass2_section(title, sl, language, dcfg)
             sec["bullets"] = det.get("bullets", [])
             if isinstance(det.get("table"), dict):
                 sec["table"] = det["table"]
@@ -4600,7 +4601,7 @@ def ask_ollama(slides, language, progress_cb=None):
             start = i * chunk
             end   = start + chunk if i < n - 1 else len(content_slides)
             sl    = content_slides[start:end] or content_slides
-        detail = pass2_section(sec.get("title", ""), sl, language)
+        detail = pass2_section(_scalar_text(sec.get("title")), sl, language)
         sec["bullets"] = detail.get("bullets", [])
         if isinstance(detail.get("table"), dict):
             sec["table"] = detail["table"]
