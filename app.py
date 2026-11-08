@@ -6003,6 +6003,9 @@ _GEN_ERR_AR = {
         "ملف الصوت أكبر من أن يُحوَّل إلى نص — جرّب فيديو أقصر (أقل من 15 دقيقة تقريبًا).",
     "yt-dlp not installed — cannot transcribe audio.": "تحويل صوت الفيديو إلى نص غير متاح حاليًا.",
     f"PDF has too many pages (max {_MAX_PAGES}).": f"ملف PDF يحتوي على صفحات كثيرة جدًا (الحد الأقصى {_MAX_PAGES}).",
+    f"Presentation has too many slides (max {_MAX_PAGES}).":
+        f"العرض التقديمي يحتوي على شرائح كثيرة جدًا (الحد الأقصى {_MAX_PAGES}).",
+    "No readable content found in this file": "لم يُعثر على محتوى يمكن قراءته في هذا الملف.",
     "File is too large when decompressed — refusing to process.": "الملف كبير جدًا بعد فك ضغطه — لا يمكن معالجته.",
     "File has a suspicious compression ratio — refusing to process.": "نسبة ضغط هذا الملف غير طبيعية — لا يمكن معالجته.",
 }
