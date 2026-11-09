@@ -7705,6 +7705,8 @@ _URL_STATUS_EN   = "Couldn't open this link (the site answered {code}) — check
 _URL_STATUS_AR   = "تعذّر فتح هذا الرابط (ردّ الموقع بالرمز {code}) — تحقّق منه، أو انسخ نص الصفحة والصقه بدلًا من ذلك."
 _URL_UNREACH_EN  = "Couldn't reach this link — check it, or copy the page's text and paste it instead."
 _URL_UNREACH_AR  = "تعذّر الوصول إلى هذا الرابط — تحقّق منه، أو انسخ نص الصفحة والصقه بدلًا من ذلك."
+_URL_PRIVATE_EN  = "URL points to a private/internal address — not allowed."
+_URL_PRIVATE_AR  = "هذا الرابط يشير إلى عنوان داخلي أو خاص — لا يمكن فتحه."
 
 def _is_page_type(content_type):
     """True for a web page or text (or no Content-Type at all); False for a file."""
@@ -7731,7 +7733,7 @@ def _fetch_url_text(url):
         addr = ipaddress.ip_address(info[4][0])
         if (addr.is_private or addr.is_loopback or addr.is_link_local or
                 addr.is_reserved or addr.is_multicast or addr.is_unspecified):
-            raise ValueError("URL points to a private/internal address — not allowed.")
+            raise _UrlFetchError(_URL_PRIVATE_EN, _URL_PRIVATE_AR)   # was English-only
         if pinned_ip is None:
             pinned_ip = str(addr)
     if not pinned_ip:
