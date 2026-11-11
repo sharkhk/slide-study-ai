@@ -4521,6 +4521,11 @@ def _flashcards_mcq_parallel(overview, language, dcfg, include_quiz=True, includ
     yield {"step": "mcq", "msg": "Quiz ready…"}
 
 
+def _md_cell(c):
+    """One Markdown table cell: a "|" is escaped and a line break becomes a space,
+    so a cell like "P(A|B)" can't add a column or cut its row in two."""
+    return " ".join(str(c).split("\n")).replace("\r", " ").replace("|", "\\|")
+
 def build_markdown(guide):
     """Convert guide dict to a Markdown string (labels follow the guide language)."""
     guide = _drop_nulls(guide) if isinstance(guide, dict) else {}
@@ -4550,10 +4555,10 @@ def build_markdown(guide):
         if isinstance(tbl, dict) and _as_list(tbl.get("headers")) and _as_list(tbl.get("rows")):
             headers = _as_list(tbl["headers"])
             lines.append("")
-            lines.append("| " + " | ".join(str(h) for h in headers) + " |")
+            lines.append("| " + " | ".join(_md_cell(h) for h in headers) + " |")
             lines.append("|" + "|".join(["---"] * len(headers)) + "|")
             for row in _as_list(tbl["rows"]):
-                lines.append("| " + " | ".join(str(c) for c in (row if isinstance(row, list) else [row])) + " |")
+                lines.append("| " + " | ".join(_md_cell(c) for c in (row if isinstance(row, list) else [row])) + " |")
         lines.append("")
     kws = [k for k in guide.get("keywords", []) if isinstance(k, dict)]
     if kws:
@@ -6923,7 +6928,9 @@ def view_md(job_id):
                 rows = []
                 while i < len(lines) and lines[i].startswith('|'):
                     if not re.match(r'^\|[-| :]+\|$', lines[i]):
-                        cells = [c.strip() for c in lines[i].strip('|').split('|')]
+                        # An escaped "\|" (see _md_cell) is cell text, not a column break.
+                        cells = [c.strip().replace('\\|', '|')
+                                 for c in re.split(r'(?<!\\)\|', lines[i].strip('|'))]
                         tag = 'th' if not rows else 'td'
                         rows.append('<tr>' + ''.join(f'<{tag}>{_inline(_he(c))}</{tag}>' for c in cells) + '</tr>')
                     i += 1
