@@ -4928,6 +4928,14 @@ def _page_num(canvas, doc):
     canvas.restoreState()
 
 
+def _heading_upper(s):
+    """Capitalise a PDF heading's letters but not Greek ones (or the micro sign):
+    "β-oxidation" must not become "Β-OXIDATION" (a capital beta reads as "B"), nor
+    "π" the product sign "Π" or "µm" "ΜM"."""
+    return "".join(c if ("\u0370" <= c <= "\u03ff" or "\u1f00" <= c <= "\u1fff" or c == "\u00b5")
+                   else c.upper() for c in s)
+
+
 def build_pdf(guide, language, out_filename="study_guide"):
     if not isinstance(guide, dict):
         guide = {}
@@ -5049,7 +5057,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
     # ── Header ────────────────────────────────────────────────────────────────
     raw_title = str(guide.get("title") or "Study Guide")
     hdr = Table([
-        [P(raw_title.upper() if not is_ar else raw_title, ST["h_title"])],
+        [P(_heading_upper(raw_title) if not is_ar else raw_title, ST["h_title"])],
         [P(guide.get("subtitle", "Exam Study Guide"), ST["h_sub"])],
     ], colWidths=[W])
     hdr.setStyle(TableStyle([
@@ -5124,7 +5132,7 @@ def build_pdf(guide, language, out_filename="study_guide"):
         # Upper-case BEFORE T()/P(): T() returns markup (&amp;, <font face="Symbol">)
         # that must not be upper-cased.
         sec_hdr = Table(
-            [[P(_st_raw if is_ar else _st_raw.upper(), ST["sec_title"],
+            [[P(_st_raw if is_ar else _heading_upper(_st_raw), ST["sec_title"],
                 prefix=f"{L['sec_bullet']}{idx} · ")]],
             colWidths=[W]
         )
