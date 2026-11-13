@@ -4037,10 +4037,23 @@ def _enc_ok(ch, codec):
     except Exception:
         return False
 
+# Characters with meaning that have no Unicode decomposition, so the generic
+# fallback below would DROP them ("N2 + 3H2 ⇌ 2NH3" → "N2 + 3H2  2NH3", "₹500" → "500").
+_PDF_ALT_MAP = {
+    "⇌": "<=>", "⇋": "<=>", "⇄": "<=>", "⇆": "<=>",
+    "₹": "Rs", "₦": "N", "₩": "W", "₱": "P", "₽": "RUB", "₺": "TL", "₪": "ILS",
+    "₫": "VND", "₴": "UAH", "₿": "BTC",
+    "ħ": "h", "ℏ": "h", "Ħ": "H", "Đ": "D", "đ": "d", "Ł": "L", "ł": "l",
+    "ı": "i", "Ŧ": "T", "ŧ": "t",
+    "∥": "||", "∣": "|", "∓": "-/+",
+}
+
 def _pdf_winansi_alt(ch):
     """WinAnsi stand-in for a character neither Helvetica nor Symbol can draw:
-    H₂O → H2O, ﬁ → fi, full-width → ASCII, then accents stripped (ā → a).
-    Emoji etc. become "" - dropped, never boxed."""
+    ⇌ → <=>, ₹ → Rs, H₂O → H2O, ﬁ → fi, full-width → ASCII, then accents
+    stripped (ā → a). Emoji etc. become "" - dropped, never boxed."""
+    if ch in _PDF_ALT_MAP:
+        return _PDF_ALT_MAP[ch]
     alt = _ud.normalize("NFKC", ch)
     if not all(_enc_ok(c, "cp1252") for c in alt):
         alt = "".join(c for c in _ud.normalize("NFKD", ch) if not _ud.combining(c))
