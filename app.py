@@ -4046,7 +4046,15 @@ _PDF_ALT_MAP = {
     "ħ": "h", "ℏ": "h", "Ħ": "H", "Đ": "D", "đ": "d", "Ł": "L", "ł": "l",
     "ı": "i", "Ŧ": "T", "ŧ": "t",
     "∥": "||", "∣": "|", "∓": "-/+",
+    # superscript/subscript minus decompose to U+2212, which neither font has:
+    # dropped, "10⁻⁵" printed as "105" and "m⁻²" as "m²"
+    "⁻": "-", "₋": "-",
 }
+
+# Superscripts Helvetica lacks (⁻ ⁴ ⁿ ...) are drawn raised with <super> in
+# English PDFs: flattened, "10⁻⁵" reads "10-5" and "x⁴" reads "x4". Subscripts
+# stay flat (H₂O → H2O keeps its meaning).
+_PDF_SUPER_TAG = "<super>"
 
 def _pdf_winansi_alt(ch):
     """WinAnsi stand-in for a character neither Helvetica nor Symbol can draw:
@@ -4082,7 +4090,10 @@ def _pdf_latin_markup(s):
             flush(); out.append(esc(ch)); continue
         if _enc_ok(ch, "symbol"):
             sym.append(ch); continue
-        flush(); out.append(esc(_pdf_winansi_alt(ch)))
+        flush()
+        alt = esc(_pdf_winansi_alt(ch))
+        raised = _ud.decomposition(ch).startswith(_PDF_SUPER_TAG)
+        out.append(f"<super>{alt}</super>" if raised and alt else alt)
     flush()
     return "".join(out)
 
